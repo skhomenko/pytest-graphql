@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local agent coordination state (review handoff logs), repository root only
+/tmp/
