@@ -16,16 +16,23 @@ Implementation has not started. `src/` does not exist yet.
 
 | Topic | File |
 |-------|------|
-| Approved v0.1 design | `SPEC.md` |
-| Decisions, spec amendments, build order | `PLAN.md` |
+| Current design decisions | `docs/reference/DESIGN_DECISIONS.md` |
+| Historical v0.1 design baseline | `docs/reference/SPEC.md` |
 | Code review handoff protocol | `docs/reference/CODE_REVIEW_HANDOFF.md` |
 
-Where `SPEC.md` and `PLAN.md` disagree, `PLAN.md` section 2 governs. It records
-31 amendments resolved after the spec was written. Do not implement a spec rule
-that section 2 supersedes.
+`docs/reference/DESIGN_DECISIONS.md` is the design authority. It states current
+rules and nothing else. Where it and `docs/reference/SPEC.md` disagree, the
+decisions document governs. Use the specification for anything the decisions
+document does not cover.
 
-Do not edit `SPEC.md` to match `PLAN.md`. The spec is the historical record of
-the approved design. Amendments accumulate in the plan.
+Do not edit `docs/reference/SPEC.md` to match the decisions document. The
+specification is the record of the approved baseline. A design change is made by
+editing `docs/reference/DESIGN_DECISIONS.md` in place, so that document always
+reads as current rules rather than as a history of corrections.
+
+Tracked source and tests implement both documents. Local planning notes may exist
+outside version control to guide execution. They are never design authority and
+never override these two documents.
 
 ## Code review handoff
 
@@ -58,6 +65,10 @@ Invariants that hold regardless of schema:
 - A coder response records `fixed`, `disputed`, or `deferred` per finding, with
   rationale, modified files, and verification evidence. Only a later review cycle
   can verify a claimed fix.
+- A fix closes the property, not only the cited line. Apply a new invariant to
+  every site it covers in the same cycle, prefer one primitive over repeated
+  inline logic, and self-review the response before appending it. The
+  "Fix completeness" section of the reference has the detail.
 - Never copy secrets, credentials, personal data, or private keys into a log.
 - Chat output stays compact: cycle ID, log path, severity counts, and a one-line
   outcome.
@@ -118,7 +129,7 @@ and release notes, public documentation, site copy, and generated artifacts.
 - Branch names use a type prefix and a short hyphenated description: `feat/`,
   `fix/`, `docs/`, `chore/`, `refactor/`, `test/`, or `security/`.
 - `docs/reference/` is contributor documentation, not published site content.
-  Exclude it from the MkDocs nav and build when the docs milestone lands.
+  Exclude it from the MkDocs nav and build once the documentation site exists.
 - The repository-root `tmp/` is Git-ignored and holds local agent coordination
   state only. The ignore rule is anchored as `/tmp/`, so a nested directory named
   `tmp` elsewhere in the tree stays tracked.
@@ -136,6 +147,6 @@ and release notes, public documentation, site copy, and generated artifacts.
 | `uv run pytest -q` | Run the test suite |
 | `uv build` | Build the distribution |
 
-None of these work yet. Milestone M0 in `PLAN.md` creates the project skeleton.
-Until then, record a mechanical check as `not available yet` rather than skipping
-it silently.
+None of these work yet, because the project skeleton does not exist. Before
+project tooling exists, record a mechanical check as `not available yet` rather
+than skipping it silently.

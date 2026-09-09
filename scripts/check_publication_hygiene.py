@@ -12,7 +12,7 @@ Usage::
 Exit codes: 0 clean, 1 findings reported, 2 usage or read error.
 
 Stdlib only. No third-party dependency and no repository tooling, so it runs
-before milestone M0 lands and on any platform with Python 3.10 or newer.
+before project tooling exists and on any platform with Python 3.10 or newer.
 
 Exemptions are deliberately narrow. A missed violation is a published defect,
 while a false positive costs one code span, so every ambiguous construct is

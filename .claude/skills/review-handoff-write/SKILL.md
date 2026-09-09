@@ -24,8 +24,9 @@ file, not by reading it end to end. Run the deterministic checks listed under
 "Mechanical checks" as commands instead of deciding them by reading.
 
 Apply the "Repository review checklist" in the same reference to the invariants
-the diff can break. Those come from `SPEC.md` and `PLAN.md`. Where the two
-documents disagree, `PLAN.md` section 2 is the authority.
+the diff can break. Those come from `docs/reference/DESIGN_DECISIONS.md` and
+`docs/reference/SPEC.md`. Where the two documents disagree, the decisions
+document is the authority.
 
 ## Relationship to `/code-review`
 
