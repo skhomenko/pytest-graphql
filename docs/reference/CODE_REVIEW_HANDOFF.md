@@ -3,7 +3,7 @@
 > **Status:** Reference runbook for local reviewer-to-coder coordination.
 > **Audience:** agents and contributors. This file is repository documentation,
 > not published site content. Exclude `docs/reference/` from the MkDocs nav and
-> from the built site when the docs milestone (M10) lands.
+> from the built site once the documentation site exists.
 
 Code reviews and their implementation responses use a local, append-only handoff
 log. Reviewers and coders exchange full detail through the log instead of filling
@@ -112,8 +112,8 @@ command can decide. Run the narrowest form that covers the change:
 | Docs (on docs changes) | `uv run mkdocs build --strict` |
 | Publication hygiene | `python3 scripts/check_publication_hygiene.py <paths>` |
 
-Before the tooling exists (milestone M0 has not landed), record the check as
-`not available yet` rather than skipping it silently.
+Before project tooling exists, record the check as `not available yet` rather
+than skipping it silently.
 
 ### Publication hygiene
 
@@ -127,7 +127,7 @@ python3 scripts/check_publication_hygiene.py <paths>
 
 It exits 0 when clean, 1 when it reports findings, and 2 on a usage or read
 error. It needs only Python 3.10 and the standard library, so it works before
-milestone M0 lands and on any platform. Do not substitute an ad hoc `grep`. The
+project tooling exists and on any platform. Do not substitute an ad hoc `grep`. The
 system `grep` on macOS is BSD grep, which rejects `-P` and cannot express these
 patterns.
 
@@ -168,39 +168,44 @@ python3 scripts/check_publication_hygiene.py --self-test
 ```
 
 Run it after any edit to the script. Treat a failure as a blocking defect in the
-check itself. Until milestone M0 creates `tests/`, this is the only regression
-net the scanner has, and the suite should become a pytest case then.
+check itself. Until `tests/` exists, this is the only regression net the scanner
+has, and the suite should become a pytest case then.
 
 The scanner covers text only. Image, PDF, and Office metadata still needs its own
 inspection before publication.
 
 ## Repository review checklist
 
-These are project invariants from `SPEC.md` and `PLAN.md`. Check the ones the
-diff can break. Where the two documents disagree, `PLAN.md` section 2 is the
-authority.
+These are project invariants from `docs/reference/DESIGN_DECISIONS.md` and
+`docs/reference/SPEC.md`. Check the ones the diff can break. Where the two
+documents disagree, the decisions document is the authority. The section named
+after each invariant is where its full statement lives.
 
-- **Core stays pytest-free (D1).** No pytest import outside
+- **Core stays pytest-free (Product boundaries).** No pytest import outside
   `src/pytest_graphql/plugin/`. Verify by command:
   `grep -rn 'import pytest\|from pytest' src/pytest_graphql/ | grep -v '/plugin/'`
   must print nothing.
-- **Exception naming (D2).** The base class is `GraphQLTestError`, never
-  `GraphQLError`, which belongs to `graphql-core`.
-- **snake_case boundary (D3).** snake_case in, snake_case out. Wire-format keys
-  appear only inside the transport and document-assembly layers.
-- **Deterministic seeding (B1).** No use of the builtin `hash()` for any seed.
-  Python salts it per process. Use the documented SHA-256 derivation.
-- **Bounded state (B3).** The diagnostics recorder and any other accumulating
-  structure must be bounded, default 50 calls.
-- **Name resolution by lookup (B10).** Resolve a snake_case name through the
-  built index. Never regenerate a wire name from a snake name.
-- **Auto-selection rules (A6, B12).** Skip any field with required arguments,
-  scalar fields included. Always emit `__typename` and do not count it against
-  `max_fields`.
-- **No network in unit tests (A8).** The socket guard allows loopback only. A new
-  test that reaches a public host is a finding.
-- **Configuration precedence (A3).** Per-call argument, then CLI flag, then
-  fixture, then environment variable, then ini, then default.
+- **Exception naming (Product boundaries).** The base class is
+  `GraphQLTestError`, never `GraphQLError`, which belongs to `graphql-core`.
+- **snake_case boundary (Product boundaries).** snake_case in, snake_case out.
+  Wire-format keys appear only inside the transport and document-assembly layers.
+- **Deterministic seeding (Selection and deterministic data).** No use of the
+  builtin `hash()` for any seed. Python salts it per process. Use the documented
+  SHA-256 derivation.
+- **Bounded state (Diagnostics and sensitive data).** The diagnostics recorder
+  and any other accumulating structure must be bounded, default 50 calls.
+- **Name resolution by lookup (Configuration and call grammar).** Resolve a
+  snake_case name through the built index. Never regenerate a wire name from a
+  snake name.
+- **Auto-selection rules (Selection and deterministic data).** Skip any field
+  with unsupplied required arguments, scalar fields included. Always emit
+  `__typename` and do not count it against `max_fields`.
+- **No network in unit tests (Compatibility and verification).** The socket
+  guard allows loopback only. A new test that reaches a public host is a
+  finding.
+- **Configuration precedence (Configuration and call grammar).** Per-call
+  argument, then CLI flag, then fixture, then environment variable, then ini,
+  then default.
 
 ## Reviewed-content fingerprint
 
@@ -295,6 +300,29 @@ Severity guide for this repository:
   changed behavior.
 - `P3` clarity, naming, or documentation.
 
+## Fix completeness
+
+A finding names one site. The defect is usually a property. Before appending a
+response, close the property, not the line:
+
+- **Sweep every site the invariant covers.** When a fix establishes a rule or
+  raises an existing one, search the artifact for sibling sites and correct them
+  in the same cycle. A copy left behind returns as the next cycle's finding.
+- **Prefer one named primitive to repeated inline logic.** Cleanup sweeps,
+  unwinding, and ownership transfer belong in a single routine that every caller
+  uses. A later correction then lands in one place.
+- **Test the cross product, not one case per path.** Where failure kinds can
+  combine, such as an ordinary error together with an interrupt, exercise both
+  orders.
+- **Self-review before appending.** Re-read what you just wrote as the next
+  reviewer would, and probe your own new code blocks. A defect introduced by a
+  fix is indistinguishable, to the next cycle, from one that was missed.
+
+A design change is written into `docs/reference/DESIGN_DECISIONS.md` in place,
+as one current rule. Never append a correction beside the rule it corrects.
+Layered corrections are review surface: every later reviewer has to rebuild the
+current rule from superseded bullets and corrected tables.
+
 ## Coder response schema
 
 Append responses at the end of the file. Never insert them into or edit the
@@ -326,10 +354,11 @@ later response. Only a new review cycle can verify a claimed fix.
 
 ## Design-document reviews
 
-Before `src/` exists, reviews target `SPEC.md`, `PLAN.md`, and repository
-configuration. The protocol is unchanged, with three adjustments:
+Before `src/` exists, reviews target `docs/reference/DESIGN_DECISIONS.md`,
+`docs/reference/SPEC.md`, and repository configuration. The protocol is
+unchanged, with three adjustments:
 
-- Use the `working-tree` fingerprint mode, because both documents are untracked
+- Use the `working-tree` fingerprint mode when a reviewed document is untracked
   or freshly added.
 - Record `not available yet` for lint, type, and test checks.
 - Always run the publication-hygiene check. Both documents are published text
