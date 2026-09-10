@@ -1,0 +1,7 @@
+#!/bin/sh
+# pytest-graphql applypatch-msg hook. Thin dispatcher.
+# Git runs this for "git am", before the patch touches the index. It is the
+# first hook on that path, so a refusal here imports nothing.
+# The checks live in scripts/git_hook_checks.py, which is self-tested.
+set -eu
+exec python3 "$(git rev-parse --show-toplevel)/scripts/git_hook_checks.py" applypatch-msg "$1"

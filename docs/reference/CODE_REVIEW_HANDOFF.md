@@ -318,6 +318,18 @@ response, close the property, not the line:
   reviewer would, and probe your own new code blocks. A defect introduced by a
   fix is indistinguishable, to the next cycle, from one that was missed.
 
+State the property before editing code, and record it in the response as the
+`Property` field. Write it as a general rule about the artifact, never as the
+reviewer's example. "The column limit must be measured on every line the tool
+may commit" is a property. "The scissors bar case is now handled" is the cited
+line wearing a different name. If the property cannot be written without naming
+the reviewer's example, the property is not understood yet.
+
+Record the search for its other sites as the `Sweep` field: the command run, the
+sites it returned, and what happened to each. An empty sweep is a valid result
+and is written as the command with no matches. A `fixed` finding without a
+property and a sweep hides an unfixed sibling site, and the next cycle finds it.
+
 A design change is written into `docs/reference/DESIGN_DECISIONS.md` in place,
 as one current rule. Never append a correction beside the rule it corrects.
 Layered corrections are review surface: every later reviewer has to rebuild the
@@ -339,14 +351,20 @@ original cycle:
 
 ### Finding `<finding-id>`: `fixed|disputed|deferred`
 
+- Property: `<the general rule this finding is one instance of, or None>`
 - Rationale: `<what changed or why the finding is challenged or deferred>`
 - Modified files: `<paths or None>`
+- Sweep: `<the search for other sites, the command, its result, or None>`
 - Verification: `<commands or evidence and results>`
 
 ### Remaining risk
 
 `<risk, blocker, or None>`
 ```
+
+`Property` and `Sweep` are required for every `fixed` finding and are written
+`None` for `disputed` and `deferred`. A response that marks a finding `fixed`
+without both fields is malformed, exactly like one without `Verification`.
 
 A partial response disposes only the findings it lists. `fixed` and `disputed`
 are final coder dispositions for that response. `deferred` remains eligible for a

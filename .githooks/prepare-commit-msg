@@ -1,0 +1,11 @@
+#!/bin/sh
+# pytest-graphql prepare-commit-msg hook. Thin dispatcher.
+# Git runs this on every path that creates a commit, including a cherry-pick and
+# a revert, which run no other hook. It checks branch policy, and it records the
+# message as git wrote it, before an editor can add the author's text. That
+# recording is what lets commit-msg tell git's own template from typed text.
+# Git passes the message file, and sometimes a source and a commit, so every
+# argument is forwarded unchanged.
+# The checks live in scripts/git_hook_checks.py, which is self-tested.
+set -eu
+exec python3 "$(git rev-parse --show-toplevel)/scripts/git_hook_checks.py" prepare-commit-msg "$@"
