@@ -2,7 +2,10 @@
 """Git hook checks for pytest-graphql.
 
 Enforces the mechanical subset of the hard rules in ``AGENTS.md`` at commit
-time. It checks policy, not code quality. Lint, type checking and tests stay in
+time. ``AGENTS.md`` states the rules. ``COMMIT_MESSAGE_RULES.md`` under
+``docs/reference/`` states how a commit message line is measured, and
+``GIT_HOOKS.md`` beside it describes the hooks themselves. This checks policy,
+not code quality. Lint, type checking and tests stay in
 the handoff mechanical checks and in CI, so this stays fast enough to run on
 every commit.
 
@@ -56,9 +59,10 @@ to be and each closes a real bypass:
   it or correct it, and ``full`` stopped being the verbatim view its own
   docstring described. Splitting now returns the line as written, so a line is
   measured as ``--cleanup=verbatim`` would store it. The cost is on the record
-  in ``AGENTS.md``: an edited subject padded past the limit with trailing
-  whitespace is refused even though git's default cleanup would have trimmed
-  it, and the refusal names the trailing whitespace so the author can see it.
+  in ``COMMIT_MESSAGE_RULES.md``: an edited subject padded past the limit
+  with trailing whitespace is refused even though git's default cleanup would
+  have trimmed it, and the refusal names the trailing whitespace so the author
+  can see it.
 
   One step earlier than both of those is where the input arrives. A definition
   can only be exact about a value the program still holds. ``errors="replace"``
@@ -128,13 +132,14 @@ to be and each closes a real bypass:
   Two further exemptions are declarations rather than measurements. Four
   leading spaces and a closed fenced block both say "this text is preformatted,
   rewrapping it would change it", and both markers are documented in
-  ``AGENTS.md`` together with what they cost. Fences are parsed by the one
-  parser this repository has, in ``check_publication_hygiene``, so a fence
+  ``COMMIT_MESSAGE_RULES.md`` together with what they cost. Fences are parsed
+  by the one parser this repository has, in ``check_publication_hygiene``, so a
+  fence
   closes here on the same terms it closes there. A merge, a revert or an
   autosquash subject is excused from the conventional form alone, and that is
   the last rule that reads a shape to decide who wrote something. Its cost is
-  stated in ``AGENTS.md``: those subjects are the ones git generates, and their
-  bodies follow the same layout rules as any other body.
+  stated in ``COMMIT_MESSAGE_RULES.md``: those subjects are the ones git
+  generates, and their bodies follow the same layout rules as any other body.
 
 - Protected-branch policy has no exception for a merge, a cherry-pick, a
   revert or a mailed patch, and it runs on every path that creates a commit.
@@ -200,6 +205,13 @@ COMMIT_TYPES = (
 SUBJECT_MAX = 72
 BODY_MAX = 72
 
+# The rule an author must know before committing is in AGENTS.md: a subject at
+# or under 72 characters, a body wrapped at 72, and two exemptions. How a line
+# is measured, and how each exemption is earned and lost, is in the reference
+# below. A refusal about a measurement names the reference rather than
+# AGENTS.md, so the detail arrives at the moment it is needed.
+COMMIT_RULES_DOC = "docs/reference/COMMIT_MESSAGE_RULES.md"
+
 SUBJECT_RE = re.compile(
     r"^(?:" + "|".join(COMMIT_TYPES) + r")(?:\([a-z0-9][a-z0-9._/-]*\))?!?: \S"
 )
@@ -221,7 +233,8 @@ NON_BREAKING_SPACES = "\u00a0\u2007\u202f"
 
 # The documented marker for preformatted text in a commit body: four leading
 # spaces, the same marker Markdown uses for an indented code block. It is an
-# author declaration, not a measurement, and AGENTS.md states its cost.
+# author declaration, not a measurement, and COMMIT_MESSAGE_RULES.md
+# states its cost.
 INDENT_MARKER = "    "
 
 # Anchored at column zero, because a Git trailer is. A diff line carries a
@@ -280,6 +293,7 @@ SECRET_PREFIXES = (".env.", "id_dsa", "id_ecdsa", "id_ed25519", "id_rsa")
 LOCAL_ONLY_FILES = {"IMPLEMENTATION_PLAN.md", "PLAN.md"}
 
 SPEC_PATH = "docs/reference/SPEC.md"
+DECISIONS_PATH = "docs/reference/DESIGN_DECISIONS.md"
 
 
 def enabled(name: str) -> bool:
@@ -379,8 +393,9 @@ def message_lines(text: str) -> list[str]:
     ending, so dropping it is decoding, not cleanup. The lenience is exactly
     one character: a second carriage return, or a carriage return with a space
     beside it, is content and is measured. Its cost is on the record in
-    ``AGENTS.md``: under ``--cleanup=verbatim`` git stores that carriage
-    return, so a 72-character line in a CRLF file is stored as 73 and accepted.
+    ``COMMIT_MESSAGE_RULES.md``: under ``--cleanup=verbatim`` git stores that
+    carriage return, so a 72-character line in a CRLF file is stored as 73 and
+    accepted.
     """
     lines = text.split("\n")
     if lines and not lines[-1]:
@@ -596,8 +611,7 @@ def check_path(path: str, *, present: bool) -> list[str]:
     if path == SPEC_PATH and not enabled("PYTEST_GQL_ALLOW_SPEC_EDIT"):
         problems.append(
             f"refusing to commit a change to {path!r}: the specification is the "
-            "historical record. A design change is made in "
-            "docs/reference/DESIGN_DECISIONS.md."
+            f"historical record. A design change is made in {DECISIONS_PATH}."
         )
 
     if not present:
@@ -881,8 +895,9 @@ def wrappable(line: str) -> bool:
     Two exemptions above it are author declarations rather than measurements.
     An indented line and a closed fenced block say "this text is preformatted,
     rewrapping it would change it", and the repository documents both markers
-    in ``AGENTS.md``. The cost is on the record there: four leading spaces turn
-    the column limit off for that line, exactly as a fence does for its block.
+    in ``COMMIT_MESSAGE_RULES.md``. The cost is on the record there: four
+    leading spaces turn the column limit off for that line, exactly as a fence
+    does for its block.
     """
     if len(line) <= BODY_MAX:
         return False
@@ -929,7 +944,9 @@ def check_subject(subject: str, qualifier: str) -> list[str]:
     if len(subject) > SUBJECT_MAX:
         problems.append(
             f"subject{qualifier} is {len(subject)} characters. "
-            f"The limit is {SUBJECT_MAX}." + trailing_note(subject, SUBJECT_MAX)
+            f"The limit is {SUBJECT_MAX}."
+            + trailing_note(subject, SUBJECT_MAX)
+            + f" {COMMIT_RULES_DOC} states how a line is measured."
         )
 
     if not SUBJECT_RE.match(subject):
@@ -952,7 +969,10 @@ def check_body(lines: list[str]) -> list[str]:
     so it counts as the body and needs the blank line like any other.
     """
     if len(lines) > 1 and not blank(lines[1]):
-        return ["leave a blank line between the subject and the body."]
+        return [
+            "leave a blank line between the subject and the body. "
+            f"{COMMIT_RULES_DOC} states what counts as blank."
+        ]
 
     return []
 
@@ -1006,7 +1026,10 @@ def check_layout(lines: list[str]) -> list[str]:
         if wrappable(line):
             problems.append(
                 f"body line {number} is {len(line)} characters. "
-                f"Wrap the body at {BODY_MAX}." + trailing_note(line, BODY_MAX)
+                f"Wrap the body at {BODY_MAX}."
+                + trailing_note(line, BODY_MAX)
+                + f" {COMMIT_RULES_DOC} states how a line is measured and"
+                " when one is exempt."
             )
 
     return problems
@@ -1161,7 +1184,7 @@ PATH_CASES: list[tuple[str, str, bool, bool]] = [
     ("local implementation plan is refused", "IMPLEMENTATION_PLAN.md", True, True),
     ("specification change is refused", SPEC_PATH, True, True),
     ("specification deletion is refused", SPEC_PATH, False, True),
-    ("decisions edit is allowed", "docs/reference/DESIGN_DECISIONS.md", True, False),
+    ("decisions edit is allowed", DECISIONS_PATH, True, False),
     ("dotenv is refused", ".env", True, True),
     ("dotenv variant is refused", "config/.env.production", True, True),
     ("dotenv example is allowed", ".env.example", True, False),
@@ -1848,6 +1871,17 @@ MESSAGE_CASES: list[tuple[str, str, bool]] = [
         "feat: add a thing\n# " + "word " * 20 + "\n",
         True,
     ),
+]
+
+
+# A refusal that sends an author to a document has to name that document.
+# MESSAGE_CASES and BRANCH_CASES ask only whether a refusal happened, so
+# deleting a pointer leaves them all passing. These cases assert the pointer
+# itself, one per refusal that carries one.
+POINTER_CASES: list[tuple[str, str, str]] = [
+    ("an overlong subject", "fix: " + "w" * 90, COMMIT_RULES_DOC),
+    ("a body with no blank line above it", "fix: a subject\nbody", COMMIT_RULES_DOC),
+    ("an overlong body line", "fix: a subject\n\n" + "word " * 20, COMMIT_RULES_DOC),
 ]
 
 # A message and the template git recorded for it, taken before an editor could
@@ -3148,6 +3182,29 @@ def self_test() -> int:
         if bool(problems) != expect_problem:
             failures += 1
             print(f"FAIL template/{name}: got {problems}")
+
+    for name, message, pointer in POINTER_CASES:
+        total += 1
+        problems = check_message(message)
+        if not any(pointer in problem for problem in problems):
+            failures += 1
+            print(f"FAIL pointer/{name}: got {problems}")
+
+    # The other two refusals that name a document. The branch rule stayed in
+    # AGENTS.md when the measurement detail moved out, so its refusal still
+    # points there. Both run before the override cases below set the
+    # environment variables that would turn these refusals off.
+    total += 1
+    problems = check_branch("main")
+    if not any("AGENTS.md" in problem for problem in problems):
+        failures += 1
+        print(f"FAIL pointer/a protected branch: got {problems}")
+
+    total += 1
+    problems = check_path(SPEC_PATH, present=True)
+    if not any(DECISIONS_PATH in problem for problem in problems):
+        failures += 1
+        print(f"FAIL pointer/the specification guard: got {problems}")
 
     for name, raw in DECODE_CASES:
         total += 1
