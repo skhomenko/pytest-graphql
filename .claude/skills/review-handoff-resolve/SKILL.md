@@ -35,9 +35,19 @@ deployments, external messages, account changes, destructive actions, or
 unrelated refactors. It does not authorize `git push`, a pull request, or a
 commit on `main`.
 
+For every finding you intend to fix, write the property before you edit any
+code. The property is the general rule the finding breaks, stated without the
+reviewer's example. Then search the artifact for the property's other sites and
+fix them in the same response. "Minimal" below means no unrelated refactor. It
+does not mean the cited line alone: a fix that leaves a sibling site open is not
+minimal, it is incomplete, and the next cycle reports it as a new finding. The
+reference's "Fix completeness" section states the rule and the two response
+fields that record it.
+
 For every finding:
 
-- `fixed`: implement the minimal correction and verify it in proportion to risk;
+- `fixed`: state the property, sweep its other sites, implement the correction,
+  and verify it in proportion to risk;
 - `disputed`: make no code change for that finding and give concrete evidence and
   reasoning;
 - `deferred`: explain the blocker, dependency, or explicit scope decision and
@@ -57,10 +67,12 @@ requires a later review cycle.
 
 At the end of the log, append the exact response schema from
 `docs/reference/CODE_REVIEW_HANDOFF.md`. Include the responder, UTC timestamp,
-current HEAD and working-tree state, then one entry per finding with disposition,
-rationale, modified files, and verification evidence. Include remaining risks or
-blocked work. Re-read the log tail immediately before appending so concurrent
-entries are preserved.
+current HEAD and working-tree state, then one entry per finding with
+disposition, property, rationale, modified files, sweep and verification
+evidence. `Property` and `Sweep` are required on every `fixed` finding and are
+written `None` on `disputed` and `deferred`. Include remaining risks or blocked
+work. Re-read the log tail immediately before appending so concurrent entries
+are preserved.
 
 ## Chat handoff
 

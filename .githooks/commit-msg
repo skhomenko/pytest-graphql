@@ -1,0 +1,5 @@
+#!/bin/sh
+# pytest-graphql commit-msg hook. Thin dispatcher.
+# The checks live in scripts/git_hook_checks.py, which is self-tested.
+set -eu
+exec python3 "$(git rev-parse --show-toplevel)/scripts/git_hook_checks.py" commit-msg "$1"

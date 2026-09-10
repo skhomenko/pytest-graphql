@@ -1,0 +1,6 @@
+#!/bin/sh
+# pytest-graphql pre-merge-commit hook. Thin dispatcher.
+# Git runs this for a merge that does not conflict, where pre-commit never runs.
+# The checks live in scripts/git_hook_checks.py, which is self-tested.
+set -eu
+exec python3 "$(git rev-parse --show-toplevel)/scripts/git_hook_checks.py" pre-merge-commit

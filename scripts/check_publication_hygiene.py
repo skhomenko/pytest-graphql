@@ -83,6 +83,11 @@ HTML_COMMENT = re.compile(re.escape("<!" + "--"))
 # CommonMark treats four spaces as an indented code block, not a fence.
 FENCE_OPEN = re.compile(r"^ {0,3}(?P<char>`{3,}|~{3,})(?P<info>.*)$")
 
+# The line endings a text document has: a line feed, a carriage return, or the
+# two together. That is the whole list in CommonMark and in every renderer this
+# repository publishes through.
+LINE_ENDING = re.compile(r"\r\n|\r|\n")
+
 
 class Finding(NamedTuple):
     path: str
@@ -123,6 +128,12 @@ def closes_fence(line: str, fence: Fence) -> bool:
 
     The closing run must use the same character, be at least as long as the
     opening run, and carry no info string.
+
+    "No info string" means spaces and tabs only, which is the whole list
+    CommonMark allows after a closer. ``str.strip`` allows Unicode whitespace
+    as well, so a non-breaking space after a closer read as a close here and as
+    an info string to a renderer. That exempted more text than the rendered
+    document does.
     """
     match = FENCE_OPEN.match(line)
     if match is None:
@@ -130,7 +141,7 @@ def closes_fence(line: str, fence: Fence) -> bool:
     marker = match.group("char")
     if marker[0] != fence.char or len(marker) < fence.length:
         return False
-    return match.group("info").strip() == ""
+    return match.group("info").strip(" \t") == ""
 
 
 def mask_code_spans(line: str) -> str:
@@ -248,11 +259,29 @@ def scan_visible(path: str, visible: str, number: int) -> list[Finding]:
     return findings
 
 
+def document_lines(text: str) -> list[str]:
+    """The lines of a text document, split where a document ends a line.
+
+    A document ends a line at a line feed, a carriage return, or the two
+    together, and nowhere else. Python's ``splitlines`` ends one at eleven
+    further characters, among them the form feed, the vertical tab, U+0085,
+    U+2028 and U+2029. A renderer treats those as content inside a line, so
+    splitting on them invents line starts that no reader will ever see, and a
+    fence opener is only a fence at the start of a real line. That let a form
+    feed open a fenced block in the middle of a line and exempt everything
+    below it from the visible checks.
+    """
+    lines = LINE_ENDING.split(text)
+    if lines and not lines[-1]:
+        lines.pop()
+    return lines
+
+
 def scan_text(path: str, text: str, *, markdown: bool) -> list[Finding]:
     findings: list[Finding] = []
     fence: Fence | None = None
 
-    for number, line in enumerate(text.splitlines(), start=1):
+    for number, line in enumerate(document_lines(text), start=1):
         findings.extend(scan_hidden(path, line, number))
 
         if not markdown:
@@ -279,7 +308,9 @@ def scan_path(path: Path) -> list[Finding]:
     if b"\x00" in raw:
         return []  # binary, not a text artifact
     markdown = path.suffix.lower() in MARKDOWN_SUFFIXES
-    return scan_text(str(path), raw.decode("utf-8", errors="replace"), markdown=markdown)
+    return scan_text(
+        str(path), raw.decode("utf-8", errors="replace"), markdown=markdown
+    )
 
 
 SELF_TEST_CASES: list[tuple[str, str, bool, list[str]]] = [
@@ -324,10 +355,58 @@ SELF_TEST_CASES: list[tuple[str, str, bool, list[str]]] = [
         [],
     ),
     ("longer closing run closes", f"```\ncode\n````\n{EM_DASH}", True, ["em-dash"]),
+    (
+        "a non-breaking space after a closer is an info string, not a close",
+        f"```\ncode\n```\u00a0\n{EM_DASH} still inside the block\n```",
+        True,
+        # The invisible character is reported wherever it is. The em dash below
+        # it is not, because the block never closed.
+        ["invisible"],
+    ),
+    (
+        "a space after a closer still closes",
+        f"```\ncode\n```  \n{EM_DASH} visible",
+        True,
+        ["em-dash"],
+    ),
+    (
+        "a form feed does not start a line, so it cannot open a fence",
+        f"text\f```\n{EM_DASH} visible\n```",
+        True,
+        ["em-dash"],
+    ),
+    (
+        "a line separator does not start a line either",
+        f"text\u2028```\n{EM_DASH} visible\n```",
+        True,
+        ["em-dash"],
+    ),
+    (
+        "a carriage return does start a line",
+        f"text\r```\n{EM_DASH}\n```",
+        True,
+        [],
+    ),
+    (
+        "a windows line ending starts one line, not two",
+        f"```\r\ncode\r\n```\r\n{EM_DASH} visible",
+        True,
+        ["em-dash"],
+    ),
     ("unequal backtick runs are literal", f"``a` {EM_DASH} b", True, ["em-dash"]),
     ("unmatched backtick run is literal", f"a ` b {EM_DASH} c", True, ["em-dash"]),
-    ("backticks give no exemption outside markdown", f"`{EM_DASH}`", False, ["em-dash"]),
-    ("fences give no exemption outside markdown", f"```\n{EM_DASH}\n```", False, ["em-dash"]),
+    (
+        "backticks give no exemption outside markdown",
+        f"`{EM_DASH}`",
+        False,
+        ["em-dash"],
+    ),
+    (
+        "fences give no exemption outside markdown",
+        f"```\n{EM_DASH}\n```",
+        False,
+        ["em-dash"],
+    ),
     (
         "hidden character inside a fence is still reported",
         f"```\nx{chr(0x200B)}y\n```",
@@ -348,7 +427,12 @@ SELF_TEST_CASES: list[tuple[str, str, bool, list[str]]] = [
     ("html comment", "<!" + "-- hidden -->", True, ["html-comment"]),
     # Assembled from parts so this file does not contain the tokens it searches
     # for and can pass its own scan.
-    ("tracking parameter", "https://example.com/?" + "utm" + "_source=x", True, ["tracking"]),
+    (
+        "tracking parameter",
+        "https://example.com/?" + "utm" + "_source=x",
+        True,
+        ["tracking"],
+    ),
     ("fbclid parameter", "https://example.com/?" + "fbclid" + "=1", True, ["tracking"]),
     ("clean markdown", "A clean line.\n\n- bullet\n", True, []),
 ]
