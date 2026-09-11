@@ -13,7 +13,8 @@ import socket
 from typing import Any
 
 import pytest
-from conftest import (
+
+from tests.unit.conftest import (
     NonLoopbackSocketError,
     connect_address,
     guarded,
