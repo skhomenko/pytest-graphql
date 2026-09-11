@@ -183,8 +183,12 @@ after each invariant is where its full statement lives.
 
 - **Core stays pytest-free (Product boundaries).** No pytest import outside
   `src/pytest_graphql/plugin/`. Verify by command:
+  `python3 scripts/check_core_purity.py` must exit 0. It parses each module and
+  reports real imports only, including aliased, submodule, `TYPE_CHECKING` and
+  dynamic ones. A text search such as
   `grep -rn 'import pytest\|from pytest' src/pytest_graphql/ | grep -v '/plugin/'`
-  must print nothing.
+  also matches prose in a docstring, so read its output as a pointer, never as
+  a verdict.
 - **Exception naming (Product boundaries).** The base class is
   `GraphQLTestError`, never `GraphQLError`, which belongs to `graphql-core`.
 - **snake_case boundary (Product boundaries).** snake_case in, snake_case out.

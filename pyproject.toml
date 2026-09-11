@@ -1,0 +1,126 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pytest-graphql"
+dynamic = ["version"]
+description = "Schema-aware GraphQL API testing for pytest: fixtures, assertions and clear failure diagnostics."
+readme = "README.md"
+# The upper bound is the compatibility promise in the compatibility section of
+# docs/reference/DESIGN_DECISIONS.md, which is Python 3.10 through 3.14. An
+# installer must not treat an untested future interpreter as supported.
+# Widening this bound is one change that edits that section too.
+requires-python = ">=3.10,<3.15"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Sergii Khomenko" }]
+keywords = ["pytest", "graphql", "testing", "api", "integration"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: Pytest",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Testing",
+    "Typing :: Typed",
+]
+dependencies = [
+    "graphql-core>=3.2,<4",
+    "httpx>=0.27,<1",
+]
+
+# The supported set is Python 3.10 through 3.14 with pytest 7.4 or newer. The CI
+# matrix samples that range; it never narrows it. See the compatibility section
+# of docs/reference/DESIGN_DECISIONS.md.
+[project.optional-dependencies]
+pytest = ["pytest>=7.4"]
+dev = [
+    "pytest>=7.4",
+    "coverage[toml]>=7.4",
+    "mypy>=1.11",
+    "ruff>=0.6",
+]
+
+[project.urls]
+Documentation = "https://skhomenko.github.io/pytest-graphql/"
+Source = "https://github.com/skhomenko/pytest-graphql"
+Changelog = "https://github.com/skhomenko/pytest-graphql/blob/main/CHANGELOG.md"
+Issues = "https://github.com/skhomenko/pytest-graphql/issues"
+
+# Only pytest reads this entry point, so it is inert when pytest is absent.
+[project.entry-points.pytest11]
+graphql = "pytest_graphql.plugin"
+
+[tool.hatch.version]
+path = "src/pytest_graphql/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pytest_graphql"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/scripts",
+    "/CHANGELOG.md",
+    "/CONTRIBUTING.md",
+    "/README.md",
+    "/LICENSE",
+    "/pyproject.toml",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+src = ["src", "tests"]
+# Ruff formats Python code blocks inside Markdown. docs/reference/SPEC.md is the
+# record of the approved baseline and is never edited to match anything else, and
+# the agent contract files are prose, so Markdown stays outside both commands.
+extend-exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = [
+    "A",    # builtin shadowing
+    "ARG",  # unused arguments
+    "B",    # bugbear
+    "C4",   # comprehensions
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # import order
+    "N",    # naming
+    "PTH",  # pathlib
+    "RET",  # return style
+    "RUF",  # ruff rules
+    "SIM",  # simplification
+    "TID",  # tidy imports
+    "UP",   # pyupgrade
+    "W",    # pycodestyle warnings
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["pytest_graphql"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_unreachable = true
+files = ["src"]
+
+[tool.pytest.ini_options]
+minversion = "7.4"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+xfail_strict = true
+
+[tool.coverage.run]
+branch = true
+source = ["pytest_graphql"]
+
+[tool.coverage.report]
+show_missing = true
