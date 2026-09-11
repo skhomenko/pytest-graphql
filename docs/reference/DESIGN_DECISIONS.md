@@ -858,6 +858,12 @@ the table below, one job per row. The table is the CI matrix, not a narrower sup
 `current stable` and `latest prerelease` resolve at install time. Every other value is
 fixed. The Python floor is 3.10 and the pytest floor is 7.4.
 
+The range is a bound in both directions, and `requires-python` declares both ends as
+`>=3.10,<3.15`. A floor alone would let an installer treat an untested future interpreter as
+supported, which says more than this project tests. Classifiers do not constrain an install,
+so they cannot carry the promise. Raising the ceiling is one change that edits this section,
+the metadata and the matrix together.
+
 `current stable` means the newest stable pytest release, whatever its major version. It is
 not pinned to a major. Pinning it would make CI pass while the current pytest major went
 untested. When a new major is released, these rows start testing it at once, and a failure
@@ -879,6 +885,19 @@ documentation states the supported range and, separately, which pairs CI actuall
 A no-pytest job installs without the `pytest` extra, imports the package, builds a client on
 a fake transport, and asserts `pytest` is absent from `sys.modules`. The client half of that
 check applies from the point where a client exists.
+
+### Operating systems
+
+Linux, macOS and Windows are supported, which is what `docs/reference/SPEC.md` section 9
+requires. The table above runs on Linux. Two further blocking jobs run the same test suite on
+macOS and on Windows, each at the newest supported Python with the current stable pytest.
+
+Those two jobs are not rows of the table. The table samples Python and pytest; these jobs
+sample the operating system. Each dimension is sampled on its own, because the cross product
+of the two is not worth its runtime and neither dimension is left untested.
+
+The lint, type, coverage and no-pytest jobs run on Linux only. What they check does not vary
+by operating system.
 
 ### Test constraints
 
@@ -910,6 +929,14 @@ check applies from the point where a client exists.
 
 - Every GitHub Actions step is pinned to a full commit SHA, with the human-readable version
   in a trailing comment. Dependabot updates the pins.
+- The programs that run the build are pinned too, because a digest proves only that the
+  artifact was kept, never that the reviewed program produced it. Every job installs one
+  named uv version rather than the newest release, and the release build runs with the build
+  dependencies in `requirements/build.txt` as constraints, so the backend and its own
+  dependencies are the versions in the tree. `build-system.requires` keeps a range, which is
+  what a consumer building the sdist resolves against. The constraints file is what this
+  project's own release build uses. Dependabot updates that file, and the uv pin moves by
+  commit.
 - Workflow permissions default to `contents: read`. Only the publish job adds
   `id-token: write`, and only the release job adds `contents: write`.
 - The publish job runs in a protected `pypi` environment with a required reviewer.

@@ -1,0 +1,220 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+# Least privilege by default. Only the publish jobs add id-token: write, and
+# only the GitHub release job adds contents: write.
+permissions:
+  contents: read
+
+# The uv release every job runs. See the same pin in test.yml.
+env:
+  UV_VERSION: "0.12.13"
+  PYPI_INDEX: https://pypi.org/simple
+  TESTPYPI_INDEX: https://test.pypi.org/simple
+
+jobs:
+  build:
+    # One build. Every later job consumes this exact artifact set, because a
+    # rebuild between indexes is a different artifact.
+    name: build and check
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Read the version from the tag
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build the wheel and the sdist
+        # The build backend is pinned by requirements/build.txt, so the program
+        # that produces the published artifact is the one in the reviewed tree
+        # and not whatever the range resolves to today.
+        run: uv build --build-constraints requirements/build.txt
+
+      - name: Record a digest for every built file
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          python3 scripts/verify_release.py manifest \
+            --dist dist --out manifest.json --version "$VERSION"
+
+      # Retained before any step that judges these files. A run that fails a
+      # check must still leave the exact artifact set it judged, so the failure
+      # can be inspected without rebuilding it. Nothing is published from this
+      # artifact: every upload job runs its own gate first.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-artifacts
+          path: |
+            dist/
+            manifest.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Artifact checks
+        # The version in the built metadata is __version__, because hatchling
+        # reads it from the package. Comparing that metadata with the tag is
+        # what proves the tag and __version__ agree.
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python3 scripts/check_artifacts.py --dist dist --tag "$TAG"
+          uv run --no-project --with twine twine check --strict dist/*
+
+      - name: Check the changelog has a section for this version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          python3 scripts/changelog_section.py --version "$VERSION" > release-notes.md
+          python3 scripts/check_publication_hygiene.py release-notes.md README.md
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
+          retention-days: 90
+
+  publish-testpypi:
+    # Gated on the repository variable RELEASE_PUBLISH. Before the first release
+    # gate the variable is unset, so the run stops here with the artifact set
+    # built, checked and retained, and nothing is published.
+    name: upload to TestPyPI
+    needs: build
+    if: vars.RELEASE_PUBLISH == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://test.pypi.org/project/pytest-graphql/${{ needs.build.outputs.version }}/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-artifacts
+      - name: Upload
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist
+          print-hash: true
+          attestations: true
+
+  install-back:
+    # Holds no publishing credential. Enumerates the release before it downloads
+    # anything, compares the complete remote file set with the build manifest in
+    # both directions, then installs and tests each artifact in its own clean
+    # environment. Dependencies come from PyPI and the candidate comes from
+    # TestPyPI. The two never share a resolution, and no step ever adds a second
+    # index to one resolution.
+    name: install back from TestPyPI
+    needs: [build, publish-testpypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-artifacts
+          path: built
+
+      - name: Enumerate the release and verify it against the manifest
+        run: |
+          python3 scripts/verify_release.py verify \
+            --index-url "$TESTPYPI_INDEX" \
+            --version "$VERSION" \
+            --manifest built/manifest.json \
+            --download-dir candidate
+
+      - name: Export the locked runtime dependencies
+        run: |
+          uv export --no-emit-project --no-dev --no-hashes \
+            --format requirements-txt > runtime.txt
+          cat runtime.txt
+
+      - name: Install and test the wheel in a clean environment
+        run: |
+          set -euo pipefail
+          uv venv --seed --python 3.12 .venv-wheel
+          .venv-wheel/bin/pip install --index-url "$PYPI_INDEX" -r runtime.txt
+          wheel="$(ls candidate/*.whl)"
+          .venv-wheel/bin/pip install --no-index --no-deps "$wheel"
+          .venv-wheel/bin/python scripts/check_no_pytest.py
+
+      - name: Install and test the sdist in a clean environment
+        run: |
+          set -euo pipefail
+          uv venv --seed --python 3.12 .venv-sdist
+          .venv-sdist/bin/pip install --index-url "$PYPI_INDEX" -r runtime.txt
+          .venv-sdist/bin/pip install --index-url "$PYPI_INDEX" -r requirements/build.txt
+          sdist="$(ls candidate/*.tar.gz)"
+          .venv-sdist/bin/pip install \
+            --no-index --no-deps \
+            --no-build-isolation --check-build-dependencies \
+            "$sdist"
+          .venv-sdist/bin/python scripts/check_no_pytest.py
+
+  publish-pypi:
+    # Uploads the same files TestPyPI verified. Nothing is rebuilt in between.
+    name: upload to PyPI
+    needs: [build, install-back]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/pytest-graphql/${{ needs.build.outputs.version }}/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-artifacts
+      - name: Upload
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist
+          print-hash: true
+          attestations: true
+
+  github-release:
+    name: create the GitHub release
+    needs: [build, publish-pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-artifacts
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-notes
+      - name: Create the release from the changelog section
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --notes-file release-notes.md \
+            dist/*

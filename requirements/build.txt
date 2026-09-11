@@ -1,0 +1,25 @@
+# Locked build dependencies for the release build and the sdist install-back.
+#
+# build-system.requires in pyproject.toml declares a range, so an isolated build
+# resolves whatever hatchling release is newest that day. That makes the program
+# which produces the published artifact float outside the reviewed tree. The
+# release workflow passes this file to `uv build --build-constraints`, so the
+# build that produces the wheel and the sdist uses exactly these versions.
+#
+# The install-back job builds the sdist with build isolation disabled, so the
+# backend has to be present in the environment already. That job installs this
+# same file, which is why the transitive dependencies are pinned too and not
+# only hatchling.
+#
+# Regenerate with:
+#   uv pip compile --universal --python-version 3.10 requirements/build.in \
+#       -o requirements/build.txt
+#
+# Dependabot updates these pins.
+hatchling==1.32.0
+packaging==26.3
+pathspec==1.1.1
+pluggy==1.6.0
+tomli==2.4.1 ; python_full_version < '3.11'
+tomlkit==0.15.1
+trove-classifiers==2026.6.1.19

@@ -1,0 +1,208 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege by default. No job in this workflow widens it.
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# The uv release every job runs. setup-uv installs the newest uv when no
+# version is given, which would let the tool that resolves and builds change
+# without a commit. Bump this with a commit, like any other pin.
+env:
+  UV_VERSION: "0.12.13"
+  UV_PROJECT_ENVIRONMENT: .venv
+
+jobs:
+  purity:
+    # Runs on the standard library alone, so it needs no project environment.
+    # That is also how the no-pytest job and a fresh clone can run it.
+    name: core purity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check that no module outside the plugin package imports pytest
+        run: python3 scripts/check_core_purity.py
+      - name: Self-test the contributor scripts
+        run: |
+          python3 scripts/changelog_section.py --self-test
+          python3 scripts/check_artifacts.py --self-test
+          python3 scripts/check_core_purity.py --self-test
+          python3 scripts/check_publication_hygiene.py --self-test
+          python3 scripts/git_hook_checks.py --self-test
+          python3 scripts/verify_release.py --self-test
+
+  lint:
+    name: lint and types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --all-extras
+      - run: uv run --no-sync ruff check .
+      - run: uv run --no-sync ruff format --check .
+      - run: uv run --no-sync mypy --strict src/
+
+  test:
+    # One job per row of the representative CI matrix in the compatibility
+    # section of docs/reference/DESIGN_DECISIONS.md. The rows are a sample of
+    # the supported range, never a narrower supported set, so the dependency
+    # metadata keeps the full declared range. Adding or removing a row is one
+    # change that edits that table and this file together.
+    name: py${{ matrix.python }} ${{ matrix.label }}
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ !matrix.blocking }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: "3.10"
+            label: pytest 7.4
+            pytest: oldest
+            blocking: true
+          - python: "3.10"
+            label: pytest current
+            pytest: current
+            blocking: true
+          - python: "3.11"
+            label: pytest current
+            pytest: current
+            blocking: true
+          - python: "3.12"
+            label: pytest current
+            pytest: current
+            blocking: true
+          - python: "3.13"
+            label: pytest current
+            pytest: current
+            blocking: true
+          - python: "3.14"
+            label: pytest current
+            pytest: current
+            blocking: true
+          - python: "3.14"
+            label: pytest prerelease
+            pytest: prerelease
+            blocking: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - name: Install the interpreter and the locked environment
+        # Matrix values reach the shell as environment variables rather than as
+        # interpolated script text, so nothing in them can be executed.
+        env:
+          PYTHON: ${{ matrix.python }}
+        run: |
+          uv python install "$PYTHON"
+          uv sync --all-extras --python "$PYTHON"
+      - name: Select the pytest version for this row
+        env:
+          SELECTOR: ${{ matrix.pytest }}
+        run: |
+          case "$SELECTOR" in
+            oldest)
+              uv pip install "pytest==7.4.*"
+              ;;
+            current)
+              uv pip install --upgrade pytest
+              ;;
+            prerelease)
+              uv pip install --prerelease allow --upgrade pytest
+              ;;
+            *)
+              echo "unknown pytest selector: $SELECTOR" >&2
+              exit 1
+              ;;
+          esac
+      - name: Report the resolved versions
+        run: |
+          uv run --no-sync python -c "import sys; print(sys.version)"
+          uv run --no-sync pytest --version
+      - run: uv run --no-sync pytest -q
+
+  platform:
+    # The operating system sample from the compatibility section of
+    # docs/reference/DESIGN_DECISIONS.md. The job above samples Python and
+    # pytest on Linux. These two jobs sample the operating system at the newest
+    # supported Python with the current stable pytest. Adding or removing one is
+    # a change to that section and to this file in the same commit.
+    name: ${{ matrix.os }} py3.14
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - name: Install the interpreter and the locked environment
+        run: |
+          uv python install 3.14
+          uv sync --all-extras --python 3.14
+      - name: Use the current stable pytest
+        run: uv pip install --upgrade pytest
+      - name: Report the resolved versions
+        run: |
+          uv run --no-sync python -c "import sys; print(sys.version)"
+          uv run --no-sync pytest --version
+      - run: uv run --no-sync pytest -q
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --all-extras
+      - run: uv run --no-sync coverage run -m pytest -q
+      # The report is what can fail this job, so the file it judges is written
+      # and retained first. A failed run still leaves the numbers behind.
+      - run: uv run --no-sync coverage xml
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: error
+          retention-days: 14
+      - run: uv run --no-sync coverage report
+
+  no-pytest:
+    # The distribution must be usable without pytest. Per C41 in the build plan
+    # this job does not build a client at this milestone, because no client
+    # exists yet. The client half of the check joins it at M5c.
+    name: install without pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - name: Install the distribution without the pytest extra
+        # This install builds the project, so it uses the same pinned backend as
+        # the release build does.
+        run: |
+          uv venv --python 3.12 .venv-nopytest
+          uv pip install --python .venv-nopytest/bin/python \
+            --build-constraints requirements/build.txt .
+      - name: Import the package and assert pytest is absent
+        run: .venv-nopytest/bin/python scripts/check_no_pytest.py

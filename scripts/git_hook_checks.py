@@ -163,6 +163,7 @@ use ``git commit --no-verify``:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -175,7 +176,7 @@ from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import check_publication_hygiene as hygiene  # noqa: E402
+import check_publication_hygiene as hygiene
 
 PROTECTED_BRANCHES = {"main", "master"}
 
@@ -473,10 +474,8 @@ def recorded_template(message_path: str) -> list[str]:
     except (OSError, ValueError):
         payload = None
     finally:
-        try:
+        with contextlib.suppress(OSError):
             state.unlink(missing_ok=True)
-        except OSError:
-            pass
 
     if not isinstance(payload, dict):
         return []
@@ -1371,7 +1370,8 @@ MESSAGE_CASES: list[tuple[str, str, bool]] = [
     ("clean subject only", "feat: add the selection engine", False),
     (
         "clean subject and body",
-        "fix: reject an unwrapped custom scalar\n\nThe response model wraps a\nJSON scalar object.",
+        "fix: reject an unwrapped custom scalar\n\n"
+        "The response model wraps a\nJSON scalar object.",
         False,
     ),
     ("trailing comment is ignored", "docs: update the readme\n\n# please enter", False),
@@ -3222,7 +3222,8 @@ def self_test() -> int:
     # This case is what says so out loud.
     total += 1
     try:
-        refusal = f"refusing to commit {decode_git(b'note-\xff.md')!r}"
+        raw_name = b"note-\xff.md"
+        refusal = f"refusing to commit {decode_git(raw_name)!r}"
         refusal.encode(sys.stderr.encoding or "utf-8", sys.stderr.errors or "strict")
     except UnicodeEncodeError:
         failures += 1
