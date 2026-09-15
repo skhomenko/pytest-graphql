@@ -100,8 +100,95 @@ always wins. A keyword matching neither set raises `ArgumentError` listing both 
 - `Selection.of(TypeName)` resolves the name against the schema at build time and emits an
   inline fragment. An unknown name raises `SchemaError` with a suggestion. A type that is
   not a possible type of the parent raises.
-- An alias must be unique within its selection set. A duplicate raises. Materialization keys
-  on the alias.
+- An alias must be unique within its selection set. A duplicate raises, even when the two
+  requests would have merged, and a response key written once plain and once as an alias of
+  the same name raises for the same reason. Materialization keys on the alias.
+- Two selections of one response key are compared by a canonical form built from the
+  declared input type and the argument names the caller wrote, so the same request written
+  in different input forms compares equal. An `ID` written `1` and `"1"`, an input object
+  written with its fields in either order or with a default left out, a bare value at a list
+  position and the same value in a one-item list, and a block string and an ordinary string
+  are all the same request.
+- Only scalar and enum values are compared through the schema's own coercion. An input
+  object is walked field by field under the names the caller wrote, because a coerced input
+  object is a Python mapping keyed by `out_name`, which the schema may set freely, and two
+  different requests can share one such mapping.
+- An input field's default is stored already coerced, so it is read under `out_name` and
+  written back under the schema field name. A default that cannot be read that way has no
+  canonical form: the type carries a custom `out_type`, the stored value is not a mapping,
+  it holds a key no declared field claims, or two declared fields store under the same key
+  (a shared `out_name`, or one field's `out_name` colliding with another's schema name), so
+  a stored value under that key cannot be attributed to one field over the other.
+- A value the declared input type rejects has no canonical form either, and the type-level
+  rules count as much as the field-level ones. A one-of input object holds exactly one
+  field and that field is not null; anything else is invalid.
+- A stored default, at any depth, has a canonical form only when rendering it to a literal
+  and coercing that literal back reproduces the exact stored value, in both type and
+  structure, checked once over the whole stored value rather than once per leaf, and checked
+  at every depth reached inside that value rather than only at the type the top-level call
+  was made with. Python's `==` alone is not this check: `1 == 1.0`, and that holds inside a
+  list or a mapping too, so comparing an assembled list or mapping only by `==` misses a
+  nested `Int` default that round-trips to a `Float`, or the reverse. Execution delivers an
+  omitted argument's default exactly as stored, with nothing filled in further at any depth,
+  so a default that round-trips to something else, at any depth, does not describe the same
+  resolver-visible request. That single recursive check is what has to catch every shape the
+  mismatch can take, not a rule stated for each shape: a value the type cannot serialize at
+  all is the same case as any other value with no canonical form, not a raised error; a
+  stored list default is left uncanonical rather than wrapped when it is not already
+  list-shaped, since coercion never turns a bare value into a one-item list the way the
+  literal shorthand does, and a stored tuple or set is left uncanonical for the same reason,
+  since coercion never produces anything but a `list`; a stored object default missing a
+  field is left uncanonical rather than filled from that field's own default, since a stored
+  default is delivered exactly as stored and a literal's own-default filling only ever
+  applies to a literal; a stored `Int` nested under a list or an object is left uncanonical
+  against an explicit `Float` at the same position, and the reverse, since the two are
+  different concrete types even where they are numerically equal; a mapping's own keys carry
+  this same exact type-and-value rule, matched by content rather than position, so a stored
+  key of a `str` subclass is left uncanonical against an explicit plain-`str` key even where
+  the two compare equal and hash alike. This check never trusts a value's own `__eq__` or
+  `__hash__` to decide sameness, because a caller-controlled `str` subclass, such as one used
+  as an input field's `out_name`, can override both so that two different payloads compare
+  and hash equal to each other. It also never trusts `isinstance` to recognize a shape,
+  because a subclass defeats content matching in a second way that has nothing to do with an
+  overridden `__eq__`: it can carry its own extra instance state that the base
+  implementation never inspects, so two instances sharing a base payload but holding
+  different attached state, such as a custom scalar's parsed value paired with a hidden tag,
+  would still compare equal even with no override at all. So each recognized shape is
+  recognized only when a value's concrete type *is* that exact builtin, never a subclass of
+  it, and a subclass of any of them is treated the same as a wholly unrecognized type. A
+  plain `str` is compared through the base `str` implementation directly, reaching the real
+  payload no override can hide, and a mapping's keys are matched against that same content
+  check rather than through a `dict` keyed by the operands' own keys, since building or
+  indexing such a `dict` is exactly the trust in the override this rule removes. This never
+  trusts a fallback `==` for any other shape either: `bool`, `int`, `float`, and `bytes` are
+  each recognized only as that exact type and compared through that builtin's own
+  implementation, the same override-proof and state-proof pattern as `str`. A `float`
+  carries one further correction beyond exact-type matching: plain `float.__eq__` calls
+  `0.0` and `-0.0` equal, but the two carry a different sign a custom scalar's own
+  serializer is free to print, so two `float` operands are matched by value and by the sign
+  of zero together. A `dict` is recognized only as that exact concrete type and compared by
+  its own `items`, never a `Mapping` subclass more broadly, and `tuple` and `list` are each
+  recognized only as that exact concrete type and compared elementwise by recursion, never
+  through their own `__eq__`, `__len__`, or iteration: a container subclass can override
+  exactly those operations to present a fabricated view that agrees for two instances whose
+  real backing content differs, the same trust problem for a container that an overridden
+  `__eq__` is for a scalar. A value of any other type, or a subclass of any of the recognized
+  ones, such as an opaque object a custom scalar's coercion returns, has no known base
+  implementation to compare through, so it is never proven equal by content. Two
+  independently produced values of such a type compare equal only when they are the same
+  object, since identity is the one override-proof and state-proof test available for an
+  arbitrary type; a custom scalar whose output does not match a recognized shape exactly is
+  therefore left uncanonical even when its own equality would call two values the same, and
+  even when the two values are in fact interchangeable, because there is no way to verify
+  that without trusting a subclass's own overridable or unobserved behavior.
+- A value with no canonical form is compared as written. That covers a literal that refers
+  to a variable, whose meaning belongs to its own document, and every invalid value: an
+  undeclared or repeated input field, a missing required field, a one-of object that breaks
+  its own rule, and a value the declared type cannot coerce. Invalid text is validation's
+  finding to report, so it has to reach validation as the caller wrote it rather than be
+  normalized away here. A Python value with no canonical form therefore never compares
+  equal to a written literal with none, because merging the two would keep only one of
+  them.
 - `+` unions selections recursively. Two fields sharing a response key but differing in
   arguments or alias conflict and raise. `-` removes by response key, or by dotted path when
   given a path string. Removing a name that is not present raises, so a renamed field cannot
@@ -220,9 +307,15 @@ wants a shallow client sets `SelectionPolicy(max_depth=1)` once.
   marked as not to be used, so it is the most likely to be slow or backed by a compatibility
   shim. A test that needs one asks with `fields=`.
 - A field whose unwrapped return type is a Relay connection is expanded only when the field
-  accepts a page-size argument. Auto-selection then supplies `first: connection_page_size`
-  as a generated variable, default 10, unless the caller already supplied one. A connection
-  field with no page-size argument is skipped.
+  accepts a page-size argument of type `Int` or `Int!`. Auto-selection then supplies
+  `first: connection_page_size` as one generated variable declared `Int!`, default 10,
+  unless the caller already supplied one. The declaration is non-null because the engine
+  always sends a value, and a non-null `Int` is accepted at both argument shapes. A
+  connection field whose page-size argument has any other shape cannot be expanded, because
+  one variable of one declared type cannot be valid there. Auto-selection skips such a
+  field, and a caller who names it and asks for `AUTO` gets an error. Supplying `first`
+  does not change that: the caller's own page size chooses the value, not whether the field
+  can be bounded at all.
 - `max_union_members`, default 10, caps how many implementations of one interface or union
   are expanded. Members past the cap collapse to `__typename` plus `id` when the type has
   one.
@@ -236,10 +329,46 @@ Any field with at least one required argument, meaning non-null with no default,
 no value was supplied, is skipped, whatever its return type. Skipping only composite fields
 would emit a scalar field without its required argument and produce an invalid document.
 
+Every automatic omission is recorded and surfaced in diagnostics, not only this one. Seven
+reasons drop a field: a required argument with no supplied value, a deprecated field, a
+connection with no page-size argument, the connection-depth limit, the depth limit, the
+cycle policy, and `should_include`. Selection normalization returns a structured record for
+each, carrying the parent type, the field path relative to its scope, and the reason, and
+never an argument value. Diagnostics prefixes those relative paths when it composes a nested
+or cached automatic selection, so a reader sees the field's position in the finished
+document. The records are bounded on their own, because a skipped field is not counted by
+`max_fields`: the first 50 in traversal order are retained, the total is tracked, and the
+number omitted is reported visibly.
+
 `__typename` is emitted on every object selection, not only on interfaces and unions, and it
 does not count against `max_fields`. Explicit `fields=` adds nothing, so `Node.__typename__`
 is `None` there unless the user asked for it. A matcher checks the type name only when the
 response object carries one.
+
+`AUTO` is a scope. Every policy value that describes a position is relative to the generated
+selection it appears in, never to the document that contains it:
+
+- Each `AUTO` starts a new scope. `max_depth`, `per_type_depth_cap`, the cycle ancestors and
+  the position arguments of `should_include` are all measured from that scope's root.
+- Fields at a scope root receive `path=()` and `depth=0`.
+- A path holds GraphQL field names. An inline fragment adds no component, because a fragment
+  is not a field. The generated variable names derived from a field path follow the same
+  rule.
+- An explicit prefix above an `AUTO` does not consume depth, does not become a cycle
+  ancestor and does not contribute to connection depth.
+- A scope whose own root type is a Relay connection starts at connection depth 1, so asking
+  for `AUTO` at a connection type cannot reset the nesting cap.
+- An explicit selection can therefore make the finished document deeper than `max_depth`.
+  That is intended: explicit selections belong to the caller, and `max_depth` caps
+  auto-selection.
+
+This is what keeps a reusable `Selection` meaning the same thing wherever it is inserted, and
+what keeps the memoization key below at `(type name, policy fingerprint)` and nothing else.
+
+`max_fields` runs the other way, because it guards document size rather than traversal. It
+counts the complete normalized selection: every explicit field, plus every field of every
+nested or sibling `AUTO`, excluding `__typename`. A generated selection carries its own field
+count so that a cached entry can be composed into a larger selection without rebuilding it.
 
 The default numeric limits above, along with `max_fields`, `max_depth` and `cycle_policy`,
 are validated against a checked-in corpus of introspection documents captured from real
@@ -271,6 +400,13 @@ when a policy reads mutable external state. Both produce a silently wrong select
 Building fresh costs time and not correctness, because the limits above bound every
 traversal. A custom policy opts back into caching by overriding `fingerprint`, and the value
 must cover every input its decisions depend on, including external state.
+
+That invitation is also what makes the cache unbounded if nothing bounds it: a policy whose
+fingerprint covers state that changes per test produces a new key on every build. Each
+builder's memo is therefore a least-recently-used cache capped at 128 entries. Eviction
+affects performance only, by the same argument as above, because the limits bound every
+traversal. The bound is internal: it is not a `SelectionPolicy` field, not a user-facing
+setting, and not one of the numbers the calibration gate measures.
 
 ### Deterministic data
 

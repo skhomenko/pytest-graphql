@@ -59,6 +59,11 @@ Use review-quality file and line references. Do not create generic security or
 hardening findings unrelated to the change. If no actionable findings exist,
 append a clean cycle with the verification and residual-risk statement.
 
+Separate the observed failure, root cause, impact, and recommended resolution.
+Record an evidence-backed root cause and correction when established. Write
+`Not established` for either one rather than speculate; an evidenced defect does
+not become unactionable because the reviewer has not completed its diagnosis.
+
 Re-read the log tail immediately before the final append. Preserve any concurrent
 entry and choose a new cycle suffix if another reviewer used the intended ID.
 
