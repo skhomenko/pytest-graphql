@@ -32,6 +32,16 @@ These hold regardless of schema:
 - Every cycle records its scope, the verification performed, and a security
   assessment. A clean review still appends a cycle stating that no findings were
   found.
+- When a reviewer establishes a finding's root cause, record the evidence-backed
+  mechanism and responsible site or sites separately from the observed failure
+  and the recommended resolution. If the root cause is not established, say so
+  instead of speculating. A demonstrated defect remains actionable without a
+  known root cause.
+- A review cycle does not authorize source changes. Once the user asks to fix,
+  address, or resolve its findings, that request authorizes the resolver to
+  diagnose them and make the minimal in-repository corrections. A missing
+  reviewer root cause or recommended resolution is not a reason to pause or ask
+  for separate fix instructions.
 - A review is scoped to the diff under review plus the paths it directly affects.
   Do not re-derive a pre-existing condition that an earlier cycle already
   reported. Reference its finding ID instead.
@@ -39,6 +49,12 @@ These hold regardless of schema:
   with rationale, modified files, and verification evidence. Do not alter the
   original finding and do not claim that a fix is reviewer-verified. Only a later
   review cycle can verify a claimed fix.
+- A recommended resolution is non-binding. The coder response states whether it
+  accepts or corrects the reviewer's root-cause analysis and whether it adopts
+  the recommendation. A different implementation approach is not a dispute of
+  the demonstrated defect, but its rationale must be recorded. If the reviewer
+  cannot support a recommendation yet, record `Not established` instead of
+  speculating.
 - Never copy secrets, credentials, personal data, private keys, or unnecessary
   proprietary content into a review log.
 - Chat output stays compact: cycle ID, log path, severity counts, and a one-line
@@ -279,8 +295,9 @@ Append exactly one cycle for every review iteration, including a clean review:
 
 - Status: `unresolved`
 - Evidence: `<path:line and concrete observation>`
+- Root cause: `<established mechanism and responsible sites, or Not established>`
 - Impact: `<why it matters>`
-- Recommended resolution: `<minimal correction>`
+- Recommended resolution: `<minimal correction, or Not established>`
 
 ### Verification
 
@@ -293,6 +310,19 @@ Append exactly one cycle for every review iteration, including a clean review:
 
 Repeat the finding section in severity order. For a clean cycle, omit finding
 sections and write `Result: no findings`.
+
+Keep the finding's four concepts distinct:
+
+- `Evidence` demonstrates the failure or violated invariant.
+- `Root cause` explains why it occurs and where responsibility lies. Record
+  `Not established` when the review has not proved that explanation.
+- `Impact` states the consequence.
+- `Recommended resolution` proposes a correction without prescribing the
+  coder's implementation. Record `Not established` when the reviewer cannot
+  yet support one.
+
+Do not withhold an evidence-backed finding merely because its root cause remains
+unknown. Conversely, do not present a suspected mechanism as established fact.
 
 Severity guide for this repository:
 
@@ -308,6 +338,13 @@ Severity guide for this repository:
 
 A finding names one site. The defect is usually a property. Before appending a
 response, close the property, not the line:
+
+- **Establish the cause before editing product code.** Independently reproduce
+  or otherwise validate the defect, then identify the mechanism that produces
+  it. The reviewer's analysis is evidence to assess, not a diagnosis to copy.
+  If the cause cannot be established after safe in-scope investigation, do not
+  claim the finding is fixed; dispute it with evidence or defer it with the
+  remaining blocker.
 
 - **Sweep every site the invariant covers.** When a fix establishes a rule or
   raises an existing one, search the artifact for sibling sites and correct them
@@ -356,6 +393,8 @@ original cycle:
 ### Finding `<finding-id>`: `fixed|disputed|deferred`
 
 - Property: `<the general rule this finding is one instance of, or None>`
+- Root-cause assessment: `<accepted, corrected with evidence, established, or not established>`
+- Resolution approach: `<recommendation adopted, or alternative and rationale, or None>`
 - Rationale: `<what changed or why the finding is challenged or deferred>`
 - Modified files: `<paths or None>`
 - Sweep: `<the search for other sites, the command, its result, or None>`
@@ -366,9 +405,27 @@ original cycle:
 `<risk, blocker, or None>`
 ```
 
-`Property` and `Sweep` are required for every `fixed` finding and are written
-`None` for `disputed` and `deferred`. A response that marks a finding `fixed`
-without both fields is malformed, exactly like one without `Verification`.
+`Property`, `Root-cause assessment`, `Resolution approach`, and `Sweep` are
+required for every `fixed` finding. Its `Root-cause assessment` must accept,
+correct, or establish the cause with evidence; `not established` is invalid for
+a `fixed` disposition. Its `Resolution approach` must name the chosen correction
+and cannot be `None`. `Property` and `Sweep` are written `None` for `disputed`
+and `deferred`; `Resolution approach` is written `None` when no implementation
+was performed. `Root-cause assessment` remains substantive for every
+disposition, but may state that the cause remains unestablished for a dispute or
+deferral. A response that marks a finding `fixed` without all four valid fields
+is malformed, exactly like one without `Verification`.
+
+Once resolution has been requested, an absent reviewer recommendation is not a
+blocker and does not require another user instruction. The resolver chooses the
+correction after establishing the cause. Choosing a different resolution does
+not by itself make the finding `disputed`: dispute the finding only when the
+demonstrated defect or its severity is challenged.
+
+These fields apply to cycles and responses appended after this rule was adopted.
+Earlier append-only entries remain valid and must not be rewritten. When
+responding to an earlier finding that has no `Root cause` field, state in
+`Root-cause assessment` whether the response establishes one.
 
 A partial response disposes only the findings it lists. `fixed` and `disputed`
 are final coder dispositions for that response. `deferred` remains eligible for a

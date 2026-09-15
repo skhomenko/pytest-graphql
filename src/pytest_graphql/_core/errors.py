@@ -135,6 +135,20 @@ class SelectionError(GraphQLClientError):
         """Wrap a graphql-core document-validation message, verbatim."""
         return cls(message)
 
+    @classmethod
+    def no_selectable_fields(cls, type_name: str) -> SelectionError:
+        """SPEC 5.4 rule 9: an empty selection set is not a valid document."""
+        return cls(
+            f"auto-selection of {type_name!r} produced no fields.\n"
+            "  Every field was removed by the policy, needs an argument, or "
+            "sits past the depth limit.\n"
+            "  Widen it by one of:\n"
+            "    max_depth=4\n"
+            "    include_deprecated=True\n"
+            "    exclude=[]\n"
+            '    fields=["id"]'
+        )
+
 
 class SelectionTooLargeError(GraphQLClientError):
     """Auto-selection produced more fields than the configured limit."""
