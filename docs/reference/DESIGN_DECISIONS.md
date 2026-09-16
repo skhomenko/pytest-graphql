@@ -371,10 +371,104 @@ nested or sibling `AUTO`, excluding `__typename`. A generated selection carries 
 count so that a cached entry can be composed into a larger selection without rebuilding it.
 
 The default numeric limits above, along with `max_fields`, `max_depth` and `cycle_policy`,
-are validated against a checked-in corpus of introspection documents captured from real
-public schemas before any layer is built on them. Each corpus document records its source
-and retrieval date, so the validation is reproducible and CI never depends on a live
-third-party endpoint.
+are validated against a checked-in corpus of project-authored synthetic schema fixtures,
+plain GraphQL SDL built directly with graphql-core's `build_schema`, before any layer is
+built on them. The domain-specific names and prose in each fixture are project-authored,
+and none of them is copied from, or models, any third-party API's domain content. The
+pagination field and type names (`edges`, `node`, `cursor`, `pageInfo`, `hasNextPage`,
+`endCursor`, and the `*Connection`/`*Edge` suffixes) intentionally conform instead to the
+GraphQL Cursor Connections Specification, because the Relay-detection heuristic under test
+depends on exactly that convention: `facebook/relay`, `website/spec/Connections.md` at
+commit `f9a7c64558c00221aa6baf6d79deb50731f74519`, retrieved 2026-09-15, MIT License, Meta
+Platforms, Inc. and affiliates. No prose or example text from that specification is copied;
+only its functional naming convention is reused. The validation is reproducible and needs
+no live endpoint of any kind, real or synthetic.
+
+### Calibration
+
+The calibration gate runs against `tests/schema/corpus/sdl/` (`catalog.graphql` and
+`feed.graphql`, two small fixtures authored specifically to exercise this gate; see
+`tests/schema/corpus/README.md` for what each one covers), using
+`tests/schema/corpus/measure.py`. Every number below is printed by that script as it is
+checked in; running `uv run python tests/schema/corpus/measure.py` reproduces each one
+exactly, rather than requiring a reader to trust a figure computed outside the committed
+harness. `tests/unit/test_corpus_calibration.py` pins the same numbers as a regression test,
+so a change to either fixture or to the selection engine that moves one of them fails CI.
+Three of the defaults below are kept on direct corpus measurement, and two more are kept on
+an explicit, recorded rationale where no schema, real or synthetic, has anything left to
+measure. The last two, `max_fields` and `max_depth`, are carried over unchanged rather than
+settled by this gate: the corpus does not exercise either near its boundary, so SPEC open
+question 5 stays open.
+
+- `max_union_members=10`: exercised directly. `catalog.graphql`'s `SearchResult` union has 12
+  members; the cap collapses the 2 members past 10 to `__typename` plus `id`. `Node`, the
+  fixture's interface, has 3 implementers, a representative width under the cap.
+- `max_connection_depth=1`: exercised directly, at both the schema and the engine level, with
+  a differential check rather than a single build: the harness builds each outer connection's
+  selection once under the default cap and once with the cap raised by one, and only counts a
+  case as caused by the cap when the inner connection field is absent at the default and
+  present once the cap is raised. This separates the cap from an unrelated reason a field can
+  also be absent, such as a connection whose page-size argument is not named `first`.
+  `catalog.graphql` has one connection nested inside another connection's `node` type,
+  `CategoryConnection.products` returning `ProductConnection`, and it passes the differential
+  check: the cap does not merely exist in the fixture's shape, it demonstrably holds when the
+  engine runs. `feed.graphql` has two such nested connections
+  (`PostConnection.comments` and `CommentConnection.replies`, both returning
+  `CommentConnection`), and neither passes the check: both stay absent at both depths, because
+  `feed.graphql`'s connections use `perPage` rather than `first` (see the out-of-scope note
+  below) and are never expanded regardless of the cap. One fixture confirms the cap
+  engine-side; the other is schema-shape evidence that the unconfirmed case is not a bug.
+- `include_deprecated=False`: confirmed reasonable. Deprecated fields exist in the corpus
+  (2 of 42 fields in `catalog.graphql`, 1 of 31 in `feed.graphql`), so excluding them by
+  default avoids surfacing known-legacy fields unless a test asks for one.
+- `connection_page_size=10`: kept, on rationale rather than corpus measurement. GraphQL SDL
+  can declare a default for a page-size argument (`GraphQLArgument.default_value`), so the
+  harness checks for one directly rather than assuming its absence: of `catalog.graphql`'s 3
+  recognized `first` arguments, 1 (`Query.categories`) declares a default; the other 2, plus
+  all of `feed.graphql`'s connections, do not. Only a server's undeclared,
+  implementation-side runtime default stays outside what any schema document, introspected or
+  authored, could ever reveal, and that gap is what the value falls back to the conventional
+  Relay default for.
+- `cycle_policy="shallow"`: kept, on rationale rather than corpus measurement. Both fixtures
+  confirm self-reference is a normal schema shape (`Category.parent`/`Category.children` in
+  `catalog.graphql`, `Comment.replies` in `feed.graphql`), which is why cycle handling matters
+  at all, but a cycle *policy* is a choice about what a client should see when a cycle is
+  reached, not a fact a schema graph carries. No schema document can reveal which of
+  `"shallow"`, `"stop"` or `"id_only"` a real API's consumers would want; that is a product
+  decision, made once for this library's default and left open to any caller through
+  `SelectionPolicy(cycle_policy=...)`.
+- `max_fields=2000` and `max_depth=3`: the synthetic corpus does not exercise either cap near
+  its boundary, and that is stated here rather than implied by silence. The largest
+  default-policy build in the corpus is 62 fields at an AST depth of 6
+  (`catalog.graphql`'s `search` field), far under both limits; the deepest uncapped type-depth
+  probe reaches 5 on `catalog.graphql` and 6 on `feed.graphql`, against the probe's own cap of
+  20, well short of either limit; a small, readable, authored fixture cannot stress that
+  boundary without stopping being either small or readable. What the corpus still
+  demonstrates directly is that both fixtures build cleanly well under both caps, and that
+  `Category` and `Comment`'s self-reference is exactly the shape a
+  depth cap exists to bound, confirmed by the built selections' AST depth exceeding the
+  numeric value of `max_depth=3` itself (the connection template's `edges`/`node` scaffolding
+  does not consume the traversal budget, by engine design, so it adds AST levels the `depth`
+  counter never charges for). Neither number is re-tuned by this corpus; both remain the
+  pre-existing defaults, carried over rather than re-derived.
+
+Spec open question 7 (interface/union expansion cost) closes on this evidence: it is
+exercised and adequate, not merely assumed. Open question 5 (`max_fields` default) stays open
+in the narrow sense above: this corpus shows the cap does not misfire at ordinary scale, but
+does not stress it near the boundary, and no claim to the contrary is made. Open question 6
+(relay detection heuristic) closes by direct construction rather than by absence of a
+counterexample: `feed.graphql` includes one type named like a
+connection that is not shaped like one (`LegacyThreadConnection`, missing `pageInfo`) and one
+shaped like a connection that is not named like one (`AttachmentGroup`), and the heuristic
+correctly classifies both as mismatches rather than as detected connections.
+
+One related finding is explicitly out of scope here and left unchanged: `feed.graphql`'s
+connection fields use `perPage`, not `first`, so none of them carry a recognized page-size
+argument (`PAGE_SIZE_ARGUMENT` above) and none are ever expanded. This leaves the
+`feedStats` query field, whose only fields are connections, with nothing selectable, which
+correctly raises per the "root type that yields nothing raises" rule. This is the documented
+fallback behaving exactly as designed, not a defect, and changing `PAGE_SIZE_ARGUMENT` is a
+separate design decision this gate does not make.
 
 ### Selection policy
 
