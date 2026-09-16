@@ -12,6 +12,10 @@ import re
 import warnings
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from graphql import GraphQLField
 
 _BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
@@ -29,6 +33,20 @@ def to_camel(name: str) -> str:
     """Convert a snake_case name to camelCase, for error messages only."""
     head, *rest = name.split("_")
     return head + "".join(part[:1].upper() + part[1:] for part in rest if part)
+
+
+def field_signature(name: str, definition: GraphQLField) -> str:
+    """Render a field or operation as it appears in an error message (SPEC 8.3).
+
+    ``createUser(input: CreateUserInput!): User!``. Shared by field-argument
+    errors (``normalize.py``) and operation-argument errors (``operation.py``)
+    so the two never drift into two spellings of the same thing.
+    """
+    arguments = ", ".join(
+        f"{argument_name}: {argument.type}"
+        for argument_name, argument in definition.args.items()
+    )
+    return f"{name}({arguments}): {definition.type}"
 
 
 @dataclass(frozen=True)
