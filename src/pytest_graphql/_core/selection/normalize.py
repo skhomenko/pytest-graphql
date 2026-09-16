@@ -84,7 +84,7 @@ from pytest_graphql._core.errors import (
     SelectionError,
     SelectionTooLargeError,
 )
-from pytest_graphql._core.naming import NameMap
+from pytest_graphql._core.naming import NameMap, field_signature
 from pytest_graphql._core.selection.builder import (
     PAGE_SIZE_VARIABLE,
     TYPENAME,
@@ -747,7 +747,7 @@ class _Emitter:
                     kind="field",
                     operation_name=f"{parent_type.name}.{entry.name}",
                     bad_name=argument.written,
-                    signature=_field_signature(entry.name, definition),
+                    signature=field_signature(entry.name, definition),
                     candidates=list(definition.args),
                 )
             variable = self.allocator.allocate(
@@ -1395,11 +1395,3 @@ def _ast_args_signature(
             f"{argument.name.value}: " + _written_literal(argument.value, declared.type)
         )
     return ", ".join(sorted(rendered))
-
-
-def _field_signature(name: str, definition: GraphQLField) -> str:
-    arguments = ", ".join(
-        f"{argument_name}: {argument.type}"
-        for argument_name, argument in definition.args.items()
-    )
-    return f"{name}({arguments}): {definition.type}"

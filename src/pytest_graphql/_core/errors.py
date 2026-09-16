@@ -115,6 +115,112 @@ class ArgumentError(GraphQLClientError):
             lines.append(f"  Did you mean {match!r}?")
         return "\n".join(lines)
 
+    @classmethod
+    def _from_message(
+        cls, message: str, *, kind: str, operation_name: str, bad_name: str
+    ) -> ArgumentError:
+        """Build an instance that carries a message this class did not render.
+
+        The "no such argument" shape above is the only one ``_render`` knows,
+        because it is the only one SPEC 8.3 gives an exact example for.
+        ``missing_argument`` and ``invalid_value`` below are real
+        ``ArgumentError``s (SPEC 8.2 routes both there) with their own
+        message shapes, so they bypass ``__init__``'s required "no such
+        argument" fields rather than stretching that constructor, or this
+        message format, to cover a case it was not written for.
+        """
+        error = cls.__new__(cls)
+        error.kind = kind
+        error.operation_name = operation_name
+        error.bad_name = bad_name
+        error.signature = ""
+        error.candidates = ()
+        error.input_type_name = None
+        error.input_fields = None
+        GraphQLClientError.__init__(error, message)
+        return error
+
+    @classmethod
+    def missing_argument(
+        cls, *, kind: str, operation_name: str, arg_name: str, signature: str
+    ) -> ArgumentError:
+        """SPEC 8.2: a required argument the caller never supplied."""
+        message = (
+            f"{kind} {operation_name!r} is missing required argument {arg_name!r}.\n"
+            f"  Signature: {signature}"
+        )
+        error = cls._from_message(
+            message, kind=kind, operation_name=operation_name, bad_name=arg_name
+        )
+        error.signature = signature
+        return error
+
+    @classmethod
+    def reserved_name_collision(
+        cls, *, kind: str, operation_name: str, arg_name: str, signature: str
+    ) -> ArgumentError:
+        """B23: a required argument only a reserved per-call option can name.
+
+        Every keyword in the per-call option table is always read as that
+        option, so a schema argument sharing its name can never be reached
+        through a plain keyword. ``variables={...}`` is the one route left.
+        """
+        message = (
+            f"{kind} {operation_name!r} has a required argument {arg_name!r} "
+            "that collides with a reserved per-call option name.\n"
+            f"  Pass it through variables={{{arg_name!r}: ...}} instead.\n"
+            f"  Signature: {signature}"
+        )
+        error = cls._from_message(
+            message, kind=kind, operation_name=operation_name, bad_name=arg_name
+        )
+        error.signature = signature
+        return error
+
+    @classmethod
+    def duplicate_argument(
+        cls,
+        *,
+        kind: str,
+        operation_name: str,
+        resolved_name: str,
+        first_key: str,
+        second_key: str,
+        signature: str,
+    ) -> ArgumentError:
+        """Two different supplied keys resolved to the same schema argument.
+
+        ``first_key`` and ``second_key`` are the exact and snake spelling of
+        one argument, or an explicit ``variables={...}`` entry alongside a
+        plain keyword for the same name: whichever pair a caller actually
+        supplied together. Silently keeping one and dropping the other would
+        be a value the caller wrote and never sees again.
+        """
+        message = (
+            f"{kind} {operation_name!r} received argument {resolved_name!r} twice, "
+            f"as both {first_key!r} and {second_key!r}.\n"
+            f"  Signature: {signature}"
+        )
+        error = cls._from_message(
+            message, kind=kind, operation_name=operation_name, bad_name=resolved_name
+        )
+        error.signature = signature
+        return error
+
+    @classmethod
+    def invalid_value(
+        cls, *, kind: str, operation_name: str, arg_name: str, detail: str
+    ) -> ArgumentError:
+        """B14: a supplied value fails to coerce against its declared type."""
+        message = (
+            f"{kind} {operation_name!r} received an invalid value for argument "
+            f"{arg_name!r}.\n"
+            f"  {detail}"
+        )
+        return cls._from_message(
+            message, kind=kind, operation_name=operation_name, bad_name=arg_name
+        )
+
 
 class SelectionError(GraphQLClientError):
     """An explicit selection is invalid, or the assembled document fails validation."""
@@ -134,6 +240,15 @@ class SelectionError(GraphQLClientError):
     def from_validation(cls, message: str) -> SelectionError:
         """Wrap a graphql-core document-validation message, verbatim."""
         return cls(message)
+
+    @classmethod
+    def on_leaf_type(cls, *, field_name: str, type_name: str) -> SelectionError:
+        """An explicit selection was given for a field with no fields to select."""
+        return cls(
+            f"{field_name!r} returns {type_name}, a scalar or enum, which has "
+            "no fields to select.\n"
+            "  Leave fields unset, or pass fields=AUTO."
+        )
 
     @classmethod
     def no_selectable_fields(cls, type_name: str) -> SelectionError:
