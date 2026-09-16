@@ -1,0 +1,99 @@
+"""
+Synthetic calibration fixture: a small social feed.
+
+Authored for the calibration gate (docs/reference/DESIGN_DECISIONS.md,
+Calibration section). The domain-specific names and descriptions below
+(Post, Author, Comment, title, body, and similar) are invented for this
+project; none of them is copied from, or models, any third-party API's
+domain content. The pagination field and type names (edges, node, cursor,
+pageInfo, hasNextPage, endCursor, and the *Connection/*Edge suffixes)
+intentionally conform to the GraphQL Cursor Connections Specification
+instead: facebook/relay, website/spec/Connections.md at commit
+f9a7c64558c00221aa6baf6d79deb50731f74519, retrieved 2026-09-15, MIT License,
+Meta Platforms, Inc. and affiliates. No prose or example text from that
+specification is copied; only its functional naming convention is reused.
+
+Checklist coverage:
+- Non-standard page-size argument, so the
+  connection is recognized by shape but its
+  page field is never expanded:             PostConnection.comments uses perPage
+- Nested connection that stays unconfirmed
+  at every depth, for the same reason:      PostConnection.node.comments
+- Connection-detection heuristic mismatch,
+  named like a connection but missing the
+  shape:                                    LegacyThreadConnection
+- Connection-detection heuristic mismatch,
+  shaped like a connection but not named
+  like one:                                 AttachmentGroup
+- A root type with nothing selectable,
+  because every field is an unexpandable
+  connection:                               Query.feedStats
+- Deprecated field:                         Post.legacyAuthorName
+"""
+
+type Post {
+  id: ID!
+  title: String!
+  legacyAuthorName: String @deprecated(reason: "use author.name")
+  author: Author!
+  comments(perPage: Int, after: String): CommentConnection!
+}
+
+type Author {
+  id: ID!
+  name: String!
+}
+
+type Comment {
+  id: ID!
+  body: String!
+  replies(perPage: Int, after: String): CommentConnection!
+}
+
+type PageInfo {
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: String
+  endCursor: String
+}
+
+type PostEdge {
+  cursor: String!
+  node: Post!
+}
+
+type PostConnection {
+  edges: [PostEdge!]!
+  pageInfo: PageInfo!
+}
+
+type CommentEdge {
+  cursor: String!
+  node: Comment!
+}
+
+type CommentConnection {
+  edges: [CommentEdge!]!
+  pageInfo: PageInfo!
+}
+
+type LegacyThreadConnection {
+  edges: [PostEdge!]!
+}
+
+type AttachmentGroup {
+  edges: [PostEdge!]!
+  pageInfo: PageInfo!
+}
+
+type FeedStats {
+  recentPosts(perPage: Int, after: String): PostConnection!
+  recentComments(perPage: Int, after: String): CommentConnection!
+}
+
+type Query {
+  posts(perPage: Int, after: String): PostConnection!
+  feedStats: FeedStats!
+  legacyThread: LegacyThreadConnection!
+  attachmentGroup: AttachmentGroup!
+}

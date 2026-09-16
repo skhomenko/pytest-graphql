@@ -29,9 +29,9 @@ These hold regardless of schema:
   follow-up review appends a new cycle naming its predecessor. It does not edit
   statuses in the old one. Re-read the log tail immediately before appending and
   preserve any concurrent entry.
-- Every cycle records its scope, the verification performed, and a security
-  assessment. A clean review still appends a cycle stating that no findings were
-  found.
+- Every cycle records its scope, the verification performed, a security
+  assessment, and a legal and licensing assessment. A clean review still
+  appends a cycle stating that no findings were found.
 - When a reviewer establishes a finding's root cause, record the evidence-backed
   mechanism and responsible site or sites separately from the observed failure
   and the recommended resolution. If the root cause is not established, say so
@@ -306,6 +306,10 @@ Append exactly one cycle for every review iteration, including a clean review:
 ### Security assessment
 
 `<actionable security findings, or none, plus material residual risk>`
+
+### Legal and licensing assessment
+
+`<actionable legal or licensing findings, or none, plus material residual risk>`
 ```
 
 Repeat the finding section in severity order. For a clean cycle, omit finding
@@ -323,6 +327,16 @@ Keep the finding's four concepts distinct:
 
 Do not withhold an evidence-backed finding merely because its root cause remains
 unknown. Conversely, do not present a suspected mechanism as established fact.
+
+The legal and licensing assessment applies the trigger-driven pass defined in
+`AGENTS.md` to the reviewed change and its actual distribution boundary. Record
+a concrete problem as a normal finding, not only as prose in the assessment. A
+clean cycle still states that no actionable legal or licensing findings were
+found and identifies any material jurisdiction-dependent, terms-dependent, or
+provenance-dependent residual risk. This is a project risk assessment, not legal
+advice or a claim of legal clearance. The section is required for cycles
+appended after this rule is adopted; earlier append-only entries remain valid
+and must not be rewritten.
 
 Severity guide for this repository:
 

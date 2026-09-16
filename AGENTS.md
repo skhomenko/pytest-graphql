@@ -56,9 +56,9 @@ Invariants that hold regardless of schema:
 - The log is append-only. A follow-up review appends a new cycle naming its
   predecessor. It never edits statuses in an earlier cycle. Re-read the log tail
   immediately before appending and preserve any concurrent entry.
-- Every cycle records its scope, the verification performed, and a security
-  assessment. A clean review still appends a cycle stating that no findings were
-  found.
+- Every cycle records its scope, the verification performed, a security
+  assessment, and a legal and licensing assessment. A clean review still
+  appends a cycle stating that no findings were found.
 - A review is scoped to the diff under review plus the paths it directly affects.
   Reference an earlier finding ID instead of re-deriving a pre-existing
   condition.
@@ -83,6 +83,54 @@ finishes. There is no review path that skips the log.
 Claude runs this through the skills named in `CLAUDE.md`. Codex and any other
 agent follow `docs/reference/CODE_REVIEW_HANDOFF.md` directly. The log format is
 identical either way, so both can read and answer each other's cycles.
+
+## Legal and licensing assessment
+
+Run a proportionate legal-risk pass while planning, implementing, and reviewing
+every project task. First decide whether the work has a legal surface. Do not add
+generic legal boilerplate to ordinary implementation work with no relevant
+surface, but do not skip the assessment.
+
+Treat a change as legally relevant when it involves any of the following:
+
+- third-party code, schemas, data, documentation, media, fonts, models, generated
+  output, examples, or other incorporated material;
+- public or private APIs, scraping, crawling, introspection, automated access,
+  caching, or redistribution of API output;
+- licenses, notices, attribution, source-offer duties, copyleft, patents,
+  trademarks, branding, or claims of endorsement;
+- personal, confidential, regulated, or user-provided data, including fixtures,
+  logs, telemetry, and generated artifacts;
+- packaging, releases, documentation, hosted services, commercial use, export,
+  or another activity that changes who receives an artifact or how it is used.
+
+Before copying, generating from, committing, packaging, or publishing external
+material, establish its provenance and the permission that covers the intended
+use. Record the exact source, applicable license or terms version, required
+notices, modifications, and redistribution conditions. Public accessibility,
+enabled introspection, free access, or an `open source` label is not by itself a
+redistribution grant. The repository's root license does not relicense
+third-party material.
+
+Inspect the actual distribution boundary, not only the source path. Check wheels,
+source distributions, generated documentation, container images, release
+archives, and Git history when relevant. Prefer project-authored synthetic
+fixtures or summaries of non-expressive facts when third-party rights are
+unclear. Never place credentials, personal data, proprietary content, or
+unverified third-party artifacts in fixtures or logs.
+
+Treat unresolved permission, incompatible terms, missing required notices, or
+material privacy and regulatory uncertainty as a release blocker when the work
+would be distributed or used commercially. State what is known, what remains
+uncertain, and the least-risk correction. Recommend qualified legal counsel when
+actual legal clearance is required. Never claim that an agent's assessment is
+legal advice, a guarantee, or lawyer approval.
+
+Every code review includes this assessment. Report concrete legal or licensing
+problems as normal findings with the same severity ordering and file or artifact
+grounding as correctness and security findings. A clean review still records
+that no actionable legal or licensing findings were found and names any material
+untested, jurisdiction-dependent, or provenance-dependent residual risk.
 
 ## Publication hygiene (hard requirements)
 

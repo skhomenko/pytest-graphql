@@ -1,0 +1,141 @@
+"""
+Synthetic calibration fixture: a small product catalog.
+
+Authored for the calibration gate (docs/reference/DESIGN_DECISIONS.md,
+Calibration section). The domain-specific names and descriptions below
+(Product, Category, Review, price, rating, and similar) are invented for this
+project; none of them is copied from, or models, any third-party API's
+domain content. The pagination field and type names (edges, node, cursor,
+pageInfo, hasNextPage, endCursor, and the *Connection/*Edge suffixes)
+intentionally conform to the GraphQL Cursor Connections Specification
+instead: facebook/relay, website/spec/Connections.md at commit
+f9a7c64558c00221aa6baf6d79deb50731f74519, retrieved 2026-09-15, MIT License,
+Meta Platforms, Inc. and affiliates. No prose or example text from that
+specification is copied; only its functional naming convention is reused.
+
+Checklist coverage:
+- Self-referential depth and cycles:        Category.parent, Category.children
+- Interface, three implementers:            Node <- Product, Category, Review
+- Wide union (exceeds max_union_members):   SearchResult, 12 members
+- Relay connections:                        ProductConnection, CategoryConnection
+- Nested connection under the depth cap:    CategoryConnection.node.products
+- Page-size argument, no declared default:  Query.products(first: ...)
+- Page-size argument, declared default:     Query.categories(first: Int = 20)
+- Deprecated fields:                        Product.legacyPrice, Category.oldSlug
+- Field with a required argument, skipped
+  during auto-selection:                    Product.priceInRegion(currency: String!)
+"""
+
+interface Node {
+  id: ID!
+}
+
+type Product implements Node {
+  id: ID!
+  name: String!
+  price: Float!
+  legacyPrice: Float @deprecated(reason: "renamed to price")
+  priceInRegion(currency: String!): Float
+  category: Category
+}
+
+type Category implements Node {
+  id: ID!
+  name: String!
+  slug: String!
+  oldSlug: String @deprecated(reason: "renamed to slug")
+  parent: Category
+  children: [Category!]!
+  products(first: Int, after: String): ProductConnection!
+}
+
+type Review implements Node {
+  id: ID!
+  rating: Int!
+  body: String!
+}
+
+type Tag1 {
+  id: ID!
+}
+
+type Tag2 {
+  id: ID!
+}
+
+type Tag3 {
+  id: ID!
+}
+
+type Tag4 {
+  id: ID!
+}
+
+type Tag5 {
+  id: ID!
+}
+
+type Tag6 {
+  id: ID!
+}
+
+type Tag7 {
+  id: ID!
+}
+
+type Tag8 {
+  id: ID!
+}
+
+type Tag9 {
+  id: ID!
+}
+
+union SearchResult =
+    Product
+  | Category
+  | Review
+  | Tag1
+  | Tag2
+  | Tag3
+  | Tag4
+  | Tag5
+  | Tag6
+  | Tag7
+  | Tag8
+  | Tag9
+
+type PageInfo {
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: String
+  endCursor: String
+}
+
+type ProductEdge {
+  cursor: String!
+  node: Product!
+}
+
+type ProductConnection {
+  edges: [ProductEdge!]!
+  pageInfo: PageInfo!
+}
+
+type CategoryEdge {
+  cursor: String!
+  node: Category!
+}
+
+type CategoryConnection {
+  edges: [CategoryEdge!]!
+  pageInfo: PageInfo!
+}
+
+type Query {
+  node(id: ID!): Node
+  product(id: ID!): Product
+  products(first: Int, after: String): ProductConnection!
+  categories(first: Int = 20, after: String): CategoryConnection!
+  search(term: String!): [SearchResult!]!
+}

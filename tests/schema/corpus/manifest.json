@@ -1,0 +1,12 @@
+[
+  {
+    "name": "catalog",
+    "authored": "2026-09-15",
+    "purpose": "wide union, interface, declared page-size default, confirmed nested-connection depth cap, required-argument field"
+  },
+  {
+    "name": "feed",
+    "authored": "2026-09-15",
+    "purpose": "non-first page argument, unconfirmed nested connections, connection-heuristic mismatches, empty auto-selection"
+  }
+]

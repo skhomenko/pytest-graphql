@@ -6,8 +6,8 @@ The defaults are SPEC 3.10 as corrected by C1, which turned
 ``include_deprecated`` off and added the three cost limits
 (``connection_page_size``, ``max_union_members`` and ``max_connection_depth``).
 Every one of these numbers is a candidate for the calibration gate, which
-measures them against a corpus of real schemas. None of them may be changed
-here to make a test pass.
+measures them against the checked-in schema corpus. None of them may be
+changed here to make a test pass.
 
 Memoization is the part of this module most easily got wrong, so C18 states
 it exactly and ``cache_key`` is the only place that decides it. The
@@ -211,7 +211,8 @@ def is_connection_type(type_: GraphQLNamedType) -> bool:
 
     The rule is name-based and shape-based together: the name ends in
     ``Connection`` and the type has both ``edges`` and ``pageInfo``. The
-    calibration gate reports whether this heuristic misfires on real schemas.
+    calibration gate reports whether this heuristic misfires on the corpus
+    schemas.
     """
     if not isinstance(type_, GraphQLObjectType):
         return False
