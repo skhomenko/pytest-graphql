@@ -707,9 +707,12 @@ values to do their work. Nothing else should.
   `authorization`, `cookie`, `x-api-key`, `proxy-authorization`.
 - `ClientConfig.redact_variables` holds dotted paths and glob patterns, matched
   case-insensitively against snake_case variable paths at every depth, inside input objects
-  and inside lists. The default is `password`, `token`, `secret`, `api_key`, `access_token`,
-  `refresh_token`, `authorization`, `otp`, `pin`, `credit_card`, `ssn`. The same patterns
-  apply to captured response data.
+  and inside lists. A pattern matches a contiguous tail of the path, counted from its end: a
+  dot-free pattern is a one-segment tail (the field's own name), and an N-segment dotted
+  pattern is an N-segment tail, so both forms apply at every depth rather than only when the
+  pattern names the complete path from the document root. The default is `password`, `token`,
+  `secret`, `api_key`, `access_token`, `refresh_token`, `authorization`, `otp`, `pin`,
+  `credit_card`, `ssn`. The same patterns apply to captured response data.
 - URL userinfo and the query string are stripped from any recorded URL.
 - Cookies are recorded by name only, never by value, on both the request and the response
   side.
@@ -728,7 +731,92 @@ redaction cannot cover it. The scrub closes that gap.
 - Derived forms. For a header value carrying a scheme, such as `Bearer <token>`, the part
   after the first space is added as well. The percent-encoded form of each value is added.
   Non-string values are converted with the same JSON text form used for rendering before
-  being added.
+  being added. URL userinfo is added in both its original, still-percent-encoded spelling
+  and its decoded form. A percent-escape's hex digits are case-insensitive, so matching
+  itself case-folds a percent-escape's two hex digits on both sides of the comparison
+  before comparing, rather than enumerating every case spelling a value's own escapes could
+  be written in: that space is exponential in the number of escaped octets, so an
+  enumeration approach could never cover it, while case-folding the comparison covers every
+  spelling in one pass.
+- Source label safety. A match's replacement is `[redacted:<source>]`, so a source label
+  that itself contains another value already in the secret set would place that second
+  value into the text the first value's redaction produces, undetected by the single-pass
+  rule above. The fixed template text around the label, `[redacted:` and `]`, is itself
+  compile-time, public text, so a colliding source label is not the only way this can
+  happen: a qualifying secret can equal a substring of the template text directly,
+  independent of the label, so the label cannot be checked on its own. The complete marker
+  is built and validated as one string, using the same case-folded percent-escape
+  comparison the scrub itself uses, and every marker-emitting path -- a redacted header's
+  own placeholder and a redacted variable subtree's own placeholder alike -- is built by
+  this same validated construction, never assembled separately from an unchecked label.
+  The validation checks the marker's *escaped* form, not its pre-escape spelling: escaping
+  always runs over a marker after it is inserted into the surrounding text (see "Stage
+  order, escaping and limits" below), and a raw control or hidden character carried in from
+  a label built from request-controlled text would otherwise pass a pre-escape check and
+  only turn into a byte sequence matching a different qualifying secret once escaping
+  expands it. No fixed, compile-time replacement can be a guaranteed-safe substitute for a
+  colliding marker: an attacker who reads the implementation can always choose a secret value
+  equal to whatever constant it names, so a marker that still collides after a fixed fallback
+  label is tried escalates through a bounded number of labels drawn from a cryptographically
+  random source, each checked the same way and generated one at a time -- only once every
+  candidate tried so far has collided, so the ordinary, already-safe case draws no randomness
+  at all. A secret set that covers every short string the random source can produce makes
+  every one of those attempts collide too; when the bound is exhausted, this falls back first
+  to a label-free marker and finally to an empty replacement rather than retry without limit,
+  so constructing a safe replacement always terminates and never emits a known secret. The
+  label itself is escaped before it is ever placed in the marker template, not after: the
+  marker can be inserted by a scrub pass that runs after escaping and applies no escape pass
+  of its own afterward, and a raw control character carried in from an un-escaped label would
+  otherwise reach a snapshot field exactly as-is, a plain escape-stage violation regardless of
+  whether it also happens to spell a second secret.
+  Escaping's per-character map has no cross-character lookahead, but checking a candidate's
+  escaped form in isolation is only as strong as checking the real, final rendered text when
+  escaping is the *last* transform that text passes through -- and a marker is not the only
+  text this risk applies to. Any scrubbed-and-escaped text can have escaping synthesize a
+  qualifying secret's spelling this way, not only a constructed marker, so every field's
+  complete construction runs its scrub, escape and a second scrub together as one step,
+  closing this wherever text reaches a snapshot field. A further transform can still run
+  after a field is built -- `repr()`'s and `json.dumps()`'s own backslash-and-quote doubling in
+  the object's `repr()` and in `as_curl()`'s JSON body, and `shlex.quote()`'s own quote-doubling
+  in `as_curl()`'s complete command -- and can synthesize a collision the same way from a field
+  that was already safe before that call touched it. Re-scanning that call's own already-
+  produced text cannot close this safely: the match can span and remove a delimiter the call
+  itself just produced, since a qualifying secret's raw text is exactly as attacker-controlled
+  as anything else here and nothing stops it from being chosen to equal that call's own syntax
+  -- for example a secret equal to the shell-quote-and-JSON prefix or suffix of `as_curl()`'s
+  `--data` argument, whose removal exposes the argument's own content, unquoted, to the shell.
+  Every value `repr()`, `json.dumps()` or `shlex.quote()` will see is therefore checked against
+  that same call's own output *before* the call runs on the real complete structure, one leaf
+  at a time; a leaf whose own rendered form would contain a qualifying secret is replaced
+  first, with one shared marker built only from fixed, syntax-neutral text -- ASCII letters,
+  digits and the template punctuation, never a request-controlled label -- so the structure
+  that reaches the real `repr()`, `json.dumps()` or `shlex.quote()` call is already safe.
+  A leaf-level check cannot see everything the complete output is made of, though. The fixed
+  wrapper text a renderer adds around its leaves -- `RequestInfo.__repr__`'s own class name and
+  dataclass field syntax, two independently quoted shell segments joined into one `as_curl()`
+  word -- is not itself a leaf, and a qualifying secret can equal or span that text regardless
+  of what any leaf's content is; the same is true of text generated only after every leaf check
+  has already run, such as a mapping key's disambiguating suffix once two distinct keys
+  collide under the same render call. Substituting the whole value is also not a safe strategy
+  for `as_curl()`'s complete `--data` JSON document, since replacing an already-valid document
+  with a marker string would discard the structured request body the command promises to
+  reproduce, rather than preserve it the way replacing one field's value does. The complete
+  text a caller is about to return -- `__repr__`'s finished string, `as_curl()`'s finished
+  command -- is therefore validated once more, as a whole, immediately before it is returned.
+  This is a validate-only backstop, never another substitution pass: finding a qualifying
+  secret in the complete text at this point means no per-leaf substitution could have closed
+  it, because the only remaining sources are syntax the format cannot omit or a document that
+  cannot be rewritten without corrupting it. When that happens, `RequestInfo.__repr__` and
+  `as_curl()` raise `DiagnosticRenderError` instead of returning unsafe or malformed text. The
+  exception's own state is fixed, compile-time text, its descriptive message and its `renderer`
+  label alike, and is exactly as exposed to this risk as any other fixed rendering syntax: a
+  qualifying secret can equal a substring of either one. Every such field is therefore validated
+  against the same qualifying set before the exception is raised, and an empty string is used in
+  place of whichever field collides; a qualifying value is never the empty string, so the empty
+  fallback can never repeat one, regardless of what triggered the failure. `DiagnosticRenderError`
+  is part of the top-level exception hierarchy ("Top-level surface" above) and is exported from
+  `pytest_graphql`. The ordinary case, where no qualifying value collides with fixed or generated
+  syntax, never reaches this path at all.
 - Minimum length. Only values of at least `ClientConfig.min_redacted_value_length`
   characters after stripping whitespace enter the set. The default is 8. A shorter value is
   still redacted at its own path, but it is not scrubbed from free-form text, because
@@ -761,9 +849,51 @@ rewrite terminal output or hide text in a report. The escape form follows the co
 eight-digit form is required, because the scanner also classifies the Unicode tag
 characters at U+E0000 to U+E007F, which no four-digit escape can represent.
 
-`max_diagnostic_bytes` caps each snapshot field, default 4096, with a total cap of 32768 per
-snapshot. The error list truncates at `max_recorded_errors`, default 20. Truncation is
-visible, never silent, and states how many bytes or entries were cut. The diagnostics
+`max_diagnostic_bytes` caps each snapshot field that carries request-controlled text or
+structure, default 4096, with a total cap of 32768 per snapshot that the true rendered
+grand total never exceeds. A field's cap bounds its complete rendered form: every byte
+that would appear in its JSON representation counts against the cap, including mapping
+keys, list structure and a non-string value such as a number or a boolean, not only a
+string leaf's own characters, and a string's cost is what `json.dumps` actually encodes it
+as, escaping included, never its raw character or UTF-8 byte count. Fields are capped in a
+fixed order: operation, document, url, method, headers, then variables, and each field is
+capped to whatever remains of the total budget after the fields before it.
+`DiagnosticSnapshot.curl_headers` shares the `headers` field's one budget; it is the
+ordered sequence that budget is built from, not a second, uncapped field of its own.
+`kind`, `idempotent` and `truncated` carry no request-controlled text; their size is fixed
+by the type or generated by the capping stage itself, so this cap does not apply to them,
+and a truncation note names only the field and a byte or entry count, never the key or
+value content that was cut. An omitted entry -- a scalar, key, header or subtree that could
+not fit -- is counted by exactly one layer, the container that holds it, so it is never
+counted twice.
+
+A field limit below the smallest representable form of its type (an empty string, an
+empty mapping) does not omit a mandatory field: `operation`, `document`, `url`, `method`,
+`headers` and `variables` each still render that smallest form when nothing else fits, and
+the form's unavoidable byte cost is still charged even past the field's own nominal share,
+so a later field's budget still reflects this field's true cost. Every field but the last
+processed has this floor reserved out of the shared total before the current field may
+spend beyond its own floor, so one oversized field can never leave a later field's forced
+minimum unaccounted for; this is what keeps the true grand total inside the documented cap
+rather than merely each field's nominal share. A header entry is different: it is a member
+of a container that can legitimately hold fewer entries than it started with, so it is
+never force-rendered past what its own structural minimum -- its overhead plus an empty
+name and an empty value -- can afford. A header whose bounded name or value does not fully
+fit in what remains, once that minimum is confirmed to fit, is truncated in place like any
+other field; a header whose own structural minimum cannot fit at all is dropped along with
+every header after it, the same "entries dropped" outcome already defined for a mapping or
+a list. The header's curl placeholder variable is bounded against this same shared budget
+by its own derived length, not by the source name's JSON cost: one raw character can expand
+into several once the variable-naming mapping below escapes it, so a name bounded by JSON
+cost alone does not bound the variable it feeds. That mapping is deterministic and
+injective, so only the complete, untruncated variable is ever charged: truncating the
+variable's own text is not injective, since two different, unrelated names can share the
+same truncated prefix, which would send one header's exported secret in another header's
+place. When the complete variable does not fit, or when no budget remains for even the
+variable's fixed prefix, the header renders its already-bounded placeholder text literally
+instead of an environment-variable indirection, which is still safe because that text names
+no real secret. The error list truncates at `max_recorded_errors`, default 20. Truncation
+is visible, never silent, and states how many bytes or entries were cut. The diagnostics
 recorder is a bounded `deque`, default 50 calls, set by `ClientConfig.max_recorded_calls`,
 and the plugin clears it per test.
 
@@ -802,8 +932,10 @@ option prints a live credential.
 
 The suite renders a header for every character RFC 9110 permits in a field name, and also
 for nonconforming names carrying `;`, a double quote and a space that `httpx` still
-accepts. It runs each generated command through `/bin/sh` and asserts that the name arrives
-unchanged and that no expansion or substitution ran. It also asserts that `x-api-key` and
+accepts. On a POSIX platform it runs each generated command through `/bin/sh` and asserts
+that the name arrives unchanged and that no expansion or substitution ran; the check is
+skipped where no POSIX shell exists, since it verifies `as_curl()`'s output against a POSIX
+shell by design, not against the platform running the test suite. It also asserts that `x-api-key` and
 `x_api_key` resolve to different variables, and that `X-API-Key` and `x-api-key` resolve to
 the same one.
 

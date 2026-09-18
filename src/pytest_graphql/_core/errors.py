@@ -314,6 +314,50 @@ class ScalarNotRegisteredError(GraphQLClientError):
         )
 
 
+class DiagnosticRenderError(GraphQLClientError):
+    """``RequestInfo.__repr__``/``as_curl()`` found no safe rendering
+    (DESIGN_DECISIONS.md section 7, "Boundary").
+
+    Raised instead of returning text that would expose a redacted value, or a
+    corrupted ``as_curl()`` request body, when a qualifying secret collides
+    with fixed or generated rendering syntax that no per-leaf substitution
+    can remove: syntax a format cannot omit (a class name, a shell
+    delimiter) cannot be replaced, and an already-valid JSON document (the
+    ``--data`` body) cannot be rewritten without breaking its structure.
+
+    Neither constructor argument is composed here: the fixed, descriptive
+    prose in :meth:`default_message` and the fixed ``renderer`` label are both
+    compile-time text, and a qualifying secret can equal a substring of
+    either one exactly as it can equal a renderer's own wrapper syntax
+    (DESIGN_DECISIONS.md section 7, "Value scrub for free-form text"). The
+    caller that already holds the qualifying set validates both ``renderer``
+    and the composed ``message`` against it first and passes an empty string
+    in place of whichever one collides, so this constructor never needs --
+    and is never trusted -- to repeat either check itself.
+    """
+
+    def __init__(self, renderer: str, message: str) -> None:
+        self.renderer = renderer
+        super().__init__(message)
+
+    @staticmethod
+    def default_message(renderer: str) -> str:
+        """The descriptive message a caller uses when it is safe to.
+
+        A ``@staticmethod`` rather than inline construction so the one call
+        site that raises this exception can validate this exact text against
+        the qualifying set *before* deciding whether to pass it or the empty
+        fallback to ``__init__``.
+        """
+        return (
+            f"{renderer} could not produce a safe representation of this "
+            "request: a redacted value collides with fixed or generated "
+            "rendering syntax.\n"
+            "  Use a different value for the colliding secret, or call "
+            "redacted() and inspect the snapshot's fields directly instead."
+        )
+
+
 class GraphQLTransportError(GraphQLTestError):
     """Raised by the network layer. Its leaves belong to M5a."""
 
