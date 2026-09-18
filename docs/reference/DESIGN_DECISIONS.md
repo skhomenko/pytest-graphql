@@ -932,8 +932,10 @@ option prints a live credential.
 
 The suite renders a header for every character RFC 9110 permits in a field name, and also
 for nonconforming names carrying `;`, a double quote and a space that `httpx` still
-accepts. It runs each generated command through `/bin/sh` and asserts that the name arrives
-unchanged and that no expansion or substitution ran. It also asserts that `x-api-key` and
+accepts. On a POSIX platform it runs each generated command through `/bin/sh` and asserts
+that the name arrives unchanged and that no expansion or substitution ran; the check is
+skipped where no POSIX shell exists, since it verifies `as_curl()`'s output against a POSIX
+shell by design, not against the platform running the test suite. It also asserts that `x-api-key` and
 `x_api_key` resolve to different variables, and that `X-API-Key` and `x-api-key` resolve to
 the same one.
 

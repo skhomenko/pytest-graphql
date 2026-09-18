@@ -1049,7 +1049,13 @@ def _run_curl_command_through_sh(
     network call. The shell's working directory is ``tmp_path``, so a
     command-injection attempt that runs (it should not) leaves its evidence
     there instead of in the repository checkout.
+
+    Skipped outside a POSIX platform: there is no ``/bin/sh`` to round-trip
+    the command through, and ``as_curl()``'s own quoting is verified against
+    a POSIX shell by design, not against the platform running the test.
     """
+    if os.name != "posix":
+        pytest.skip("requires a POSIX shell (/bin/sh), not available on this platform")
     bin_dir = tmp_path / "bin"
     out_file = tmp_path / "argv.bin"
     _write_curl_stub(bin_dir, out_file)
