@@ -20,8 +20,14 @@ published site, along with the rest of `docs/reference/`.
 ## 1. Product boundaries
 
 - One PyPI distribution named `pytest-graphql`. The import package is `pytest_graphql`.
-- `pytest` is an optional dependency. The required dependencies are `graphql-core` and
-  `httpx`. `pytest` lives in a `pytest` extra and in the `dev` extra.
+- `pytest` is an optional dependency. The required dependencies are `graphql-core`,
+  `httpx`, and `certifi`. `pytest` lives in a `pytest` extra and in the `dev` extra.
+  `certifi` was already an unconditional transitive dependency of `httpx`; it is a
+  direct dependency here because the transport imports it itself, to supply
+  `httpx`'s own default CA bundle (the one `httpx._config.create_ssl_context`
+  loads via `certifi.where()` when a caller does not pass its own) to the
+  locally reconstructed TLS context that keeps `SSLKEYLOGFILE` from being read
+  (see "Operational limits").
 - The `pytest11` entry point is always declared. It is inert when pytest is absent, because
   only pytest reads it.
 - The core library imports no pytest. Only modules under the pytest plugin package may
@@ -646,6 +652,18 @@ otherwise becomes a transport error naming it.
 
 - `ClientConfig.timeout` accepts a float applied to all four phases, or a
   `Timeout(connect, read, write, pool)` value. The default is 30 seconds per phase.
+- `Transport.send()`'s mandatory per-call `timeout: float` (SPEC.md 5.6) is a ceiling on
+  each of the transport's own four configured phases, not a replacement of them: the
+  request actually sent uses `min(configured_phase, call_timeout)` for connect, read,
+  write and pool individually. A phase-specific `ClientConfig.timeout`/transport-constructor
+  value therefore keeps governing a request whenever it is already at or under the
+  per-call budget, and only a phase configured looser than that budget gets clamped down
+  to it. This is the one combination rule that needs no information beyond what
+  `HttpxTransport.send()` already has on hand: it never has to guess whether the caller's
+  scalar is a deliberate override or a passed-through default, because it does not matter
+  to a ceiling either way. It does not by itself state how a future `GraphQLClient.execute()`
+  turns a per-call `timeout` option or `ClientConfig.timeout` into the scalar it passes to
+  `send()`; that remains M5c's call-convention design.
 - Retries are connect-failure only. `max_attempts` defaults to 3, so at most two retries.
   Backoff is `min(0.1 * 2 ** (attempt - 1), 2.0)` seconds with full jitter. A request that
   reached the server is never retried.

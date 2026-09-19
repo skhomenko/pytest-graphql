@@ -10,20 +10,27 @@ things: what was wrong, what was expected, and what to do about it.
 Suggestions come from ``difflib.get_close_matches``, the standard library
 fuzzy matcher, per SPEC 8.3: no third-party fuzzy matching dependency.
 
-Several leaf classes below the ``GraphQLTransportError`` and
-``GraphQLExecutionError`` branches are left as plain markers. Their real
-constructors belong to the milestone that raises them: M5a for the transport
-errors, M5c for execution and partial-data errors (some of that milestone's
-code is transcribed verbatim from published text, so this module must not
-guess at a shape that text will also define), and M8 for ``WaitTimeoutError``
-and ``ExpectedErrorNotRaised``. Defining them here only fixes their place in
-the hierarchy.
+``GraphQLTransportError`` and its leaves, plus ``GraphQLRequestError``, carry
+the real shape M5a's transport layer raises (C3, C13). The leaves below
+``GraphQLExecutionError`` are still left as plain markers: their constructors
+belong to M5c, some of it transcribed verbatim from published text, so this
+module must not guess at a shape that text will also define. ``WaitTimeoutError``
+and ``ExpectedErrorNotRaised`` are M8's. Defining every leaf here only fixes
+its place in the hierarchy ahead of the milestone that gives it a body.
 """
 
 from __future__ import annotations
 
 import difflib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # Deferred to break the import cycle: diagnostics.py imports
+    # DiagnosticRenderError from this module, so this module cannot import
+    # diagnostics.py back at runtime. Every transport and request exception
+    # below only needs the name for its ``request`` parameter's type.
+    from pytest_graphql._core.diagnostics import DiagnosticSnapshot
 
 
 def _best_match(name: str, candidates: Sequence[str]) -> str | None:
@@ -359,19 +366,77 @@ class DiagnosticRenderError(GraphQLClientError):
 
 
 class GraphQLTransportError(GraphQLTestError):
-    """Raised by the network layer. Its leaves belong to M5a."""
+    """Raised by the network layer (C3, C13).
+
+    Every instance carries ``request``, the redacted ``DiagnosticSnapshot``
+    of the request that failed, never the live ``RequestInfo``
+    (DESIGN_DECISIONS.md section 7, "Boundary"). ``body_excerpt`` is the
+    capped, already scrubbed-and-escaped response text C3 requires for an
+    unparsable response; it is empty for a failure that never received a
+    body, such as a connection or timeout error.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        request: DiagnosticSnapshot,
+        body_excerpt: str = "",
+    ) -> None:
+        self.request = request
+        self.body_excerpt = body_excerpt
+        super().__init__(message)
 
 
 class GraphQLConnectionError(GraphQLTransportError):
-    pass
+    """The connection could not be established, after every retry attempt."""
 
 
 class GraphQLTimeoutError(GraphQLTransportError):
-    pass
+    """A read or write timeout. Never retried (SPEC 5.6)."""
 
 
 class GraphQLHTTPStatusError(GraphQLTransportError):
-    pass
+    """A non-2xx response carrying no valid GraphQL envelope (C3)."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        request: DiagnosticSnapshot,
+        status_code: int,
+        body_excerpt: str = "",
+    ) -> None:
+        self.status_code = status_code
+        super().__init__(message, request=request, body_excerpt=body_excerpt)
+
+
+class GraphQLRequestError(GraphQLTestError):
+    """The server rejected the request before execution (C3).
+
+    A valid GraphQL envelope with no ``data`` entry at all, at any status,
+    means the server never started executing the request. This is distinct
+    from ``GraphQLExecutionError``, which means execution ran: an envelope
+    carrying a ``data`` entry, even ``null``, went through execution before
+    it failed. ``errors`` holds the envelope's structured error objects,
+    already scrubbed and escaped; ``request`` is the redacted snapshot, per
+    the same boundary rule every transport exception follows.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        request: DiagnosticSnapshot,
+        status_code: int,
+        media_type: str,
+        errors: tuple[Mapping[str, Any], ...],
+    ) -> None:
+        self.request = request
+        self.status_code = status_code
+        self.media_type = media_type
+        self.errors = errors
+        super().__init__(message)
 
 
 class GraphQLExecutionError(GraphQLTestError):

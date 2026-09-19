@@ -26,8 +26,8 @@ https://github.com/skhomenko/pytest-graphql/blob/main/CHANGELOG.md
 pip install pytest-graphql
 ```
 
-The required dependencies are `graphql-core` and `httpx`. `pytest` is optional,
-so the client can be used outside a test suite:
+The required dependencies are `graphql-core`, `httpx`, and `certifi`. `pytest`
+is optional, so the client can be used outside a test suite:
 
 ```
 pip install "pytest-graphql[pytest]"

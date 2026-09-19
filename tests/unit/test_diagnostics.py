@@ -335,6 +335,90 @@ def test_secret_in_url_path_is_scrubbed_in_snapshot_and_curl() -> None:
     assert token not in request.as_curl()
 
 
+def test_non_numeric_port_does_not_crash_redaction() -> None:
+    """``urllib.parse.SplitResult.port`` raises ``ValueError`` for a
+    non-numeric port, unlike every other accessor ``redacted()`` relies on.
+    A malformed URL is exactly the input a caller most needs a safe
+    ``redacted()`` for -- it is what a request-construction failure raises
+    over -- so this must produce a snapshot, not a second, unredacted
+    exception in its place (CR-20260919T001700Z-6ed5cad-3631bad9-F01, whose
+    fix depends on ``redacted()`` succeeding here).
+    """
+    token = "portsecret1234567890"
+    request = _make_request(
+        headers={"Authorization": f"Bearer {token}"},
+        url=f"http://example.test:{token}/graphql",
+    )
+    snapshot = request.redacted()
+    assert token not in snapshot.url
+    assert ":" + token not in snapshot.url
+
+
+@pytest.mark.parametrize(
+    "url_template",
+    [
+        pytest.param(
+            "http://{token}@[not-a-valid-ipv6/graphql", id="unmatched-ipv6-bracket"
+        ),
+        pytest.param(
+            "http://user:{token}@" + chr(0x2100) + chr(0xFF0F) + "/graphql",
+            id="nfkc-rejected-netloc",
+        ),
+    ],
+)
+def test_urlsplit_itself_rejecting_the_url_does_not_crash_redaction(
+    url_template: str,
+) -> None:
+    """``urlsplit`` does not only raise for a non-numeric port: some netlocs
+    fail its own grammar outright -- an unmatched IPv6 bracket, or a netloc
+    that fails NFKC normalization -- and its ``ValueError`` embeds the raw,
+    rejected netloc, credential included. Both ``_safe_url`` and
+    ``RequestInfo._redaction_context`` call ``urlsplit`` on the same
+    attacker-controlled URL, so both must survive every input class
+    ``urlsplit`` itself can reject, not only the one ``.port`` alone raises
+    for (CR-20260919T012246Z-6ed5cad-c2157e06-F01).
+    """
+    token = "urlsplitsecret1234567890"
+    request = _make_request(
+        headers={"Authorization": f"Bearer {token}"},
+        url=url_template.format(token=token),
+    )
+    snapshot = request.redacted()
+    assert token not in snapshot.url
+    scrubbed = request.scrub(f"parser rejected netloc containing {token} somewhere")
+    assert token not in scrubbed
+
+
+@pytest.mark.parametrize(
+    "url_template",
+    [
+        pytest.param(
+            "http://[not-a-valid-ipv6/graphql?token={token}",
+            id="unmatched-ipv6-bracket",
+        ),
+        pytest.param(
+            "http://" + chr(0x2100) + chr(0xFF0F) + "/graphql?token={token}",
+            id="nfkc-rejected-netloc",
+        ),
+    ],
+)
+def test_urlsplit_itself_rejecting_the_url_still_scrubs_a_query_secret(
+    url_template: str,
+) -> None:
+    """The fallback ``_redaction_context`` takes once ``urlsplit`` rejects a
+    URL recovered only the userinfo half of the URL-derived secret set,
+    leaving a credential present solely as a query value unscrubbed in any
+    free-form diagnostic text (CR-20260919T014345Z-6ed5cad-f040aef1-F02). The
+    credential here has no userinfo and no Authorization header to fall back
+    on, so a pass would only be possible through the query-string recovery
+    itself.
+    """
+    token = "querysecret1234567890"
+    request = _make_request(url=url_template.format(token=token))
+    scrubbed = request.scrub(f"parser rejected netloc containing {token} somewhere")
+    assert token not in scrubbed
+
+
 def test_cookie_value_is_scrubbed_from_free_form_text() -> None:
     """C16: "every cookie value" is a secret-set member on its own, distinct
     from the whole ``Cookie`` header value that ``redact_headers`` already
