@@ -183,6 +183,7 @@ prefix cannot be charged.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import unicodedata
 import urllib.parse
@@ -899,20 +900,114 @@ def _parse_cookie_values(header_value: str) -> list[str]:
     return values
 
 
+#: Matches a ``scheme://netloc`` prefix directly on raw URL text, without any
+#: of ``urlsplit``'s own bracket or NFKC-normalization validation. Used only
+#: as :func:`_lenient_userinfo`'s fallback once ``urlsplit`` itself has
+#: already rejected the URL (F01): linear-time, no nested quantifiers, so it
+#: cannot itself raise or hang on adversarial input.
+_SCHEME_NETLOC_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://([^/?#]*)")
+
+#: Matches everything between a URL's scheme and its first ``?``, then
+#: captures the query text up to any ``#`` fragment. Used only as
+#: :func:`_lenient_query`'s fallback once ``urlsplit`` itself has already
+#: rejected the URL (CR-20260919T014345Z-6ed5cad-f040aef1-F02): the query
+#: delimiter is unambiguous in the raw text regardless of whether the
+#: authority before it is well-formed, and the single ``[^?#]*`` run is
+#: linear-time, so this cannot itself raise or hang on adversarial input.
+_SCHEME_QUERY_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://[^?#]*\?([^#]*)")
+
+
+def _try_urlsplit(url: str) -> urllib.parse.SplitResult | None:
+    """``urllib.parse.urlsplit``, made total over the full malformed-input space.
+
+    ``urlsplit`` itself raises ``ValueError`` for some malformed input --  an
+    unmatched IPv6 bracket, or a netloc that fails NFKC normalization -- and
+    that exception's own message embeds the raw netloc it rejected, userinfo
+    included: exactly the credential this module exists to keep out of a
+    raised exception (CR-20260919T012246Z-6ed5cad-c2157e06-F01). Every caller
+    that needs a parsed URL for the redaction boundary goes through this
+    instead of the raw stdlib call, and treats ``None`` as "no safe structure
+    available" rather than letting the raw ``ValueError`` escape.
+    """
+    try:
+        return urllib.parse.urlsplit(url)
+    except ValueError:
+        return None
+
+
+def _lenient_userinfo(url: str) -> tuple[str | None, str | None]:
+    """Best-effort ``username``, ``password`` extraction for a URL ``urlsplit``
+    itself rejects.
+
+    Matches directly on the raw ``scheme://netloc`` text, tolerant of the
+    stricter IPv6-bracket and NFKC-normalization grammar ``urlsplit``
+    enforces, so a userinfo segment is still found and added to the secret
+    set even for a netloc ``urlsplit`` refuses to parse at all. Returns
+    ``(None, None)`` when the text has no recognizable ``scheme://`` prefix
+    or no ``@``-delimited userinfo within it.
+    """
+    match = _SCHEME_NETLOC_PATTERN.match(url)
+    if match is None:
+        return None, None
+    userinfo, sep, _ = match.group(1).rpartition("@")
+    if not sep:
+        return None, None
+    username, _, password = userinfo.partition(":")
+    return (username or None), (password or None)
+
+
+def _lenient_query(url: str) -> str:
+    """Best-effort query-string extraction for a URL ``urlsplit`` itself
+    rejects.
+
+    Matches directly on the raw text after the first ``?`` following the
+    scheme, tolerant of the same stricter authority grammar
+    :func:`_lenient_userinfo` already works around, so a query-string
+    credential is still found and added to the secret set even for a netloc
+    ``urlsplit`` refuses to parse at all. Returns ``""`` when the text has no
+    recognizable ``scheme://`` prefix or no ``?`` within it, matching
+    ``SplitResult.query``'s own empty-string convention for "no query".
+    """
+    match = _SCHEME_QUERY_PATTERN.match(url)
+    if match is None:
+        return ""
+    return match.group(1)
+
+
 def _safe_url(url: str) -> str:
     """Strip userinfo and the query string from a URL (C2).
 
     An IPv6 literal's brackets are restored around the host: ``.hostname``
     strips them, and without restoring them ``[::1]:8000`` would rebuild as
     the invalid, silently-wrong ``::1:8000``.
+
+    This must never raise: it runs while building the redacted snapshot for
+    an exception a malformed ``url`` itself caused (a non-numeric port, for
+    instance), and that is exactly the moment a caller most needs a safe
+    representation back, not a second, unredacted exception in its place.
+    ``.port`` raises ``ValueError`` for a non-numeric port where every other
+    ``SplitResult`` accessor used here stays lenient, so a port that cannot
+    be parsed is dropped rather than guessed at: reusing its raw text would
+    risk reproducing, unscrubbed, whatever a malformed URL put there. A URL
+    ``urlsplit`` itself rejects (:func:`_try_urlsplit` returns ``None``) has
+    no safe structure to extract anything from at all, so this returns a
+    fixed placeholder rather than any substring of the raw text, which could
+    itself still carry the credential the rejection message did
+    (CR-20260919T012246Z-6ed5cad-c2157e06-F01).
     """
-    split = urllib.parse.urlsplit(url)
+    split = _try_urlsplit(url)
+    if split is None:
+        return "<url unavailable: could not be parsed>"
     hostname = split.hostname or ""
     if ":" in hostname:
         hostname = f"[{hostname}]"
     netloc = hostname
-    if split.port is not None:
-        netloc = f"{netloc}:{split.port}"
+    try:
+        port = split.port
+    except ValueError:
+        port = None
+    if port is not None:
+        netloc = f"{netloc}:{port}"
     stripped = split._replace(netloc=netloc, query="")
     return urllib.parse.urlunsplit(stripped)
 
@@ -1451,14 +1546,25 @@ class RequestInfo:
 
         _collect_variable_secrets(self.variables, self.redact_variables, sources)
 
-        split = urllib.parse.urlsplit(self.url)
-        if split.username:
-            _add_secret(split.username, "url", sources)
-            _add_secret(urllib.parse.unquote(split.username), "url", sources)
-        if split.password:
-            _add_secret(split.password, "url", sources)
-            _add_secret(urllib.parse.unquote(split.password), "url", sources)
-        for _, value in urllib.parse.parse_qsl(split.query, keep_blank_values=True):
+        split = _try_urlsplit(self.url)
+        if split is not None:
+            username, password, query = split.username, split.password, split.query
+        else:
+            # ``urlsplit`` itself rejected this URL (F01): fall back to a
+            # lenient, non-raising extraction so a userinfo or query-string
+            # credential still enters the secret set instead of surviving
+            # unscrubbed in whatever raw exception text the rejection
+            # produces elsewhere (CR-20260919T014345Z-6ed5cad-f040aef1-F02
+            # for the query half).
+            username, password = _lenient_userinfo(self.url)
+            query = _lenient_query(self.url)
+        if username:
+            _add_secret(username, "url", sources)
+            _add_secret(urllib.parse.unquote(username), "url", sources)
+        if password:
+            _add_secret(password, "url", sources)
+            _add_secret(urllib.parse.unquote(password), "url", sources)
+        for _, value in urllib.parse.parse_qsl(query, keep_blank_values=True):
             _add_secret(value, "url", sources)
 
         min_length = self.min_redacted_value_length

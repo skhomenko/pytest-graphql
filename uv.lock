@@ -588,6 +588,7 @@ wheels = [
 name = "pytest-graphql"
 source = { editable = "." }
 dependencies = [
+    { name = "certifi" },
     { name = "graphql-core" },
     { name = "httpx" },
 ]
@@ -606,6 +607,7 @@ pytest = [
 
 [package.metadata]
 requires-dist = [
+    { name = "certifi" },
     { name = "coverage", extras = ["toml"], marker = "extra == 'dev'", specifier = ">=7.4" },
     { name = "graphql-core", specifier = ">=3.2,<4" },
     { name = "httpx", specifier = ">=0.27,<1" },
