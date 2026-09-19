@@ -560,6 +560,31 @@ There is no shape-based guess.
 
 `GraphQLResponse.raw` holds the untouched envelope, captured before any parsing.
 
+Validation is eager and wrapping is lazy. `build_response` checks the whole `data` value
+against its declared types once, then a `Node` wraps each field on first read and caches
+it. A value that contradicts its type raises `ResponseShapeError`, which names the response
+path and the schema type and never echoes a server value. The checks are: a list where the
+type is a list, an object where it is an object, the built-in scalar kinds (`Int` and
+`Float` refuse `bool`), a string for an enum, and a `__typename` that names a possible type
+of the abstract parent. A `null` is accepted at any position. A key the selection did not
+ask for is kept and read as raw JSON. Object and list nesting past 128 levels raises, wherever
+it sits in `data`, `errors` or `extensions`, including inside a custom scalar value and under
+an unselected key. The bound counts every `Mapping`, list and tuple, because a custom
+`Transport` may return any of them, not only the `dict` and `list` a JSON decoder builds. When
+an abstract value carries no `__typename`, every type-conditioned fragment applies to it.
+
+`GraphQLResponse.http` is `HttpInfo`: `status_code`, `media_type`, `url` (from the redacted
+request snapshot) and `headers`. It carries no reason phrase, because HTTP/2 has none, and no
+elapsed time, which is `GraphQLResponse.duration_ms`.
+
+`GraphQLResponse.raw` is rebuilt from the transport's parsed result, so `errors` and
+`extensions` appear only when present and non-empty. The `data` value inside it is the
+object the transport parsed, unmodified.
+
+`Node.__repr__`, `GraphQLResponse.__repr__` and `GraphQLErrorInfo.__repr__` render field
+names, counts, the status and the redacted request snapshot. They never render a response
+value or an error message.
+
 ### Response states and raising
 
 `GraphQLResponse` distinguishes three states: `data` absent, `data` null, and `data`
@@ -580,8 +605,9 @@ protocol violation.
 
 `execute()` always returns `GraphQLResponse`. Convenience unwrapping stays on `query()` and
 `mutation()`, which have exactly one known top-level field. `GraphQLResponse.unwrap()` is
-the explicit opt-in for a raw document, and it raises `GraphQLTestError` naming the fields
-when the document has more than one top-level field.
+the explicit opt-in for a raw document. It counts the fields the document selects at the top
+level, whether or not the server returned them, and it raises `GraphQLTestError` naming the fields
+when that count is not one.
 
 ### `Node` as a mapping
 

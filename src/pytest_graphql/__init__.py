@@ -10,12 +10,22 @@ it against the tag.
 from __future__ import annotations
 
 from pytest_graphql._core.diagnostics import DiagnosticSnapshot, RequestInfo
-from pytest_graphql._core.errors import DiagnosticRenderError
+from pytest_graphql._core.errors import (
+    DiagnosticRenderError,
+    GraphQLFieldError,
+    ResponseShapeError,
+)
+from pytest_graphql._core.response import GraphQLResponse, Node, NodeList
 
 __all__ = [
     "DiagnosticRenderError",
     "DiagnosticSnapshot",
+    "GraphQLFieldError",
+    "GraphQLResponse",
+    "Node",
+    "NodeList",
     "RequestInfo",
+    "ResponseShapeError",
     "__version__",
 ]
 

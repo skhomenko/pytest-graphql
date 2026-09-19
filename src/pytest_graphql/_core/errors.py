@@ -447,8 +447,16 @@ class GraphQLPartialDataError(GraphQLExecutionError):
     pass
 
 
-class GraphQLFieldError(GraphQLTestError):
-    """A response field was accessed that does not exist, or is ambiguous."""
+class GraphQLFieldError(GraphQLTestError, AttributeError, KeyError):
+    """A response field was accessed that does not exist, or is ambiguous.
+
+    It is also an ``AttributeError`` and a ``KeyError`` so that ``hasattr``,
+    ``getattr(node, name, default)`` and ``Mapping.get`` keep their ordinary
+    meaning on a ``Node``. ``KeyError`` would otherwise render the message
+    through ``repr``, so ``__str__`` is the plain ``Exception`` one.
+    """
+
+    __str__ = Exception.__str__
 
     def __init__(self, message: str) -> None:
         super().__init__(message)
@@ -477,6 +485,19 @@ class GraphQLFieldError(GraphQLTestError):
             f"{_and_join(exact_names)}.\n"
             "  Use the exact field name to disambiguate."
         )
+
+
+class ResponseShapeError(GraphQLTestError):
+    """A response value contradicts the type its selection declares (C5).
+
+    The message names the response path and the schema types only. It never
+    echoes a server-supplied value, so it carries nothing the redaction
+    boundary would have to scrub.
+    """
+
+    def __init__(self, message: str, *, path: tuple[str | int, ...]) -> None:
+        self.path = path
+        super().__init__(message)
 
 
 class WaitTimeoutError(GraphQLTestError):
