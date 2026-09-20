@@ -187,13 +187,13 @@ import re
 import shlex
 import unicodedata
 import urllib.parse
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from fnmatch import fnmatchcase
 from secrets import token_hex as _random_secret_token_hex
 from types import MappingProxyType
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from pytest_graphql._core.errors import DiagnosticRenderError
 from pytest_graphql._core.naming import to_snake
@@ -226,6 +226,10 @@ DEFAULT_REDACT_VARIABLES: tuple[str, ...] = (
 DEFAULT_MIN_REDACTED_VALUE_LENGTH = 8
 DEFAULT_MAX_DIAGNOSTIC_BYTES = 4096
 DEFAULT_MAX_RECORDED_ERRORS = 20
+
+#: B3: the diagnostics recorder is a bounded deque, default 50 calls, set by
+#: ``ClientConfig.max_recorded_calls``. The plugin clears it per test.
+DEFAULT_MAX_RECORDED_CALLS = 50
 
 #: C2 total cap per snapshot, across every field.
 _TOTAL_DIAGNOSTIC_BYTES_CAP = 32768
@@ -1064,6 +1068,60 @@ _JSON_KEY_SEP_COST = 2
 _JSON_QUOTE_COST = 2
 
 
+#: C58: an automatic omission's reason, one of the seven the design document
+#: names. A record never carries an argument value, only the position and the
+#: reason, so no request data can reach a report through this channel.
+OmissionReason = Literal[
+    "required-argument",
+    "deprecated",
+    "connection-page-size",
+    "connection-depth",
+    "depth",
+    "cycle",
+    "should-include",
+]
+
+#: C58: a skipped field is not counted by ``max_fields``, so the records carry
+#: their own bound. The first 50 in traversal order are retained, the total is
+#: tracked, and the number omitted is reported visibly.
+MAX_OMISSION_RECORDS = 50
+
+
+@dataclass(frozen=True)
+class OmissionRecord:
+    """One field auto-selection dropped, and why (C58, SPEC 5.4 rule 3).
+
+    ``path`` is relative to the ``AUTO`` scope the record was produced in,
+    because ``AUTO`` is a scope and every position a policy describes is
+    measured from that scope's root. Diagnostics prefixes it when it composes
+    a nested or cached selection into a larger document, so a reader sees the
+    field's position in the finished document rather than in the fragment it
+    came from.
+    """
+
+    parent_type: str
+    path: tuple[str, ...]
+    reason: OmissionReason
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "path", tuple(self.path))
+
+    def rebased(self, prefix: Sequence[str]) -> OmissionRecord:
+        """This record with ``prefix`` in front of its path (C56)."""
+        if not prefix:
+            return self
+        return OmissionRecord(
+            parent_type=self.parent_type,
+            path=(*prefix, *self.path),
+            reason=self.reason,
+        )
+
+    @property
+    def field_path(self) -> str:
+        """The dotted rendering a report shows."""
+        return ".".join(self.path)
+
+
 @dataclass(frozen=True)
 class _HeaderEntry:
     """One header in ``DiagnosticSnapshot.curl_headers``, in request order (C48, C54).
@@ -1106,10 +1164,23 @@ class DiagnosticSnapshot:
     idempotent: bool
     curl_headers: tuple[_HeaderEntry, ...] = ()
     truncated: tuple[str, ...] = ()
+    #: C58. Bounded by ``MAX_OMISSION_RECORDS`` rather than by
+    #: ``max_diagnostic_bytes``, because a skipped field is not counted by
+    #: ``max_fields`` either and the records need a bound of their own.
+    omissions: tuple[OmissionRecord, ...] = ()
+    #: How many omissions the selection produced in total, including the ones
+    #: past the bound. ``omissions_dropped`` is what a report states visibly.
+    omissions_total: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "headers", MappingProxyType(dict(self.headers)))
         object.__setattr__(self, "variables", MappingProxyType(dict(self.variables)))
+        object.__setattr__(self, "omissions", tuple(self.omissions))
+
+    @property
+    def omissions_dropped(self) -> int:
+        """How many omission records the bound cut. Never silent (C2, C58)."""
+        return max(self.omissions_total - len(self.omissions), 0)
 
 
 class _FieldBudget:
@@ -1501,9 +1572,14 @@ class RequestInfo:
     min_redacted_value_length: int = DEFAULT_MIN_REDACTED_VALUE_LENGTH
     max_diagnostic_bytes: int = DEFAULT_MAX_DIAGNOSTIC_BYTES
     max_recorded_errors: int = DEFAULT_MAX_RECORDED_ERRORS
+    #: C58. The automatic omissions the selection behind this request made,
+    #: already rebased onto the finished document by whoever composed it.
+    #: ``redacted()`` scrubs, escapes and bounds them onto the snapshot.
+    omissions: tuple[OmissionRecord, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "variables", MappingProxyType(dict(self.variables)))
+        object.__setattr__(self, "omissions", tuple(self.omissions))
         headers = {str(k): str(v) for k, v in self.headers.items()}
         object.__setattr__(self, "headers", MappingProxyType(headers))
         object.__setattr__(
@@ -1656,6 +1732,17 @@ class RequestInfo:
             method=_scrub_and_escape(self.method, secrets),
             url=_scrub_and_escape(_safe_url(self.url), secrets),
             idempotent=self.idempotent,
+            omissions=tuple(
+                OmissionRecord(
+                    parent_type=_scrub_and_escape(record.parent_type, secrets),
+                    path=tuple(
+                        _scrub_and_escape(segment, secrets) for segment in record.path
+                    ),
+                    reason=record.reason,
+                )
+                for record in self.omissions[:MAX_OMISSION_RECORDS]
+            ),
+            omissions_total=len(self.omissions),
         )
         snapshot = _apply_size_limits(
             snapshot, self.max_diagnostic_bytes, header_sources, secrets, marker_for
@@ -1800,3 +1887,150 @@ def _curl_redacted_header_argument(
     """
     literal = quote(f"{name}: ")
     return f'-H {literal}"${{{variable}}}"'
+
+
+# -- free-form text, made safe to record (C16 "Coverage") ---------------------
+#
+# One primitive, used everywhere free-form text crosses the boundary: a
+# transport exception's body excerpt or error message (M5a), and the recorder
+# dump, log records and report sections below (M5c). A second implementation
+# of the same three stages is how one of those paths ends up missing one.
+
+
+def sanitize_text(request: RequestInfo, text: str) -> str:
+    """Scrub, escape, scrub again: the stage order C16 documents.
+
+    The second scrub is not redundant. Escaping can synthesize a different
+    qualifying secret's spelling out of text that was already safe before it
+    ran, exactly as the module docstring describes for a secret's source
+    label.
+    """
+    once = request.scrub(text)
+    escaped = escape_control_characters(once)
+    return request.scrub(escaped)
+
+
+def truncate_text(text: str, limit: int) -> tuple[str, int]:
+    """Truncate ``text`` to at most ``limit`` UTF-8 bytes, on a code-point boundary.
+
+    Returns the truncated text and the number of bytes cut. A binary search
+    over code-point counts, the same technique :func:`_truncate_json_string`
+    uses for a JSON string body, adapted for a plain string with no
+    surrounding quotes.
+    """
+    limit = max(limit, 0)
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return text, 0
+    low, high = 0, len(text)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if len(text[:mid].encode("utf-8")) <= limit:
+            low = mid
+        else:
+            high = mid - 1
+    truncated = text[:low]
+    return truncated, len(encoded) - len(truncated.encode("utf-8"))
+
+
+def safe_excerpt(request: RequestInfo, text: str) -> str:
+    """A scrubbed, escaped, length-capped excerpt of free-form text (C3, C16).
+
+    Truncation runs last (C16 "Stage order"), after the scrub and the escape,
+    so a cut can never leave part of a secret behind. The cut is stated
+    rather than silent (C2 "Truncation is visible, never silent").
+    """
+    safe = sanitize_text(request, text)
+    truncated, cut = truncate_text(safe, request.max_diagnostic_bytes)
+    if cut:
+        return f"{truncated}... (truncated, {cut} byte(s) cut)"
+    return truncated
+
+
+# -- the recorder (B3) --------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RecordedCall:
+    """One call a client made, in the only form that may be recorded (C2).
+
+    Every field here is already redacted, scrubbed, escaped and bounded.
+    ``request`` is a ``DiagnosticSnapshot``, never a live ``RequestInfo``,
+    and ``failure`` is free-form text that went through :func:`safe_excerpt`.
+    Nothing on this object carries a live header value, a variable value or
+    a response value, so a dump of it cannot leak one.
+    """
+
+    request: DiagnosticSnapshot
+    outcome: Literal["ok", "errors", "failed"]
+    status_code: int | None = None
+    duration_ms: float = 0.0
+    error_count: int = 0
+    failure: str = ""
+
+
+class DiagnosticsRecorder:
+    """A bounded record of the calls one client made (B3).
+
+    A ``deque`` with ``maxlen``, so the oldest call is evicted rather than
+    the recorder growing without limit outside pytest, which is the defect
+    B3 exists to close. The plugin clears it per test.
+    """
+
+    __slots__ = ("_calls",)
+
+    def __init__(self, max_calls: int = DEFAULT_MAX_RECORDED_CALLS) -> None:
+        self._calls: deque[RecordedCall] = deque(maxlen=max(max_calls, 0))
+
+    def record(self, call: RecordedCall) -> None:
+        self._calls.append(call)
+
+    def clear(self) -> None:
+        self._calls.clear()
+
+    @property
+    def calls(self) -> tuple[RecordedCall, ...]:
+        return tuple(self._calls)
+
+    @property
+    def max_calls(self) -> int:
+        return self._calls.maxlen or 0
+
+    def __len__(self) -> int:
+        return len(self._calls)
+
+    def dump(self) -> str:
+        """The text form a report section or a log record carries.
+
+        Built only from the recorded snapshots, which already passed every
+        redaction stage, so this method performs no scrub of its own and has
+        no live value to scrub.
+        """
+        if not self._calls:
+            return "no GraphQL calls recorded"
+        lines: list[str] = []
+        for index, call in enumerate(self._calls, start=1):
+            snapshot = call.request
+            status = "-" if call.status_code is None else str(call.status_code)
+            lines.append(
+                f"{index}. {snapshot.kind} {snapshot.operation or '<anonymous>'} "
+                f"-> {call.outcome} (status {status}, "
+                f"{call.duration_ms:.1f} ms, {call.error_count} error(s))"
+            )
+            lines.append(f"   {snapshot.method} {snapshot.url}")
+            if call.failure:
+                lines.append(f"   failure: {call.failure}")
+            if snapshot.truncated:
+                lines.append(f"   truncated: {', '.join(snapshot.truncated)}")
+            if snapshot.omissions:
+                shown = ", ".join(
+                    f"{record.parent_type}.{record.field_path} ({record.reason})"
+                    for record in snapshot.omissions
+                )
+                lines.append(f"   auto-selection omitted: {shown}")
+            if snapshot.omissions_dropped:
+                lines.append(
+                    f"   ... and {snapshot.omissions_dropped} further omission(s) "
+                    f"not shown, of {snapshot.omissions_total} total"
+                )
+        return "\n".join(lines)

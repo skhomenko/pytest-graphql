@@ -12,10 +12,12 @@ it, exactly once, when it closes itself.
 Every exception this module raises carries ``request.redacted()``, never the
 live ``request``, and every piece of response-controlled or exception-derived
 text that reaches one -- a body excerpt, a structured GraphQL error, an
-underlying ``httpx`` exception's own message -- is scrubbed and escaped with
-the two primitives the Diagnostics foundation milestone exposed for exactly
-this (C59): ``RequestInfo.scrub`` and ``escape_control_characters``. The
-scrub runs twice around the escape pass, mirroring ``diagnostics.py``'s own
+underlying ``httpx`` exception's own message -- goes through the shared
+primitives ``diagnostics.py`` owns: ``sanitize_text`` and ``safe_excerpt``.
+They live there rather than here because M5c's recorder dump, log records and
+report sections need the same three stages, and a second implementation of
+them is how one of those paths ends up missing one. The scrub runs twice
+around the escape pass, mirroring ``diagnostics.py``'s own
 ``_scrub_and_escape``, because escaping can itself synthesize a different
 qualifying secret's spelling from a raw control character that was not that
 secret before escaping expanded it (module docstring of ``diagnostics.py``,
@@ -33,7 +35,7 @@ import time
 import warnings
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import certifi
 import httpx
@@ -41,7 +43,8 @@ from httpx._config import create_ssl_context as _httpx_create_ssl_context
 
 from pytest_graphql._core.diagnostics import (
     RequestInfo,
-    escape_control_characters,
+    safe_excerpt,
+    sanitize_text,
 )
 from pytest_graphql._core.errors import (
     GraphQLConnectionError,
@@ -67,6 +70,13 @@ _LEGACY_JSON_MEDIA_TYPE = "application/json"
 DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+
+#: C4/C17. Cookie isolation is a property of this transport, not of the
+#: client: an ``httpx.Client`` persists cookies by design, so the scope has
+#: to be applied where the jar lives. ``"none"``, the default, clears the
+#: jar after every response, so no ``Set-Cookie`` survives a call.
+#: ``"client"`` keeps it for that one logical client.
+CookieScope = Literal["none", "client"]
 
 #: C13: "Backoff is min(0.1 * 2 ** (attempt - 1), 2.0) seconds with full jitter."
 _BACKOFF_BASE_SECONDS = 0.1
@@ -111,48 +121,6 @@ def _declared_charset(content_type: str) -> str | None:
     return None
 
 
-def _sanitize_text(request: RequestInfo, text: str) -> str:
-    """Scrub, escape, scrub again: the stage order C16 documents (module docstring)."""
-    once = request.scrub(text)
-    escaped = escape_control_characters(once)
-    return request.scrub(escaped)
-
-
-def _truncate_text(text: str, limit: int) -> tuple[str, int]:
-    """Truncate ``text`` to at most ``limit`` UTF-8 bytes, on a code-point boundary.
-
-    Returns the truncated text and the number of bytes cut. A binary search
-    over code-point counts, the same technique ``diagnostics.py`` uses for a
-    JSON string body, adapted for a plain string with no surrounding quotes.
-    """
-    limit = max(limit, 0)
-    encoded = text.encode("utf-8")
-    if len(encoded) <= limit:
-        return text, 0
-    low, high = 0, len(text)
-    while low < high:
-        mid = (low + high + 1) // 2
-        if len(text[:mid].encode("utf-8")) <= limit:
-            low = mid
-        else:
-            high = mid - 1
-    truncated = text[:low]
-    return truncated, len(encoded) - len(truncated.encode("utf-8"))
-
-
-def _safe_excerpt(request: RequestInfo, text: str) -> str:
-    """A scrubbed, escaped, length-capped body excerpt for an exception (C3).
-
-    Truncation runs last (C16 "Stage order"), after the scrub and the
-    escape, so a cut can never leave part of a secret behind.
-    """
-    safe = _sanitize_text(request, text)
-    truncated, cut = _truncate_text(safe, request.max_diagnostic_bytes)
-    if cut:
-        return f"{truncated}... (truncated, {cut} byte(s) cut)"
-    return truncated
-
-
 def _sanitize_json_value(request: RequestInfo, value: Any) -> Any:
     """Recursively scrub and escape every string in a parsed JSON value.
 
@@ -162,10 +130,10 @@ def _sanitize_json_value(request: RequestInfo, value: Any) -> Any:
     (DESIGN_DECISIONS.md section 7) like any other.
     """
     if isinstance(value, str):
-        return _sanitize_text(request, value)
+        return sanitize_text(request, value)
     if isinstance(value, Mapping):
         return {
-            (_sanitize_text(request, key) if isinstance(key, str) else key): (
+            (sanitize_text(request, key) if isinstance(key, str) else key): (
                 _sanitize_json_value(request, sub)
             )
             for key, sub in value.items()
@@ -441,6 +409,7 @@ class HttpxTransport(DerivableTransportBase):
         proxy: httpx.Proxy | str | None = None,
         verify: bool | str | ssl.SSLContext = True,
         http2: bool = False,
+        cookie_scope: CookieScope = "none",
         _shared_pool: httpx.BaseTransport | None = None,
     ) -> None:
         if verify is False:
@@ -451,6 +420,7 @@ class HttpxTransport(DerivableTransportBase):
             )
         self._max_attempts = max_attempts
         self._max_response_bytes = max_response_bytes
+        self._cookie_scope: CookieScope = cookie_scope
         self._pool: httpx.BaseTransport = _shared_pool or httpx.HTTPTransport(
             verify=_resolve_ssl_context(verify, trust_env=trust_env),
             trust_env=trust_env,
@@ -524,7 +494,18 @@ class HttpxTransport(DerivableTransportBase):
             classify_error = self._timeout_error(request, exc)
         except httpx.HTTPError as exc:
             classify_error = self._connection_error(request, exc)
+        finally:
+            # C17. Under the default scope no ``Set-Cookie`` survives a call,
+            # so the jar is cleared whatever the response did, including on a
+            # classification failure: a response that set a cookie and then
+            # failed to parse must not leave that cookie behind either.
+            self._clear_cookies_if_scoped()
         raise classify_error
+
+    def _clear_cookies_if_scoped(self) -> None:
+        """Drop every cookie this client holds, under ``cookie_scope="none"``."""
+        if self._cookie_scope == "none":
+            self._client.cookies.clear()
 
     def close(self) -> None:
         if self._closed:
@@ -545,6 +526,7 @@ class HttpxTransport(DerivableTransportBase):
             timeout=self._client.timeout,
             max_attempts=self._max_attempts,
             max_response_bytes=self._max_response_bytes,
+            cookie_scope=self._cookie_scope,
             _shared_pool=wrapper,
         )
 
@@ -593,8 +575,8 @@ class HttpxTransport(DerivableTransportBase):
             _LEGACY_JSON_MEDIA_TYPE,
         )
         if not is_graphql_media_type or not _is_envelope(parsed):
-            excerpt = _safe_excerpt(request, text)
-            safe_content_type = _sanitize_text(request, content_type)
+            excerpt = safe_excerpt(request, text)
+            safe_content_type = sanitize_text(request, content_type)
             if 200 <= status < 300:
                 raise GraphQLTransportError(
                     f"response was not a valid GraphQL envelope "
@@ -666,7 +648,7 @@ class HttpxTransport(DerivableTransportBase):
 
         partial = b"".join(chunks)
         if overflowed:
-            excerpt = _safe_excerpt(request, partial.decode("utf-8", errors="replace"))
+            excerpt = safe_excerpt(request, partial.decode("utf-8", errors="replace"))
             raise GraphQLTransportError(
                 f"response body exceeded max_response_bytes="
                 f"{self._max_response_bytes:,}: {excerpt}",
@@ -688,7 +670,7 @@ class HttpxTransport(DerivableTransportBase):
         except LookupError:
             unknown_charset = True
         if unknown_charset:
-            safe_charset = _sanitize_text(request, charset)
+            safe_charset = sanitize_text(request, charset)
             raise GraphQLTransportError(
                 f"response declared an unknown charset {safe_charset!r}.",
                 request=request.redacted(),
@@ -713,13 +695,13 @@ class HttpxTransport(DerivableTransportBase):
     def _connection_error(
         self, request: RequestInfo, exc: Exception
     ) -> GraphQLConnectionError:
-        message = _sanitize_text(request, f"connection failed: {exc}")
+        message = sanitize_text(request, f"connection failed: {exc}")
         return GraphQLConnectionError(message, request=request.redacted())
 
     def _timeout_error(
         self, request: RequestInfo, exc: Exception
     ) -> GraphQLTimeoutError:
-        message = _sanitize_text(request, f"request timed out: {exc}")
+        message = sanitize_text(request, f"request timed out: {exc}")
         return GraphQLTimeoutError(message, request=request.redacted())
 
     def _request_construction_error(
@@ -735,5 +717,5 @@ class HttpxTransport(DerivableTransportBase):
         exception types are guaranteed to be an ``httpx.HTTPError`` subclass
         the other handlers already catch.
         """
-        message = _sanitize_text(request, f"failed to build the request: {exc}")
+        message = sanitize_text(request, f"failed to build the request: {exc}")
         return GraphQLTransportError(message, request=request.redacted())
