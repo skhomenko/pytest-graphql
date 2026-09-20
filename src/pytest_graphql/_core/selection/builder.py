@@ -74,6 +74,11 @@ from graphql import (
     is_leaf_type,
 )
 
+from pytest_graphql._core.diagnostics import (
+    MAX_OMISSION_RECORDS,
+    OmissionReason,
+    OmissionRecord,
+)
 from pytest_graphql._core.errors import SelectionError, SelectionTooLargeError
 from pytest_graphql._core.selection.policy import (
     PAGE_SIZE_ARGUMENT,
@@ -143,6 +148,16 @@ class BuiltSelection:
     #: guards document size, so a caller composing this selection into a larger
     #: one adds this count to its own rather than rebuilding to find it (C56).
     field_count: int = 0
+
+    #: C58: what this selection dropped, and why, bounded by
+    #: ``MAX_OMISSION_RECORDS``. Paths are relative to this scope's root, so a
+    #: caller composing the selection into a larger document rebases them.
+    omissions: tuple[OmissionRecord, ...] = ()
+
+    #: How many omissions the walk made in total, including past the bound. A
+    #: skipped field is not counted by ``max_fields``, so this is the only
+    #: number that states the true size.
+    omissions_total: int = 0
 
 
 class SelectionBuilder:
@@ -219,6 +234,8 @@ class _Walk:
         self._emitted = 0
         self._root_name = ""
         self._uses_page_size = False
+        self._omissions: list[OmissionRecord] = []
+        self._omissions_total = 0
 
     def run(self, type_: GraphQLCompositeType) -> BuiltSelection:
         self._root_name = type_.name
@@ -245,7 +262,27 @@ class _Walk:
             selection_set=SelectionSetNode(selections=tuple(selections)),
             variables=variables,
             field_count=self._emitted,
+            omissions=tuple(self._omissions),
+            omissions_total=self._omissions_total,
         )
+
+    def _omit(
+        self, parent_type_name: str, path: tuple[str, ...], reason: OmissionReason
+    ) -> None:
+        """Record one automatic omission (C58, SPEC 5.4 rule 3).
+
+        The record carries the parent type, the field path relative to this
+        scope, and the reason, and never an argument value. The bound is the
+        records' own, because a skipped field is not counted by
+        ``max_fields``: the first ``MAX_OMISSION_RECORDS`` in traversal order
+        are kept and the total is tracked, so what was cut is reported rather
+        than lost.
+        """
+        self._omissions_total += 1
+        if len(self._omissions) < MAX_OMISSION_RECORDS:
+            self._omissions.append(
+                OmissionRecord(parent_type=parent_type_name, path=path, reason=reason)
+            )
 
     def _count(self) -> None:
         self._emitted += 1
@@ -459,18 +496,28 @@ class _Walk:
         connection_depth: int,
         depth_cost: int = 1,
     ) -> FieldNode | None:
-        """One field, or ``None`` when a rule removes it."""
+        """One field, or ``None`` when a rule removes it.
+
+        Every ``return None`` below is one of C58's seven reasons, and each
+        records why before it returns. A silent skip here is the defect SPEC
+        5.4 rule 3 exists to close: the field is gone from the document and
+        nothing tells the reader which rule removed it.
+        """
+        field_path = (*path, name)
         if not self._policy.should_include(parent_type_name, name, path, len(path)):
+            self._omit(parent_type_name, field_path, "should-include")
             return None
         if (
             field_.deprecation_reason is not None
             and not self._policy.include_deprecated
         ):
+            self._omit(parent_type_name, field_path, "deprecated")
             return None
 
         named = get_named_type(field_.type)
         if is_leaf_type(named):
             if missing_required_arguments(field_):
+                self._omit(parent_type_name, field_path, "required-argument")
                 return None
             self._count()
             return FieldNode(
@@ -483,17 +530,19 @@ class _Walk:
         # A named output type that is not a leaf is an object, an interface or
         # a union. There is no fourth case, so this narrows rather than checks.
         named = cast(GraphQLCompositeType, named)
-        child_path = (*path, name)
+        child_path = field_path
         is_connection = self._policy.relay_aware and is_connection_type(named)
         arguments: tuple[ArgumentNode, ...] = ()
         supplied: tuple[str, ...] = ()
 
         if is_connection:
             if connection_depth + 1 > self._policy.max_connection_depth:
+                self._omit(parent_type_name, child_path, "connection-depth")
                 return None
             if page_size_argument(field_) is None:
                 # C1: a connection with no page-size argument returns an
                 # unbounded number of rows, and no field cap can bound that.
+                self._omit(parent_type_name, child_path, "connection-page-size")
                 return None
             supplied = (PAGE_SIZE_ARGUMENT,)
             arguments = (
@@ -504,8 +553,10 @@ class _Walk:
             )
 
         if missing_required_arguments(field_, supplied):
+            self._omit(parent_type_name, child_path, "required-argument")
             return None
         if remaining - depth_cost < 0:
+            self._omit(parent_type_name, child_path, "depth")
             return None
 
         if named.name in ancestors:
@@ -515,6 +566,11 @@ class _Walk:
                 ancestors=ancestors,
                 connection_depth=connection_depth,
             )
+            if inner is None:
+                # The cycle policy is what removed it: "stop" refuses the
+                # expansion outright, and "shallow" can collapse to nothing.
+                self._omit(parent_type_name, child_path, "cycle")
+                return None
         else:
             inner = self._expand(
                 named,

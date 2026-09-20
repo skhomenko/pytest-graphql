@@ -1144,11 +1144,23 @@ the `raise`'s link is refused too: a refusal does not stop the interpreter makin
 A refusal counts as reported only once it is somewhere the caller reaches, never on the
 strength of having been offered a place. The chain is built to be printed, so no placement in
 it writes a context link under a populated cause, where the link would never appear in a
-traceback. Those links are still links the caller reaches, so a refusal that every rendering
+traceback. Those links are still links the caller reaches, so a value that every rendering
 placement passed over is put in one of them rather than nowhere. That last-resort placement
-runs only for reporting's own refusals, only while the record is not carrying the report, and
-only into an empty slot the value does not reach back to, so it drops nothing and closes no
-cycle.
+runs only while the record is not carrying the report, and only into an empty slot the value
+does not reach back to, so it closes no cycle.
+
+It runs for the caller's own failures before it runs for reporting's own refusals, which is
+the rank above. A link given to a refusal is one a failure cannot then have, so offering them
+in the other order would drop a failure to keep a refusal. A value that reaches every empty
+slot is held there by some link in its own chain. That link is cut only where what it holds
+stays reachable from the head anyway, which is what the non-destructive property allows, and
+the cut makes the value a leaf rather than a second head. The link is looked for through the
+whole of the value's own chain and not only on the value itself, because a failure raised
+while handling another failure leads back through the middle one, and cutting at the value
+alone would leave that path in place. One link is cut at a time and the placement is tried
+again after each, so no cut is made that the placement did not need. A chain that refused a
+write earlier in the same pass is not offered the caller's failures at all, because a chain
+that just refused is not a channel right now and the next pass offers them again.
 
 The chain ranks under the record rather than beside it. While the record carries the report
 the chain is best effort, and it is never given a cycle the caller's own graph did not arrive
@@ -1171,7 +1183,7 @@ named.
 1. Every link that could carry the failure is refused, with the record gone.
 2. The caller's own graph leaves the chain no room, which happens when the record is gone and
    two or more cleanup failures carry an explicit cause that leads back to the reported
-   exception. Each such run loses exactly one fewer failure than it carries.
+   exception. What is lost is always one of those failures and never any other.
 
 **Two permitted refusal-omission shapes, and no others.**
 
@@ -1183,11 +1195,21 @@ named.
 A run that keeps every caller failure keeps the refusal too. There is no run in which
 reporting loses only its own write failure.
 
-Both loss sets are asserted by identity and by set equality, never by count. The bound comes
-from three exhaustive products over reported-exception state, handler state, record presence,
-cleanup-failure shape and refused-write ordinal, the widest running to five cleanup failures.
-It is a measured bound and not a proof for a sequence of any length, and nothing is claimed
-beyond five.
+The caller-failure loss set of the second shape is asserted by membership and by count, and
+the membership is the part that carries the rule. What is lost is a subset of the cleanup
+failures whose explicit cause leads back to the reported exception. No free failure, no
+failure that leads back through a context link, no failure carrying a chain of its own, and
+nothing the reported exception itself arrived with may be lost. The count is at most one
+fewer than that subset holds, and it is fewer when the reported exception or an active
+handler brings a link the chain can use. Which member of that subset is lost is not asserted:
+its members are alike in structure, and the order the cleanup list happens to hold them in
+gives that identity no separate meaning. The first shape and both refusal-omission sets are
+asserted by identity and by set equality.
+
+The bound comes from three exhaustive products over reported-exception state, handler state,
+record presence, cleanup-failure shape and refused-write ordinal, the widest running to five
+cleanup failures. It is a measured bound and not a proof for a sequence of any length, and
+nothing is claimed beyond five.
 
 ### 9.6 Termination and cost
 
