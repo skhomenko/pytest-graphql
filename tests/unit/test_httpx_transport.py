@@ -9,11 +9,14 @@ body read over the wire. Unit tests may reach loopback (``tests/unit/conftest.py
 
 from __future__ import annotations
 
+import base64
 import json
+import math
 import os
 import ssl
 import sys
 from collections.abc import Iterator, Mapping
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -31,11 +34,15 @@ from pytest_graphql._core.errors import (
 )
 from pytest_graphql._core.schema.info import OperationKind
 from pytest_graphql._core.transport.httpx_transport import (
+    MAX_TIMEOUT_SECONDS,
     HttpxTransport,
     _resolve_ssl_context,
+    checked_seconds,
+    checked_timeout,
 )
 from tests.unit.local_http_server import (
     PlannedResponse,
+    Responder,
     closed_port_url,
     fixed,
     local_server,
@@ -949,6 +956,206 @@ def test_build_request_clamps_a_looser_configured_phase_to_the_call_ceiling() ->
         instance.close()
 
 
+def test_an_unbounded_call_ceiling_leaves_every_configured_phase_as_written() -> None:
+    """``ClientConfig.call_timeout()`` answers with no bound when a phase was
+    deliberately configured as ``None``, because that phase means "no limit"
+    and any finite ceiling would impose one. This is what that scalar does
+    once it reaches the transport: the finite phases stay exactly as
+    configured and the unbounded one stays ``None``, the only spelling of
+    "no limit" a socket accepts.
+    """
+    instance = HttpxTransport(
+        timeout=httpx.Timeout(connect=1, read=None, write=3, pool=4)
+    )
+    try:
+        request = _make_request(url="http://example.invalid/graphql")
+        httpx_request = instance._build_request(request, timeout=math.inf)
+        assert httpx_request.extensions["timeout"] == {
+            "connect": 1,
+            "read": None,
+            "write": 3,
+            "pool": 4,
+        }
+    finally:
+        instance.close()
+
+
+def test_no_infinite_phase_ever_reaches_httpx() -> None:
+    # Every way an infinity can arise: an unbounded phase under an
+    # unbounded ceiling, an infinite configured phase, and an infinite
+    # scalar on both sides.
+    configured_forms: tuple[float | httpx.Timeout, ...] = (
+        httpx.Timeout(connect=1, read=None, write=3, pool=4),
+        httpx.Timeout(connect=1, read=math.inf, write=3, pool=4),
+        math.inf,
+    )
+    for configured in configured_forms:
+        instance = HttpxTransport(timeout=configured)
+        try:
+            request = _make_request(url="http://example.invalid/graphql")
+            for ceiling in (math.inf, 5.0):
+                phases = instance._build_request(request, timeout=ceiling).extensions[
+                    "timeout"
+                ]
+                assert all(
+                    phase is None or math.isfinite(phase) for phase in phases.values()
+                ), (configured, ceiling, phases)
+        finally:
+            instance.close()
+
+
+def test_an_unbounded_phase_completes_a_live_request() -> None:
+    # Request metadata alone cannot show this: the infinity used to pass the
+    # metadata check and then fail in ``socket.settimeout()``.
+    body = _envelope({"data": {"greet": "hi"}})
+    for configured in (
+        httpx.Timeout(connect=1, read=None, write=2, pool=3),
+        math.inf,
+    ):
+        instance = HttpxTransport(timeout=configured)
+        try:
+            with local_server(
+                fixed(200, content_type="application/json", body=body)
+            ) as url:
+                response = instance.send(_make_request(url=url), timeout=math.inf)
+            assert response.data == {"greet": "hi"}
+        finally:
+            instance.close()
+
+
+# ``Fraction(1, 10**400)`` is positive but rounds to a zero ``float``.
+_OUT_OF_DOMAIN_TIMEOUTS = (
+    math.nan,
+    -math.inf,
+    -1.0,
+    0,
+    0.0,
+    -(10**1000),
+    Fraction(1, 10**400),
+)
+
+
+@pytest.mark.parametrize("bad", _OUT_OF_DOMAIN_TIMEOUTS)
+def test_a_constructor_timeout_outside_the_domain_is_refused(bad: float) -> None:
+    for configured in (bad, httpx.Timeout(connect=1, read=bad, write=2, pool=3)):
+        with pytest.raises(ValueError, match="greater than zero"):
+            HttpxTransport(timeout=configured)
+
+
+@pytest.mark.parametrize("bad", _OUT_OF_DOMAIN_TIMEOUTS)
+def test_a_send_timeout_outside_the_domain_is_refused_before_io(bad: float) -> None:
+    # Negative infinity used to read as "no limit" and NaN reached the
+    # socket. Neither may reach the server at all.
+    recorder = _Recorder(200, _envelope({"data": {"greet": "hi"}}), "application/json")
+    root = HttpxTransport(timeout=30)
+    derived = root.derive()
+    try:
+        with local_server(recorder) as url:
+            for transport in (root, derived):
+                with pytest.raises(ValueError, match="greater than zero"):
+                    transport.send(_make_request(url=url), timeout=bad)
+        assert recorder.headers == []
+    finally:
+        derived.close()
+        root.close()
+
+
+_TOO_LARGE_TIMEOUTS = (MAX_TIMEOUT_SECONDS * 2, 1e12, 1e308, 10**1000)
+
+
+@pytest.mark.parametrize("bad", _TOO_LARGE_TIMEOUTS)
+def test_a_timeout_above_the_maximum_is_refused_before_io(bad: float) -> None:
+    # 1e12 already overflows the socket deadline on 64-bit macOS, and an
+    # int beyond float range used to overflow inside ``float()`` itself.
+    for configured in (bad, httpx.Timeout(connect=1, read=bad, write=2, pool=3)):
+        with pytest.raises(ValueError, match="at most") as caught:
+            HttpxTransport(timeout=configured)
+        assert len(str(caught.value)) < 200
+    recorder = _Recorder(200, _envelope({"data": {"greet": "hi"}}), "application/json")
+    instance = HttpxTransport()
+    try:
+        with (
+            local_server(recorder) as url,
+            pytest.raises(ValueError, match="at most"),
+        ):
+            instance.send(_make_request(url=url), timeout=bad)
+        assert recorder.headers == []
+    finally:
+        instance.close()
+
+
+def test_the_maximum_timeout_completes_a_live_request() -> None:
+    body = _envelope({"data": {"greet": "hi"}})
+    for limit in (MAX_TIMEOUT_SECONDS, int(MAX_TIMEOUT_SECONDS)):
+        instance = HttpxTransport(timeout=limit)
+        try:
+            with local_server(
+                fixed(200, content_type="application/json", body=body)
+            ) as url:
+                response = instance.send(_make_request(url=url), timeout=limit)
+            assert response.data == {"greet": "hi"}
+        finally:
+            instance.close()
+
+
+def test_a_fraction_timeout_phase_completes_a_live_request() -> None:
+    # ``httpx`` stores a phase as given, and the socket refuses a
+    # ``Fraction``, so an accepted phase must leave the check as a float.
+    body = _envelope({"data": {"greet": "hi"}})
+    configured = httpx.Timeout(
+        connect=Fraction(5), read=Fraction(7, 2), write=5, pool=5
+    )
+    instance = HttpxTransport(timeout=configured)
+    try:
+        with local_server(
+            fixed(200, content_type="application/json", body=body)
+        ) as url:
+            response = instance.send(_make_request(url=url), timeout=Fraction(10))
+        assert response.data == {"greet": "hi"}
+    finally:
+        instance.close()
+
+
+class _ShrinkingSeconds(float):
+    """A ``float`` whose first conversion is its value and every later one 0."""
+
+    conversions = 0
+
+    def __float__(self) -> float:
+        self.conversions += 1
+        return float.__float__(self) if self.conversions == 1 else 0.0
+
+
+def test_a_timeout_is_converted_once_and_the_checked_float_is_returned() -> None:
+    # A second conversion could differ from the one that was checked.
+    scalar = _ShrinkingSeconds(1.5)
+    assert checked_seconds(scalar, source="timeout") == 1.5
+    assert scalar.conversions == 1
+    phase = _ShrinkingSeconds(2.5)
+    checked = checked_timeout(
+        httpx.Timeout(connect=1, read=phase, write=2, pool=3), source="timeout"
+    )
+    assert isinstance(checked, httpx.Timeout)
+    assert checked.read == 2.5
+    assert type(checked.read) is float
+    assert phase.conversions == 1
+
+
+@pytest.mark.parametrize("bad", ["30", True, None])
+def test_a_timeout_that_is_not_a_number_is_refused(bad: object) -> None:
+    with pytest.raises(TypeError, match="number of seconds"):
+        HttpxTransport(timeout=bad)  # type: ignore[arg-type]
+    instance = HttpxTransport()
+    try:
+        with pytest.raises(TypeError, match="number of seconds"):
+            instance.send(
+                _make_request(url="http://example.invalid/graphql"),
+                timeout=bad,  # type: ignore[arg-type]
+            )
+    finally:
+        instance.close()
+
+
 def test_build_request_ceiling_applies_to_a_scalar_configured_timeout_too() -> None:
     """The common case (a scalar constructor ``timeout``, the default):
     every phase starts equal to it, so a stricter per-call value clamps all
@@ -987,6 +1194,249 @@ def test_trust_env_false_by_default_ignores_ambient_proxy_env_vars(
         assert response.data == {"greet": "hi"}
     finally:
         instance.close()
+
+
+class _Recorder:
+    """A loopback responder that counts its requests and keeps their headers."""
+
+    def __init__(self, status: int, body: bytes, content_type: str) -> None:
+        self.headers: list[dict[str, str]] = []
+        self._planned = PlannedResponse(
+            status=status, headers=(("Content-Type", content_type),), body=body
+        )
+
+    def __call__(self, _body: bytes, headers: dict[str, str]) -> PlannedResponse:
+        self.headers.append(headers)
+        return self._planned
+
+
+def _reflecting_proxy() -> Responder:
+    """A proxy error page that quotes the proxy credential it was sent."""
+
+    def respond(_body: bytes, headers: dict[str, str]) -> PlannedResponse:
+        echoed = (
+            headers.get("proxy-authorization", "")
+            + " "
+            + headers.get("x-proxy-token", "")
+        )
+        return PlannedResponse(
+            status=502,
+            headers=(("Content-Type", "text/plain"),),
+            body=f"proxy refused credential {echoed}".encode(),
+        )
+
+    return respond
+
+
+_PROXY_USER = "proxy-user-0123456789"
+_PROXY_PASSWORD = "proxy-pass-0123456789"
+_PROXY_PAIR = f"{_PROXY_USER}:{_PROXY_PASSWORD}"
+_PROXY_TOKEN = base64.b64encode(_PROXY_PAIR.encode()).decode()
+_PROXY_FORMS = (_PROXY_USER, _PROXY_PASSWORD, _PROXY_PAIR, _PROXY_TOKEN)
+
+
+def _with_userinfo(url: str) -> str:
+    return url.replace("http://", f"http://{_PROXY_USER}:{_PROXY_PASSWORD}@", 1)
+
+
+def _rendered(exc: BaseException) -> str:
+    """Every form of ``exc`` a report, a log or a traceback can show."""
+    request = getattr(exc, "request", None)
+    return " ".join(
+        (str(exc), repr(exc), getattr(exc, "body_excerpt", ""), repr(request))
+    )
+
+
+def _clear_proxy_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in list(os.environ):
+        if name.lower().endswith("_proxy"):
+            monkeypatch.delenv(name)
+    monkeypatch.delenv("REQUEST_METHOD", raising=False)
+
+
+def test_a_reflected_proxy_credential_never_reaches_the_error() -> None:
+    # httpcore builds Proxy-Authorization below the request's redaction
+    # boundary, so the request alone cannot know it. Root and derived
+    # transports both quote the proxy's page, so both are checked.
+    with local_server(_reflecting_proxy()) as proxy_url:
+        root = HttpxTransport(proxy=_with_userinfo(proxy_url))
+        derived = root.derive()
+        try:
+            for transport in (root, derived):
+                with pytest.raises(GraphQLHTTPStatusError) as caught:
+                    transport.send(
+                        _make_request(url="http://target.invalid/graphql"), timeout=5
+                    )
+                rendered = _rendered(caught.value)
+                assert "proxy refused credential" in rendered
+                assert not [form for form in _PROXY_FORMS if form in rendered]
+        finally:
+            derived.close()
+            root.close()
+
+
+def test_a_proxy_header_value_never_reaches_the_error() -> None:
+    secret = "proxy-header-token-0123456789"
+    with local_server(_reflecting_proxy()) as proxy_url:
+        proxy = httpx.Proxy(proxy_url, headers={"X-Proxy-Token": secret})
+        instance = HttpxTransport(proxy=proxy)
+        try:
+            with pytest.raises(GraphQLHTTPStatusError) as caught:
+                instance.send(
+                    _make_request(url="http://target.invalid/graphql"), timeout=5
+                )
+            assert secret not in _rendered(caught.value)
+        finally:
+            instance.close()
+
+
+_REPEATED_PROXY_VALUES = (
+    "repeated-proxy-token-first-0123456789",
+    "repeated-proxy-token-second-0123456789",
+)
+
+
+@pytest.mark.parametrize(
+    "values", [_REPEATED_PROXY_VALUES, _REPEATED_PROXY_VALUES[::-1]]
+)
+def test_each_repeated_proxy_header_value_never_reaches_the_error(
+    values: tuple[str, str],
+) -> None:
+    # A repeated header goes on the wire as one line per value, and the
+    # loopback proxy quotes one of them. Both orders make each value the
+    # quoted one in turn, through the root and the derived transport.
+    with local_server(_reflecting_proxy()) as proxy_url:
+        proxy = httpx.Proxy(
+            proxy_url, headers=[("X-Proxy-Token", value) for value in values]
+        )
+        root = HttpxTransport(proxy=proxy)
+        derived = root.derive()
+        try:
+            for transport in (root, derived):
+                with pytest.raises(GraphQLHTTPStatusError) as caught:
+                    transport.send(
+                        _make_request(url="http://target.invalid/graphql"), timeout=5
+                    )
+                rendered = _rendered(caught.value)
+                assert "proxy refused credential" in rendered
+                assert not [value for value in values if value in rendered]
+        finally:
+            derived.close()
+            root.close()
+
+
+def test_an_ambient_proxy_credential_never_reaches_the_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_proxy_environment(monkeypatch)
+    with local_server(_reflecting_proxy()) as proxy_url:
+        monkeypatch.setenv("HTTP_PROXY", _with_userinfo(proxy_url))
+        root = HttpxTransport(trust_env=True)
+        derived = root.derive()
+        try:
+            with pytest.raises(GraphQLHTTPStatusError) as caught:
+                derived.send(
+                    _make_request(url="http://target.invalid/graphql"), timeout=5
+                )
+            rendered = _rendered(caught.value)
+            assert "proxy refused credential" in rendered
+            assert not [form for form in _PROXY_FORMS if form in rendered]
+        finally:
+            derived.close()
+            root.close()
+
+
+def test_an_invalid_proxy_url_is_refused_without_echoing_it() -> None:
+    # httpx's own refusal quotes the whole URL, userinfo included.
+    for bad in (
+        f"ftp://{_PROXY_PAIR}@proxy.example.test",
+        f"http://{_PROXY_PAIR}@proxy.example.test:notaport",
+    ):
+        with pytest.raises(ValueError, match="proxy URL") as caught:
+            HttpxTransport(proxy=bad)
+        rendered = _rendered(caught.value)
+        assert not [form for form in _PROXY_FORMS if form in rendered]
+        _assert_no_chained_exception(caught.value)
+
+
+def test_trust_env_routes_every_transport_through_the_ambient_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_proxy_environment(monkeypatch)
+    body = _envelope({"data": {"greet": "hi"}})
+    proxy = _Recorder(200, body, "application/json")
+    target = _Recorder(200, body, "application/json")
+    with local_server(proxy) as proxy_url, local_server(target) as target_url:
+        monkeypatch.setenv("HTTP_PROXY", _with_userinfo(proxy_url))
+        root = HttpxTransport(trust_env=True)
+        derived = root.derive()
+        try:
+            for transport in (root, derived):
+                transport.send(_make_request(url=target_url), timeout=5)
+        finally:
+            derived.close()
+            root.close()
+    assert len(proxy.headers) == 2
+    assert target.headers == []
+    assert {headers["proxy-authorization"] for headers in proxy.headers} == {
+        f"Basic {_PROXY_TOKEN}"
+    }
+
+
+def test_trust_env_honors_no_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_proxy_environment(monkeypatch)
+    body = _envelope({"data": {"greet": "hi"}})
+    proxy = _Recorder(200, body, "application/json")
+    target = _Recorder(200, body, "application/json")
+    with local_server(proxy) as proxy_url, local_server(target) as target_url:
+        monkeypatch.setenv("HTTP_PROXY", proxy_url)
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+        instance = HttpxTransport(trust_env=True).derive()
+        try:
+            instance.send(_make_request(url=target_url), timeout=5)
+        finally:
+            instance.close()
+    assert proxy.headers == []
+    assert len(target.headers) == 1
+
+
+def test_without_trust_env_no_transport_uses_the_ambient_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_proxy_environment(monkeypatch)
+    body = _envelope({"data": {"greet": "hi"}})
+    proxy = _Recorder(200, body, "application/json")
+    target = _Recorder(200, body, "application/json")
+    with local_server(proxy) as proxy_url, local_server(target) as target_url:
+        monkeypatch.setenv("HTTP_PROXY", proxy_url)
+        root = HttpxTransport()
+        derived = root.derive()
+        try:
+            for transport in (root, derived):
+                transport.send(_make_request(url=target_url), timeout=5)
+        finally:
+            derived.close()
+            root.close()
+    assert proxy.headers == []
+    assert len(target.headers) == 2
+
+
+def test_an_explicit_proxy_outranks_the_ambient_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_proxy_environment(monkeypatch)
+    body = _envelope({"data": {"greet": "hi"}})
+    ambient = _Recorder(200, body, "application/json")
+    explicit = _Recorder(200, body, "application/json")
+    with local_server(ambient) as ambient_url, local_server(explicit) as explicit_url:
+        monkeypatch.setenv("HTTP_PROXY", ambient_url)
+        instance = HttpxTransport(trust_env=True, proxy=explicit_url)
+        try:
+            instance.send(_make_request(url="http://target.invalid/graphql"), timeout=5)
+        finally:
+            instance.close()
+    assert ambient.headers == []
+    assert len(explicit.headers) == 1
 
 
 def test_verify_false_emits_a_warning() -> None:

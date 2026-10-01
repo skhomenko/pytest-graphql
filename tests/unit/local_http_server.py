@@ -64,7 +64,11 @@ def local_server(responder: Responder) -> Iterator[str]:
         def _handle(self) -> None:
             length = int(self.headers.get("Content-Length", "0") or "0")
             body = self.rfile.read(length) if length else b""
-            headers = {key.lower(): value for key, value in self.headers.items()}
+            # A repeated field keeps its first value, as ``Message.get()``
+            # does, so a responder sees the line a real server reads first.
+            headers: dict[str, str] = {}
+            for key, value in self.headers.items():
+                headers.setdefault(key.lower(), value)
             planned = responder(body, headers)
             if planned.delay:
                 time.sleep(planned.delay)

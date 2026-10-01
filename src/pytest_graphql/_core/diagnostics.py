@@ -1576,10 +1576,36 @@ class RequestInfo:
     #: already rebased onto the finished document by whoever composed it.
     #: ``redacted()`` scrubs, escapes and bounds them onto the snapshot.
     omissions: tuple[OmissionRecord, ...] = ()
+    #: C58. How many omissions that selection made in total, including the
+    #: ones already cut before the records reached this request. It is carried
+    #: rather than recounted, because ``omissions`` is bounded and a count
+    #: taken from a bounded list can only ever report that nothing was cut.
+    #: A caller that supplies records and no total gets the count of the
+    #: records it supplied, which is the one value that cannot under-report.
+    omissions_total: int = 0
+    #: C16. Credentials the transport sends on this request's behalf outside
+    #: ``headers``, as ``(source label, value)`` pairs: a proxy's userinfo,
+    #: the ``Proxy-Authorization`` value built from it, and any other proxy
+    #: header. They reach only the proxy, so no header rule can see them,
+    #: yet a proxy can reflect them into a body the transport then quotes.
+    #: Each one joins the secret set unconditionally and none is ever
+    #: rendered. A transport sets this, never the caller.
+    transport_credentials: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "variables", MappingProxyType(dict(self.variables)))
-        object.__setattr__(self, "omissions", tuple(self.omissions))
+        object.__setattr__(
+            self,
+            "transport_credentials",
+            tuple(
+                (str(label), str(value)) for label, value in self.transport_credentials
+            ),
+        )
+        omissions = tuple(self.omissions)
+        object.__setattr__(
+            self, "omissions_total", max(self.omissions_total, len(omissions))
+        )
+        object.__setattr__(self, "omissions", omissions[:MAX_OMISSION_RECORDS])
         headers = {str(k): str(v) for k, v in self.headers.items()}
         object.__setattr__(self, "headers", MappingProxyType(headers))
         object.__setattr__(
@@ -1642,6 +1668,8 @@ class RequestInfo:
             _add_secret(urllib.parse.unquote(password), "url", sources)
         for _, value in urllib.parse.parse_qsl(query, keep_blank_values=True):
             _add_secret(value, "url", sources)
+        for label, value in self.transport_credentials:
+            _add_secret(value, label, sources)
 
         min_length = self.min_redacted_value_length
         qualifying_values = tuple(
@@ -1740,9 +1768,9 @@ class RequestInfo:
                     ),
                     reason=record.reason,
                 )
-                for record in self.omissions[:MAX_OMISSION_RECORDS]
+                for record in self.omissions
             ),
-            omissions_total=len(self.omissions),
+            omissions_total=self.omissions_total,
         )
         snapshot = _apply_size_limits(
             snapshot, self.max_diagnostic_bytes, header_sources, secrets, marker_for

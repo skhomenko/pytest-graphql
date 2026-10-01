@@ -26,20 +26,26 @@ secret before escaping expanded it (module docstring of ``diagnostics.py``,
 
 from __future__ import annotations
 
+import base64
 import codecs
+import dataclasses
 import json
+import math
+import numbers
 import random
+import reprlib
 import ssl
 import sys
 import time
 import warnings
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import certifi
 import httpx
 from httpx._config import create_ssl_context as _httpx_create_ssl_context
+from httpx._utils import URLPattern, get_environment_proxies
 
 from pytest_graphql._core.diagnostics import (
     RequestInfo,
@@ -68,6 +74,13 @@ _LEGACY_JSON_MEDIA_TYPE = "application/json"
 
 #: C13 defaults.
 DEFAULT_TIMEOUT_SECONDS = 30.0
+
+#: The largest finite timeout, about 31 years. A larger finite value cannot
+#: become a socket deadline on every platform (CPython raises
+#: ``OverflowError`` near 1e12 seconds on 64-bit macOS, and a 32-bit
+#: ``time_t`` ends at 2**31), so it is refused instead. ``math.inf`` is the
+#: way to ask for no limit.
+MAX_TIMEOUT_SECONDS = 1e9
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 
@@ -106,6 +119,142 @@ class _NonClosingPoolWrapper(httpx.BaseTransport):
         self._closed = True
         if self._close_pool:
             self._pool.close()
+
+
+class _ProxyRouter(httpx.BaseTransport):
+    """One pool that sends each request through the proxy its URL selects.
+
+    ``httpx.Client`` resolves ambient proxies only when it builds its own
+    transport, and this module always supplies one, because the pool has to
+    be shared across derived clients (C19). So ``trust_env=True`` resolves
+    the environment here instead, with ``httpx``'s own reader and matching
+    rule: the most specific pattern wins, a ``NO_PROXY`` pattern maps to the
+    direct pool, and an unmatched URL goes direct. Living inside the shared
+    pool, the routing reaches every client derived from it.
+    """
+
+    def __init__(
+        self,
+        direct: httpx.BaseTransport,
+        mounts: Mapping[URLPattern, httpx.BaseTransport | None],
+    ) -> None:
+        self._direct = direct
+        self._mounts = dict(sorted(mounts.items()))
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        for pattern, pool in self._mounts.items():
+            if pattern.matches(request.url):
+                return (pool or self._direct).handle_request(request)
+        return self._direct.handle_request(request)
+
+    def close(self) -> None:
+        self._direct.close()
+        for pool in self._mounts.values():
+            if pool is not None:
+                pool.close()
+
+
+#: The proxy schemes ``httpx.Proxy`` accepts.
+_PROXY_SCHEMES = "http, https, socks5 or socks5h"
+
+
+def _parse_proxy(value: httpx.Proxy | str, *, source: str) -> httpx.Proxy:
+    """``value`` as an ``httpx.Proxy``, refusing it without echoing it.
+
+    ``httpx.Proxy`` puts the whole URL, userinfo included, into the message
+    it raises for an unknown scheme. A proxy URL is where a proxy password
+    lives, so the refusal here names the problem and never the value.
+    """
+    if isinstance(value, httpx.Proxy):
+        return value
+    refusal: str | None = None
+    try:
+        return httpx.Proxy(value)
+    except httpx.InvalidURL:
+        refusal = f"the {source} URL is not a valid URL."
+    except ValueError:
+        refusal = f"the {source} URL must use {_PROXY_SCHEMES}."
+    raise ValueError(refusal)
+
+
+def _proxy_credentials(proxy: httpx.Proxy) -> tuple[tuple[str, str], ...]:
+    """Every credential ``proxy`` makes the pool send, for the C16 secret set.
+
+    The userinfo is sent as a ``Proxy-Authorization: Basic`` value that
+    ``httpcore`` builds below every redaction boundary, so the value is
+    rebuilt here the same way, and the username, the password and the pair
+    they encode are added beside it. Any header the proxy was given is sent
+    to the proxy alone, so each one counts as a credential as well. A
+    repeated header goes on the wire as one line per value, so each value is
+    added on its own: ``items()`` would join them into a text no proxy ever
+    receives or reflects.
+    """
+    found: list[tuple[str, str]] = []
+    if proxy.auth is not None:
+        username, password = proxy.auth
+        pair = f"{username}:{password}"
+        token = base64.b64encode(pair.encode("utf-8")).decode("ascii")
+        found += [
+            ("proxy", username),
+            ("proxy", password),
+            ("proxy", pair),
+            ("proxy-authorization", f"Basic {token}"),
+        ]
+    found += [(name.lower(), value) for name, value in proxy.headers.multi_items()]
+    return tuple(found)
+
+
+def _build_pool(
+    *,
+    verify: bool | str | ssl.SSLContext,
+    trust_env: bool,
+    http2: bool,
+    proxy: httpx.Proxy | str | None,
+) -> tuple[httpx.BaseTransport, tuple[tuple[str, str], ...]]:
+    """The root pool and the proxy credentials it sends (C13, C16).
+
+    An explicit ``proxy`` takes every request, as ``httpx`` gives it
+    precedence over the environment. With none, ``trust_env=True`` routes
+    by the ambient ``HTTP_PROXY``, ``HTTPS_PROXY``, ``ALL_PROXY`` and
+    ``NO_PROXY`` through :class:`_ProxyRouter`, and ``trust_env=False``
+    reads none of them. Every proxy URL is parsed before any pool exists,
+    so a refused one leaves nothing half built.
+    """
+    resolved_verify = _resolve_ssl_context(verify, trust_env=trust_env)
+
+    def pool_for(selected: httpx.Proxy | None) -> httpx.HTTPTransport:
+        return httpx.HTTPTransport(
+            verify=resolved_verify,
+            trust_env=trust_env,
+            http2=http2,
+            proxy=selected,
+            retries=0,
+        )
+
+    if proxy is not None:
+        selected = _parse_proxy(proxy, source="proxy")
+        return pool_for(selected), _proxy_credentials(selected)
+    if not trust_env:
+        return pool_for(None), ()
+    ambient = {
+        URLPattern(pattern): (
+            None if url is None else _parse_proxy(url, source="environment proxy")
+        )
+        for pattern, url in get_environment_proxies().items()
+    }
+    if not ambient:
+        return pool_for(None), ()
+    credentials = tuple(
+        credential
+        for selected in ambient.values()
+        if selected is not None
+        for credential in _proxy_credentials(selected)
+    )
+    mounts = {
+        pattern: None if selected is None else pool_for(selected)
+        for pattern, selected in ambient.items()
+    }
+    return _ProxyRouter(pool_for(None), mounts), credentials
 
 
 def _media_type(content_type: str) -> str:
@@ -350,6 +499,67 @@ def _resolve_ssl_context(
     return _local_default_ssl_context(cafile=verify)
 
 
+def checked_seconds(value: object, *, source: str) -> float:
+    """``value`` as a timeout in seconds, or a refusal naming ``source``.
+
+    A timeout is a real number greater than zero and at most
+    :data:`MAX_TIMEOUT_SECONDS`, or ``math.inf``, which means "no limit".
+    Everything else is refused here, before any I/O: NaN reaches the socket
+    layer as a raw ``ValueError``, zero makes the socket non-blocking, an
+    unchecked negative infinity would read as "no limit" and remove every
+    configured bound, and a larger finite value overflows the socket
+    deadline. The range is compared on ``value`` itself, before ``float()``,
+    because an ``int`` beyond float range overflows that conversion too. It
+    is compared again on the converted ``float``, which is the value every
+    caller uses: a positive ``Fraction`` below float range rounds to zero.
+    ``value`` is converted exactly once, and that stored ``float`` is both
+    the one compared and the one returned, so a ``Real`` whose conversion
+    changes between calls cannot pass with one result and return another.
+    The refusal shows ``value`` through ``reprlib``, so a huge ``int``
+    cannot fill the message.
+    """
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        raise TypeError(
+            f"{source} must be a number of seconds, got {type(value).__name__}."
+        )
+    # ``numbers.Real`` declares no comparison for the type checker. ``int``,
+    # ``float`` and ``Fraction`` all compare with a ``float`` exactly.
+    real = cast("float", value)
+    seconds = float(real) if _in_timeout_domain(real) else math.nan
+    if not _in_timeout_domain(seconds):
+        raise ValueError(
+            f"{source} must be greater than zero and at most "
+            f"{MAX_TIMEOUT_SECONDS:g} seconds, or math.inf for no limit; "
+            f"got {reprlib.repr(value)}."
+        )
+    return seconds
+
+
+def _in_timeout_domain(real: float) -> bool:
+    return real > 0 and (real == math.inf or real <= MAX_TIMEOUT_SECONDS)
+
+
+def checked_timeout(
+    value: float | httpx.Timeout, *, source: str
+) -> float | httpx.Timeout:
+    """``value`` with every phase checked by :func:`checked_seconds`.
+
+    A phase-specific ``Timeout`` keeps ``None`` as its own spelling of "no
+    limit"; every other phase is held to the same domain as a scalar. The
+    result is rebuilt from the checked ``float`` phases, because ``httpx``
+    stores a phase as given and the socket refuses a ``Fraction``.
+    """
+    if not isinstance(value, httpx.Timeout):
+        return checked_seconds(value, source=source)
+    phases = {
+        name: None
+        if (phase := getattr(value, name)) is None
+        else checked_seconds(phase, source=f"{source} {name} phase")
+        for name in ("connect", "read", "write", "pool")
+    }
+    return httpx.Timeout(**phases)
+
+
 def _ceiling_timeout(configured: httpx.Timeout, call_timeout: float) -> httpx.Timeout:
     """Clamp each of ``configured``'s four phases to at most ``call_timeout``
     (DESIGN_DECISIONS.md, "Operational limits").
@@ -364,10 +574,19 @@ def _ceiling_timeout(configured: httpx.Timeout, call_timeout: float) -> httpx.Ti
     whenever it is not looser than the caller's budget, and a phase with no
     configured limit (``None``) is bounded by the ceiling instead of staying
     unbounded.
+
+    An unbounded result leaves as ``None``, which is how ``httpx`` spells
+    "no limit". An infinite ceiling, the client's spelling of the same
+    thing, would otherwise reach ``socket.settimeout()``, which rejects it
+    with ``OverflowError``. So ``None`` under an infinite ceiling stays
+    ``None``, and an infinite configured phase becomes ``None`` too. Both
+    inputs were already held to :func:`checked_seconds`' domain, so the only
+    infinity that can arrive here is the positive one.
     """
 
-    def _clamped(phase: float | None) -> float:
-        return call_timeout if phase is None else min(phase, call_timeout)
+    def _clamped(phase: float | None) -> float | None:
+        bound = call_timeout if phase is None else min(phase, call_timeout)
+        return None if bound == math.inf else bound
 
     return httpx.Timeout(
         connect=_clamped(configured.connect),
@@ -411,7 +630,9 @@ class HttpxTransport(DerivableTransportBase):
         http2: bool = False,
         cookie_scope: CookieScope = "none",
         _shared_pool: httpx.BaseTransport | None = None,
+        _proxy_credentials: tuple[tuple[str, str], ...] = (),
     ) -> None:
+        timeout = checked_timeout(timeout, source="timeout")
         if verify is False:
             warnings.warn(
                 "verify=False disables TLS certificate verification; do not "
@@ -421,13 +642,14 @@ class HttpxTransport(DerivableTransportBase):
         self._max_attempts = max_attempts
         self._max_response_bytes = max_response_bytes
         self._cookie_scope: CookieScope = cookie_scope
-        self._pool: httpx.BaseTransport = _shared_pool or httpx.HTTPTransport(
-            verify=_resolve_ssl_context(verify, trust_env=trust_env),
-            trust_env=trust_env,
-            http2=http2,
-            proxy=proxy,
-            retries=0,
-        )
+        self._trust_env = trust_env
+        self._pool: httpx.BaseTransport
+        if _shared_pool is None:
+            self._pool, self._proxy_credentials = _build_pool(
+                verify=verify, trust_env=trust_env, http2=http2, proxy=proxy
+            )
+        else:
+            self._pool, self._proxy_credentials = _shared_pool, _proxy_credentials
         self._client = httpx.Client(
             transport=self._pool,
             timeout=timeout,
@@ -450,7 +672,14 @@ class HttpxTransport(DerivableTransportBase):
         with ``from None``, since a bare ``raise`` re-attaches whatever
         exception is currently being handled regardless of an explicit
         ``from`` clause.
+
+        ``request`` is first given the proxy credentials this pool sends, so
+        every message and excerpt below scrubs them too (C16). ``timeout`` is
+        refused before any I/O when it is outside :func:`checked_seconds`'
+        domain.
         """
+        timeout = checked_seconds(timeout, source="timeout")
+        request = self._with_transport_credentials(request)
         httpx_request: httpx.Request | None = None
         build_error: GraphQLTransportError | None = None
         try:
@@ -502,6 +731,17 @@ class HttpxTransport(DerivableTransportBase):
             self._clear_cookies_if_scoped()
         raise classify_error
 
+    def _with_transport_credentials(self, request: RequestInfo) -> RequestInfo:
+        if not self._proxy_credentials:
+            return request
+        return dataclasses.replace(
+            request,
+            transport_credentials=(
+                *request.transport_credentials,
+                *self._proxy_credentials,
+            ),
+        )
+
     def _clear_cookies_if_scoped(self) -> None:
         """Drop every cookie this client holds, under ``cookie_scope="none"``."""
         if self._cookie_scope == "none":
@@ -526,8 +766,10 @@ class HttpxTransport(DerivableTransportBase):
             timeout=self._client.timeout,
             max_attempts=self._max_attempts,
             max_response_bytes=self._max_response_bytes,
+            trust_env=self._trust_env,
             cookie_scope=self._cookie_scope,
             _shared_pool=wrapper,
+            _proxy_credentials=self._proxy_credentials,
         )
 
     # -- request encoding -------------------------------------------------

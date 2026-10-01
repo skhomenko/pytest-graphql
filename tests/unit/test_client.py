@@ -10,27 +10,38 @@ enough that mixing it in here would hide both.
 
 from __future__ import annotations
 
+import base64
+import math
+import os
+import ssl
+from fractions import Fraction
 from typing import Any
 
+import httpx
 import pytest
 from graphql import GraphQLSchema
+from graphql import build_schema as build_graphql_schema
 
 from pytest_graphql._core.auth import BearerAuth, HeaderAuth
 from pytest_graphql._core.client import (
     ClientConfig,
     GraphQLClient,
+    _new_root_pool,
     build_client,
 )
-from pytest_graphql._core.diagnostics import RequestInfo
+from pytest_graphql._core.diagnostics import MAX_OMISSION_RECORDS, RequestInfo
 from pytest_graphql._core.errors import (
+    ArgumentError,
     GraphQLExecutionError,
     GraphQLPartialDataError,
+    GraphQLTransportError,
 )
 from pytest_graphql._core.middleware import BaseMiddleware
 from pytest_graphql._core.response import GraphQLResponse
 from pytest_graphql._core.transport.base import RawResponse
 from tests.schema.fake_transport import FakeGraphQLTransport, FakeTransport
 from tests.schema.resolvers import build_schema
+from tests.unit.local_http_server import PlannedResponse, local_server
 
 
 @pytest.fixture(scope="module")
@@ -651,3 +662,581 @@ def test_the_query_executor_shape_still_loads_a_schema(
     loaded = IntrospectionSource(FakeTransport(schema)).load()
 
     assert loaded.query_type is not None
+
+
+# -- automatic omissions reaching a report (C58) ------------------------------
+
+
+@pytest.fixture(scope="module")
+def wide_schema() -> GraphQLSchema:
+    """A root field whose type omits more fields than the record bound holds.
+
+    Every ``fNN`` takes a required argument, which auto-selection skips, so
+    one call produces `MAX_OMISSION_RECORDS` + 10 omissions and the retained
+    list is necessarily shorter than the total. ``report`` is nullable and
+    has no resolver, so execution succeeds with a null field and these tests
+    stay about the omission count alone.
+    """
+    skipped = "\n".join(
+        f"  f{index}(need: String!): String"
+        for index in range(MAX_OMISSION_RECORDS + 10)
+    )
+    return build_graphql_schema(f"""
+        type Wide {{
+          id: ID
+        {skipped}
+        }}
+
+        type Query {{ report: Wide }}
+    """)
+
+
+def _wide_client(
+    transport: FakeGraphQLTransport, schema: GraphQLSchema
+) -> GraphQLClient:
+    return GraphQLClient(
+        transport=transport,
+        schema=schema,
+        config=ClientConfig(url="https://example.test/graphql"),
+    )
+
+
+def test_the_uncapped_omission_total_reaches_the_request(
+    wide_schema: GraphQLSchema,
+) -> None:
+    transport = FakeGraphQLTransport(wide_schema)
+
+    _wide_client(transport, wide_schema).query("report")
+
+    request = transport.sent[-1]
+    assert len(request.omissions) == MAX_OMISSION_RECORDS
+    assert request.omissions_total == MAX_OMISSION_RECORDS + 10
+
+
+def test_a_truncated_omission_list_reports_what_it_dropped(
+    wide_schema: GraphQLSchema,
+) -> None:
+    # The count a report states must survive the bound. Recomputing it from
+    # the retained list can only ever say that nothing was dropped.
+    transport = FakeGraphQLTransport(wide_schema)
+
+    _wide_client(transport, wide_schema).query("report")
+    snapshot = transport.sent[-1].redacted()
+
+    assert len(snapshot.omissions) == MAX_OMISSION_RECORDS
+    assert snapshot.omissions_total == MAX_OMISSION_RECORDS + 10
+    assert snapshot.omissions_dropped == 10
+
+
+def test_the_dropped_count_is_visible_in_the_rendered_report(
+    wide_schema: GraphQLSchema,
+) -> None:
+    # The recorder dump is where a reader actually sees the count, so the
+    # regression has to reach that text and not only the snapshot field.
+    transport = FakeGraphQLTransport(wide_schema)
+    client = _wide_client(transport, wide_schema)
+
+    client.query("report")
+    dump = client.recorder.dump()
+
+    assert "further omission(s) not shown" in dump
+    assert f"of {MAX_OMISSION_RECORDS + 10} total" in dump
+
+
+def test_a_raw_document_carries_no_omissions(
+    client: GraphQLClient, transport: FakeGraphQLTransport
+) -> None:
+    # `execute()` sends what the caller wrote, so there is no generated
+    # selection to omit anything and nothing to under-report.
+    client.execute('query { user(id: "u1") { id } }')
+
+    assert transport.sent[-1].omissions == ()
+    assert transport.sent[-1].omissions_total == 0
+
+
+# -- transport configuration (Operational limits) -----------------------------
+
+
+def test_a_scalar_timeout_is_the_call_ceiling(schema: GraphQLSchema) -> None:
+    transport = FakeGraphQLTransport(schema)
+    client = GraphQLClient(
+        transport=transport,
+        schema=schema,
+        config=ClientConfig(url="https://example.test/graphql", timeout=5.0),
+    )
+
+    client.query("user", id="u1", fields=["id"])
+
+    assert transport.timeouts == [5.0]
+
+
+def test_a_phase_specific_timeout_clamps_no_phase(schema: GraphQLSchema) -> None:
+    # The per-call scalar is a ceiling on each configured phase, so the
+    # scalar a configured `Timeout` produces must be the largest phase: any
+    # smaller value would silently shorten a phase the project set.
+    transport = FakeGraphQLTransport(schema)
+    client = GraphQLClient(
+        transport=transport,
+        schema=schema,
+        config=ClientConfig(
+            url="https://example.test/graphql",
+            timeout=httpx.Timeout(connect=1.0, read=9.0, write=2.0, pool=3.0),
+        ),
+    )
+
+    client.query("user", id="u1", fields=["id"])
+
+    assert transport.timeouts == [9.0]
+
+
+def test_an_unbounded_phase_leaves_the_call_ceiling_unbounded(
+    schema: GraphQLSchema,
+) -> None:
+    transport = FakeGraphQLTransport(schema)
+    client = GraphQLClient(
+        transport=transport,
+        schema=schema,
+        config=ClientConfig(
+            url="https://example.test/graphql",
+            timeout=httpx.Timeout(connect=1.0, read=None, write=2.0, pool=3.0),
+        ),
+    )
+
+    client.query("user", id="u1", fields=["id"])
+
+    assert transport.timeouts == [math.inf]
+
+
+def test_a_per_call_timeout_is_used_as_given(schema: GraphQLSchema) -> None:
+    transport = FakeGraphQLTransport(schema)
+    client = GraphQLClient(
+        transport=transport,
+        schema=schema,
+        config=ClientConfig(
+            url="https://example.test/graphql", timeout=httpx.Timeout(30.0)
+        ),
+    )
+
+    client.query("user", id="u1", fields=["id"], timeout=0.5)
+
+    assert transport.timeouts == [0.5]
+
+
+def test_schema_loading_uses_the_same_timeout_rule(schema: GraphQLSchema) -> None:
+    # Introspection goes through `send()` too, so it needs the same scalar.
+    # Passing the configured value straight through cannot type-check once
+    # that value may be phase-specific.
+    probe = FakeGraphQLTransport(schema)
+
+    build_client(
+        url="https://example.test/graphql",
+        transport=probe,
+        timeout=httpx.Timeout(connect=1.0, read=7.0, write=2.0, pool=3.0),
+    )
+
+    assert probe.timeouts == [7.0]
+
+
+def test_the_root_pool_carries_every_documented_transport_setting() -> None:
+    # No socket is opened: this constructs the pool and reads back what it
+    # was configured with.
+    config = ClientConfig(
+        url="https://example.test/graphql",
+        timeout=httpx.Timeout(connect=1.0, read=2.0, write=3.0, pool=4.0),
+        retries=4,
+        max_response_bytes=1024,
+        trust_env=True,
+        proxy="http://proxy.example.test:8080",
+        http2=False,
+    )
+
+    pool = _new_root_pool(config)
+    try:
+        assert pool._client.timeout == config.timeout
+        assert pool._client.trust_env is True
+        assert pool._max_response_bytes == 1024
+        assert pool._max_attempts == 5
+    finally:
+        pool.close()
+
+
+def test_verify_accepts_an_ssl_context() -> None:
+    context = ssl.create_default_context()
+    config = ClientConfig(url="https://example.test/graphql", verify=context)
+
+    pool = _new_root_pool(config)
+    pool.close()
+
+    assert config.verify is context
+
+
+# -- proxy credentials and ambient proxies, through the public factory --------
+
+_PROXY_USER = "factory-proxy-user-0123"
+_PROXY_PASSWORD = "factory-proxy-pass-0123"
+_PROXY_PAIR = f"{_PROXY_USER}:{_PROXY_PASSWORD}"
+_PROXY_FORMS = (
+    _PROXY_USER,
+    _PROXY_PASSWORD,
+    _PROXY_PAIR,
+    base64.b64encode(_PROXY_PAIR.encode()).decode(),
+)
+
+
+def _with_userinfo(url: str) -> str:
+    return url.replace("http://", f"http://{_PROXY_USER}:{_PROXY_PASSWORD}@", 1)
+
+
+def _reflect_proxy_authorization(
+    _body: bytes, headers: dict[str, str]
+) -> PlannedResponse:
+    return PlannedResponse(
+        status=502,
+        headers=(("Content-Type", "text/plain"),),
+        body=f"bad gateway for {headers.get('proxy-authorization')}".encode(),
+    )
+
+
+def test_a_factory_proxy_credential_reaches_no_rendered_path(
+    schema: GraphQLSchema,
+) -> None:
+    with local_server(_reflect_proxy_authorization) as proxy_url:
+        client = build_client(
+            url="http://target.invalid/graphql",
+            schema=schema,
+            proxy=_with_userinfo(proxy_url),
+        )
+        try:
+            with pytest.raises(GraphQLTransportError) as caught:
+                client.query("user", id="u1", fields=["id"])
+            rendered = " ".join(
+                (
+                    str(caught.value),
+                    repr(caught.value),
+                    caught.value.body_excerpt,
+                    repr(caught.value.request),
+                    client.recorder.dump(),
+                    repr(client.config),
+                )
+            )
+        finally:
+            client.close()
+
+    assert "bad gateway for" in rendered
+    assert not [form for form in _PROXY_FORMS if form in rendered]
+
+
+def _reflect_proxy_token(_body: bytes, headers: dict[str, str]) -> PlannedResponse:
+    return PlannedResponse(
+        status=502,
+        headers=(("Content-Type", "text/plain"),),
+        body=f"bad gateway for {headers.get('x-proxy-token')}".encode(),
+    )
+
+
+_REPEATED_PROXY_VALUES = (
+    "factory-proxy-token-first-0123456789",
+    "factory-proxy-token-second-0123456789",
+)
+
+
+@pytest.mark.parametrize(
+    "values", [_REPEATED_PROXY_VALUES, _REPEATED_PROXY_VALUES[::-1]]
+)
+def test_each_repeated_factory_proxy_header_reaches_no_rendered_path(
+    schema: GraphQLSchema, values: tuple[str, str]
+) -> None:
+    # The loopback proxy quotes one line of the repeated header; both
+    # orders make each value the quoted one, through the root client and
+    # a derived one.
+    rendered: list[str] = []
+    with local_server(_reflect_proxy_token) as proxy_url:
+        client = build_client(
+            url="http://target.invalid/graphql",
+            schema=schema,
+            proxy=httpx.Proxy(
+                proxy_url, headers=[("X-Proxy-Token", value) for value in values]
+            ),
+        )
+        derived = client.anonymous()
+        try:
+            for each in (client, derived):
+                with pytest.raises(GraphQLTransportError) as caught:
+                    each.query("user", id="u1", fields=["id"])
+                rendered.append(
+                    " ".join(
+                        (
+                            str(caught.value),
+                            repr(caught.value),
+                            caught.value.body_excerpt,
+                            repr(caught.value.request),
+                            each.recorder.dump(),
+                        )
+                    )
+                )
+        finally:
+            derived.close()
+            client.close()
+
+    for text in rendered:
+        assert "bad gateway for" in text
+        assert not [value for value in values if value in text]
+
+
+# ``Fraction(1, 10**400)`` is positive but rounds to a zero ``float``.
+_OUT_OF_DOMAIN_TIMEOUTS = (
+    math.nan,
+    -math.inf,
+    -1.0,
+    0,
+    1e12,
+    10**1000,
+    Fraction(1, 10**400),
+)
+
+
+@pytest.mark.parametrize("bad", _OUT_OF_DOMAIN_TIMEOUTS)
+def test_a_configured_timeout_outside_the_domain_is_refused_before_io(
+    schema: GraphQLSchema, bad: float
+) -> None:
+    for configured in (bad, httpx.Timeout(connect=1.0, read=bad, write=2.0, pool=3.0)):
+        transport = FakeGraphQLTransport(schema)
+        client = GraphQLClient(
+            transport=transport,
+            schema=schema,
+            config=ClientConfig(url="https://example.test/graphql", timeout=configured),
+        )
+        with pytest.raises(ValueError, match=r"ClientConfig\.timeout"):
+            client.query("user", id="u1", fields=["id"])
+        assert transport.timeouts == []
+        with pytest.raises(ValueError, match="greater than zero"):
+            build_client(
+                url="https://example.test/graphql", schema=schema, timeout=configured
+            )
+
+
+@pytest.mark.parametrize("bad", _OUT_OF_DOMAIN_TIMEOUTS)
+def test_a_per_call_timeout_outside_the_domain_is_refused_before_io(
+    schema: GraphQLSchema, bad: float
+) -> None:
+    transport = FakeGraphQLTransport(schema)
+    client = GraphQLClient(
+        transport=transport,
+        schema=schema,
+        config=ClientConfig(url="https://example.test/graphql"),
+    )
+
+    with pytest.raises(ValueError, match="the timeout option"):
+        client.query("user", id="u1", fields=["id"], timeout=bad)
+
+    assert transport.timeouts == []
+
+
+def test_an_accepted_fraction_timeout_reaches_the_transport_as_a_float(
+    schema: GraphQLSchema,
+) -> None:
+    transport = FakeGraphQLTransport(schema)
+    client = GraphQLClient(
+        transport=transport,
+        schema=schema,
+        config=ClientConfig(
+            url="https://example.test/graphql",
+            timeout=httpx.Timeout(Fraction(5), read=Fraction(7, 2)),
+        ),
+    )
+
+    client.query("user", id="u1", fields=["id"])
+    client.query("user", id="u1", fields=["id"], timeout=Fraction(3, 2))
+
+    assert transport.timeouts == [5.0, 1.5]
+    assert [type(timeout) for timeout in transport.timeouts] == [float, float]
+
+
+class _ShrinkingSeconds(float):
+    """A ``float`` whose first conversion is its value and every later one 0."""
+
+    conversions = 0
+
+    def __float__(self) -> float:
+        self.conversions += 1
+        return float.__float__(self) if self.conversions == 1 else 0.0
+
+
+def test_a_timeout_reaches_the_transport_as_the_float_that_was_checked(
+    schema: GraphQLSchema,
+) -> None:
+    transport = FakeGraphQLTransport(schema)
+    client = GraphQLClient(
+        transport=transport,
+        schema=schema,
+        config=ClientConfig(
+            url="https://example.test/graphql",
+            timeout=httpx.Timeout(5, read=_ShrinkingSeconds(7.0)),
+        ),
+    )
+
+    client.query("user", id="u1", fields=["id"])
+    client.query("user", id="u1", fields=["id"], timeout=_ShrinkingSeconds(1.5))
+
+    assert transport.timeouts == [7.0, 1.5]
+
+
+def test_an_explicit_none_timeout_option_is_refused_before_io(
+    schema: GraphQLSchema,
+) -> None:
+    # Only an omitted option means "use the configured timeout"; an explicit
+    # None is a value, and it is outside the domain.
+    transport = FakeGraphQLTransport(schema)
+    client = GraphQLClient(
+        transport=transport,
+        schema=schema,
+        config=ClientConfig(url="https://example.test/graphql", timeout=12.0),
+    )
+
+    with pytest.raises(TypeError, match="the timeout option"):
+        client.query("user", id="u1", fields=["id"], timeout=None)
+    assert transport.timeouts == []
+
+    client.query("user", id="u1", fields=["id"])
+    assert transport.timeouts == [12.0]
+
+
+def test_a_configuration_repr_shows_no_credential_field() -> None:
+    config = ClientConfig(
+        url="https://example.test/graphql",
+        headers={"Authorization": "Bearer header-secret-0123"},
+        schema_headers={"Authorization": "Bearer schema-secret-0123"},
+        cookies={"session": "cookie-secret-0123"},
+        proxy=f"http://{_PROXY_PAIR}@proxy.example.test:8080",
+    )
+
+    rendered = repr(config)
+
+    for secret in ("header-secret", "schema-secret", "cookie-secret", *_PROXY_FORMS):
+        assert secret not in rendered
+    assert "example.test/graphql" in rendered
+
+
+def _recording(log: list[str]) -> Any:
+    def respond(_body: bytes, headers: dict[str, str]) -> PlannedResponse:
+        log.append(headers.get("host", ""))
+        return PlannedResponse(
+            status=200,
+            headers=(("Content-Type", "application/json"),),
+            body=b'{"data": {"user": {"id": "u1"}}}',
+        )
+
+    return respond
+
+
+@pytest.mark.parametrize("trust_env", [True, False])
+def test_the_factory_follows_the_ambient_proxy_only_when_trusted(
+    schema: GraphQLSchema, monkeypatch: pytest.MonkeyPatch, trust_env: bool
+) -> None:
+    for name in list(os.environ):
+        if name.lower().endswith("_proxy"):
+            monkeypatch.delenv(name)
+    monkeypatch.delenv("REQUEST_METHOD", raising=False)
+    proxied: list[str] = []
+    direct: list[str] = []
+    with (
+        local_server(_recording(proxied)) as proxy_url,
+        local_server(_recording(direct)) as target_url,
+    ):
+        monkeypatch.setenv("HTTP_PROXY", proxy_url)
+        client = build_client(url=target_url, schema=schema, trust_env=trust_env)
+        try:
+            client.query("user", id="u1", fields=["id"])
+            clone = client.anonymous()
+            try:
+                clone.query("user", id="u1", fields=["id"])
+            finally:
+                clone.close()
+        finally:
+            client.close()
+
+    assert (len(proxied), len(direct)) == ((2, 0) if trust_env else (0, 2))
+
+
+# -- the documented standalone call shape (SPEC 3.11) -------------------------
+
+
+def test_the_standalone_example_shape_builds_a_client(schema: GraphQLSchema) -> None:
+    # The exact call SPEC 3.11 publishes. A factory that cannot take it is a
+    # broken published example.
+    probe = FakeGraphQLTransport(schema)
+
+    gql = build_client(
+        url="https://api.example.test/graphql",
+        transport=probe,
+        headers={"Authorization": "Bearer token"},
+        max_depth=3,
+    )
+
+    assert gql.config.max_depth == 3
+    assert gql.config.headers["Authorization"] == "Bearer token"
+
+
+def test_a_factory_header_reaches_schema_introspection(
+    schema: GraphQLSchema,
+) -> None:
+    # C4 defaults schema identity to `ClientConfig.headers`, so a token given
+    # to the factory must authenticate introspection as well as every call.
+    probe = FakeGraphQLTransport(schema)
+
+    client = build_client(
+        url="https://api.example.test/graphql",
+        transport=probe,
+        headers={"Authorization": "Bearer token"},
+    )
+
+    assert probe.sent[0].operation == "IntrospectionQuery"
+    assert probe.sent[0].headers["Authorization"] == "Bearer token"
+
+    client.query("user", id="u1", fields=["id"])
+    assert probe.sent[-1].headers["Authorization"] == "Bearer token"
+
+
+def test_a_factory_option_overrides_the_supplied_configuration(
+    schema: GraphQLSchema, transport: FakeGraphQLTransport
+) -> None:
+    client = build_client(
+        url="https://example.test/graphql",
+        transport=transport,
+        schema=schema,
+        config=ClientConfig(max_depth=5, seed=7),
+        max_depth=2,
+    )
+
+    assert client.config.max_depth == 2
+    assert client.config.seed == 7
+
+
+def test_an_unknown_factory_option_names_the_options_that_exist(
+    schema: GraphQLSchema, transport: FakeGraphQLTransport
+) -> None:
+    # Ignoring it would leave the client running on the default the caller
+    # believed they had replaced.
+    with pytest.raises(ArgumentError) as raised:
+        build_client(
+            url="https://example.test/graphql",
+            transport=transport,
+            schema=schema,
+            max_dpeth=2,
+        )
+
+    assert "max_dpeth" in str(raised.value)
+    assert "Did you mean 'max_depth'?" in str(raised.value)
+
+
+def test_the_factory_still_records_the_url_over_a_supplied_option(
+    schema: GraphQLSchema, transport: FakeGraphQLTransport
+) -> None:
+    client = build_client(
+        url="https://example.test/graphql",
+        transport=transport,
+        schema=schema,
+        config=ClientConfig(url="https://stale.example.test/graphql"),
+    )
+
+    assert client.config.url == "https://example.test/graphql"

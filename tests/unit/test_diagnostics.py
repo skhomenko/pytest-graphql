@@ -26,7 +26,9 @@ from pytest_graphql._core.diagnostics import (
     DEFAULT_MIN_REDACTED_VALUE_LENGTH,
     DEFAULT_REDACT_HEADERS,
     DEFAULT_REDACT_VARIABLES,
+    MAX_OMISSION_RECORDS,
     DiagnosticSnapshot,
+    OmissionRecord,
     RequestInfo,
     _curl_header_variable,
     escape_control_characters,
@@ -1520,3 +1522,42 @@ def test_marker_source_label_cannot_leave_a_raw_control_character_in_a_key() -> 
     snapshot = request.redacted()
     assert not any(raw_b in key for key in snapshot.variables)
     assert credential2 not in _snapshot_text(request)
+
+
+# --------------------------------------------------------------------------
+# C58: the omission count a report states
+# --------------------------------------------------------------------------
+
+
+def test_a_request_keeps_the_total_it_was_given_over_the_records_it_kept() -> None:
+    """The retained list is bounded and the total is not, so a total taken
+    from the list can only ever say that nothing was cut. The request keeps
+    what it was told, and the bound applies to the records alone."""
+    records = tuple(
+        OmissionRecord(
+            parent_type="Wide", path=("report", f"f{index}"), reason="required-argument"
+        )
+        for index in range(MAX_OMISSION_RECORDS)
+    )
+    request = _make_request(omissions=records, omissions_total=90)
+
+    assert len(request.omissions) == MAX_OMISSION_RECORDS
+    assert request.omissions_total == 90
+    assert request.redacted().omissions_dropped == 90 - MAX_OMISSION_RECORDS
+
+
+def test_a_request_bounds_the_records_it_is_handed_and_counts_them_all() -> None:
+    """A caller who hands over more records than the bound holds still gets a
+    bounded request and a total that does not under-report what it was
+    given."""
+    records = tuple(
+        OmissionRecord(
+            parent_type="Wide", path=("report", f"f{index}"), reason="required-argument"
+        )
+        for index in range(MAX_OMISSION_RECORDS + 7)
+    )
+    request = _make_request(omissions=records)
+
+    assert len(request.omissions) == MAX_OMISSION_RECORDS
+    assert request.omissions_total == MAX_OMISSION_RECORDS + 7
+    assert request.redacted().omissions_dropped == 7

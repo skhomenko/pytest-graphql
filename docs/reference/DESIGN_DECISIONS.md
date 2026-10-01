@@ -236,6 +236,17 @@ Importable from their own modules, and carrying a compatibility promise only at 
 and `middleware`. `seed` is configuration and lives on `ClientConfig` only, never on the
 client constructor.
 
+`build_client()` is the standalone spelling of the same split, so the same rule decides
+where each of its keywords goes. `url`, `transport`, `cleanup`, `config`, `schema`,
+`schema_source`, `parsers`, `middleware` and `auth` are its own; every other keyword is a
+`ClientConfig` field and is applied to the configuration the whole build uses, overriding
+the same field on a supplied `config`. An unknown name raises `ArgumentError` rather than
+being ignored, so a misspelled option cannot leave a client on a default the caller
+believed they had replaced. Data options land on the configuration and not on the client,
+which is what makes C4's default schema identity apply to them: `headers` given to the
+factory is what introspection sends. A header that must sit above `Auth` is set on the
+returned client with `with_headers()`, which is the layer C4 gives that precedence to.
+
 ### Typing promise
 
 The package is fully typed, ships `py.typed`, and passes `mypy --strict`. The dynamic
@@ -344,7 +355,10 @@ never an argument value. Diagnostics prefixes those relative paths when it compo
 or cached automatic selection, so a reader sees the field's position in the finished
 document. The records are bounded on their own, because a skipped field is not counted by
 `max_fields`: the first 50 in traversal order are retained, the total is tracked, and the
-number omitted is reported visibly.
+number omitted is reported visibly. The total is carried across every stage that passes the
+records on, from selection through assembly and the request to the snapshot a report reads.
+A stage that recounts it from the retained list instead can only ever report that nothing
+was dropped, which is the one thing this rule exists to prevent.
 
 `__typename` is emitted on every object selection, not only on interfaces and unions, and it
 does not count against `max_fields`. Explicit `fields=` adds nothing, so `Node.__typename__`
@@ -678,6 +692,18 @@ otherwise becomes a transport error naming it.
 
 - `ClientConfig.timeout` accepts a float applied to all four phases, or a
   `Timeout(connect, read, write, pool)` value. The default is 30 seconds per phase.
+- Every timeout has one domain: a real number greater than zero and at most 1e9 seconds
+  (about 31 years), or `math.inf`, which means "no limit". A `Timeout` phase may also be
+  `None`. A larger finite value cannot become a socket deadline on every platform, so it
+  is refused rather than read as "no limit". NaN, zero, any negative value (negative
+  infinity included) and a value above the maximum raise `ValueError`. A value that is
+  not a number, `None` given as the per-call option included, raises `TypeError`. Only
+  an omitted per-call option means "use the configured timeout". The domain holds for
+  the value after conversion to `float` as well as before it, so a positive value that
+  rounds to zero, such as `Fraction(1, 10**400)`, raises `ValueError`. Every accepted
+  value, `Timeout` phases included, is used as that `float`. The check runs before any
+  I/O, on `ClientConfig.timeout`, the per-call `timeout` option, and the `timeout` given
+  to `HttpxTransport`'s constructor and to its `send()`.
 - `Transport.send()`'s mandatory per-call `timeout: float` (SPEC.md 5.6) is a ceiling on
   each of the transport's own four configured phases, not a replacement of them: the
   request actually sent uses `min(configured_phase, call_timeout)` for connect, read,
@@ -687,9 +713,17 @@ otherwise becomes a transport error naming it.
   to it. This is the one combination rule that needs no information beyond what
   `HttpxTransport.send()` already has on hand: it never has to guess whether the caller's
   scalar is a deliberate override or a passed-through default, because it does not matter
-  to a ceiling either way. It does not by itself state how a future `GraphQLClient.execute()`
-  turns a per-call `timeout` option or `ClientConfig.timeout` into the scalar it passes to
-  `send()`; that remains M5c's call-convention design.
+  to a ceiling either way.
+- The client's own side of that rule: `ClientConfig.call_timeout(override)` produces the
+  scalar every call hands to `send()`. A per-call `timeout` option is used exactly as
+  given, which is how one call tightens a configured phase. With no per-call option, a
+  scalar `ClientConfig.timeout` is passed through, and a phase-specific one produces the
+  largest configured phase, which is the smallest scalar that clamps no phase the project
+  set. A phase left at `None` is a deliberate "no limit", so any `None` phase produces no
+  bound at all rather than a value the ceiling would impose. The client therefore never
+  shortens a configured phase on its own: only an explicit per-call `timeout` does that.
+  At the transport, an unbounded phase reaches `httpx` as `None`, its spelling of "no
+  limit". An infinite number never reaches it, because a socket rejects one.
 - Retries are connect-failure only. `max_attempts` defaults to 3, so at most two retries.
   Backoff is `min(0.1 * 2 ** (attempt - 1), 2.0)` seconds with full jitter. A request that
   reached the server is never retried.
@@ -698,9 +732,16 @@ otherwise becomes a transport error naming it.
 - `trust_env` defaults to `False`, so ambient `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`,
   `SSLKEYLOGFILE` and netrc are ignored unless a project opts in through
   `ClientConfig.trust_env` or `--gql-trust-env`. This keeps runs reproducible and stops
-  requests from silently routing through an ambient proxy.
-- `ClientConfig.proxy` and `ClientConfig.verify` follow `httpx` semantics. `verify` accepts
-  `True`, a CA bundle path, or an `ssl.SSLContext`. `verify=False` emits a warning.
+  requests from silently routing through an ambient proxy. With `trust_env=True` the
+  transport resolves the proxy variables itself, with `httpx`'s own reader and matching
+  rule, `NO_PROXY` included, and routes inside the shared pool, so every client derived
+  from it uses them. `httpx.Client` cannot do this here, because it ignores the environment
+  whenever it is handed a transport.
+- `ClientConfig.proxy` and `ClientConfig.verify` follow `httpx` semantics. An explicit
+  `proxy` takes every request and outranks the environment. A proxy URL the transport
+  cannot use is refused with a message that names the problem and never quotes the URL,
+  because the URL is where a proxy password lives. `verify` accepts `True`, a CA bundle
+  path, or an `ssl.SSLContext`. `verify=False` emits a warning.
 - Redirects are not followed.
 
 ### Derivation
@@ -744,6 +785,9 @@ values to do their work. Nothing else should.
   exception, a pytest report section, the diagnostics recorder, a log record, or
   `as_curl()`. `__repr__` and `__str__` on `RequestInfo`, `GraphQLResponse` and every
   exception render the snapshot form.
+- `ClientConfig` is plain data that no redaction stage runs over, so its `repr()` leaves
+  out every field that carries a credential: `headers`, `schema_headers`, `cookies` and
+  `proxy`.
 
 ### Name-based and path-based redaction
 
@@ -769,9 +813,15 @@ redaction cannot cover it. The scrub closes that gap.
 - Secret set. For each request and response pair the redaction stage collects the values it
   already knows are sensitive: every header value matched by `redact_headers`, the value at
   every variable path and response path matched by `redact_variables`, every cookie value,
-  and the userinfo and query-string values stripped from the URL. The set exists only inside
-  the stage. It is never stored on a snapshot, never logged, and never returned by a public
-  API.
+  and the userinfo and query-string values stripped from the URL. It also holds every
+  credential the transport sends outside the request's headers: a proxy's username, its
+  password, the pair they form, the `Proxy-Authorization` value built from them, and the
+  value of every header the proxy was given, each value of a repeated header on its own,
+  as it goes on the wire. Those reach the proxy alone, below the
+  request's own redaction boundary, yet a proxy can quote them back into a body the
+  transport excerpts, so they join the set whatever `redact_headers` says. The set exists
+  only inside the stage. It is never stored on a snapshot, never logged, and never returned
+  by a public API.
 - Derived forms. For a header value carrying a scheme, such as `Bearer <token>`, the part
   after the first space is added as well. The percent-encoded form of each value is added.
   Non-string values are converted with the same JSON text form used for rendering before

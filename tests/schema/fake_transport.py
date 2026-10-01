@@ -54,8 +54,10 @@ class FakeGraphQLTransport:
     safe.
 
     ``sent`` records the live requests, so a test can assert what the client
-    built. ``close_calls`` counts closes, so an ownership test can assert that
-    a client closed nothing the caller owns.
+    built. ``timeouts`` records the scalar ceiling each of those calls was
+    given, which is the client's own decision rather than the transport's.
+    ``close_calls`` counts closes, so an ownership test can assert that a
+    client closed nothing the caller owns.
     """
 
     def __init__(
@@ -71,15 +73,12 @@ class FakeGraphQLTransport:
         self._media_type = media_type
         self._response_headers = dict(response_headers or {})
         self.sent: list[RequestInfo] = []
+        self.timeouts: list[float] = []
         self.close_calls = 0
 
-    def send(
-        self,
-        request: RequestInfo,
-        *,
-        timeout: float,  # noqa: ARG002 -- part of the Transport contract
-    ) -> RawResponse:
+    def send(self, request: RequestInfo, *, timeout: float) -> RawResponse:
         self.sent.append(request)
+        self.timeouts.append(timeout)
         result: ExecutionResult = graphql_sync(
             self._schema,
             request.document,

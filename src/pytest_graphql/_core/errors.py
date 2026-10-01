@@ -228,6 +228,32 @@ class ArgumentError(GraphQLClientError):
             message, kind=kind, operation_name=operation_name, bad_name=arg_name
         )
 
+    @classmethod
+    def unknown_option(
+        cls, *, callable_name: str, bad_name: str, candidates: Sequence[str]
+    ) -> ArgumentError:
+        """A configuration keyword a public entry point does not accept.
+
+        The call grammar routes a name the caller wrote and the library does
+        not know to this class, whether the name was meant as a schema
+        argument or as a configuration option. Accepting it silently would
+        leave a client running on the default the caller believed they had
+        replaced.
+        """
+        names = ", ".join(sorted(candidates))
+        message = (
+            f"{callable_name} has no configuration option {bad_name!r}.\n"
+            f"  Options: {names}"
+        )
+        match = _best_match(bad_name, tuple(candidates))
+        if match:
+            message += f"\n  Did you mean {match!r}?"
+        error = cls._from_message(
+            message, kind="call", operation_name=callable_name, bad_name=bad_name
+        )
+        error.candidates = tuple(candidates)
+        return error
+
 
 class SelectionError(GraphQLClientError):
     """An explicit selection is invalid, or the assembled document fails validation."""

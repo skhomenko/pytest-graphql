@@ -24,6 +24,8 @@ finding, and each can be broken without any ordinary test failing:
 from __future__ import annotations
 
 import dataclasses
+import math
+import ssl
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -39,6 +41,7 @@ from typing import (
     cast,
 )
 
+import httpx
 from graphql import (
     DocumentNode,
     GraphQLInputType,
@@ -65,6 +68,7 @@ from pytest_graphql._core.diagnostics import (
     safe_excerpt,
 )
 from pytest_graphql._core.errors import (
+    ArgumentError,
     GraphQLExecutionError,
     GraphQLPartialDataError,
     SelectionError,
@@ -85,8 +89,12 @@ from pytest_graphql._core.selection.model import AUTO, SelectionInput
 from pytest_graphql._core.selection.policy import CyclePolicy, SelectionPolicy
 from pytest_graphql._core.transport.base import DerivableTransportBase, Transport
 from pytest_graphql._core.transport.httpx_transport import (
+    DEFAULT_MAX_RESPONSE_BYTES,
+    DEFAULT_TIMEOUT_SECONDS,
     CookieScope,
     HttpxTransport,
+    checked_seconds,
+    checked_timeout,
 )
 from pytest_graphql._core.validation import (
     RESERVED_OPTIONS,
@@ -1142,16 +1150,30 @@ class ClientConfig:
     """
 
     url: str | None = None
-    headers: Mapping[str, str] = field(default_factory=dict)
+    #: The fields that carry a credential (``headers``, ``schema_headers``,
+    #: ``cookies`` and ``proxy``) stay out of ``repr()``. A configuration is
+    #: plain data a traceback or an assertion report prints whole, and no
+    #: redaction stage runs over it (C2, C16).
+    headers: Mapping[str, str] = field(default_factory=dict, repr=False)
     #: C4: schema loading uses this alone, so a function-scoped auth fixture
     #: cannot change the session-scoped schema. ``None`` means "use
     #: ``headers``", which is the documented default.
-    schema_headers: Mapping[str, str] | None = None
-    cookies: Mapping[str, str] = field(default_factory=dict)
+    schema_headers: Mapping[str, str] | None = field(default=None, repr=False)
+    cookies: Mapping[str, str] = field(default_factory=dict, repr=False)
     cookie_scope: CookieScope = "none"
-    timeout: float = 30.0
+    #: "Operational limits": a float applied to all four phases, or a
+    #: ``Timeout(connect, read, write, pool)``. :meth:`call_timeout` turns
+    #: either form into the scalar ceiling ``Transport.send()`` requires.
+    timeout: float | httpx.Timeout = DEFAULT_TIMEOUT_SECONDS
     retries: int = 2
-    verify: bool | str = True
+    #: ``httpx`` semantics: ``True``, a CA bundle path, or an ``SSLContext``.
+    verify: bool | str | ssl.SSLContext = True
+    #: Ambient proxy, netrc and ``SSLKEYLOGFILE`` handling stays off unless a
+    #: project opts in, so a run cannot silently route through an ambient
+    #: proxy. An explicit :attr:`proxy` is unaffected by this flag.
+    trust_env: bool = False
+    proxy: httpx.Proxy | str | None = field(default=None, repr=False)
+    max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES
     follow_redirects: bool = False
     http2: bool = False
 
@@ -1178,6 +1200,41 @@ class ClientConfig:
     max_diagnostic_bytes: int = DEFAULT_MAX_DIAGNOSTIC_BYTES
     max_recorded_errors: int = DEFAULT_MAX_RECORDED_ERRORS
     max_recorded_calls: int = DEFAULT_MAX_RECORDED_CALLS
+
+    def call_timeout(self, override: float | None = None) -> float:
+        """The scalar ceiling ``Transport.send()`` takes for one call.
+
+        ``Transport.send()``'s per-call ``timeout`` is mandatory and scalar
+        (SPEC 5.6), and the transport applies it as a ceiling on each of its
+        own four phases rather than as a replacement of them. So the scalar
+        this returns for a phase-specific :attr:`timeout` is the smallest one
+        that clamps no phase the project configured: the largest configured
+        phase, or no bound at all when a phase was deliberately left
+        unbounded. A stored ``Timeout`` therefore governs the request it
+        describes, exactly as "Operational limits" says it does.
+
+        An explicit per-call ``timeout`` option is the caller's own budget
+        and is used as given, which is how a call tightens a configured
+        phase. It can only tighten: a value looser than a configured phase
+        leaves that phase where the project put it.
+
+        Both inputs are held to one domain before any I/O: a number greater
+        than zero, with ``math.inf`` (or a ``None`` phase) for no limit.
+        """
+        if override is not None:
+            return checked_seconds(override, source="the timeout option")
+        configured = checked_timeout(self.timeout, source="ClientConfig.timeout")
+        if not isinstance(configured, httpx.Timeout):
+            return configured
+        phases = (
+            configured.connect,
+            configured.read,
+            configured.write,
+            configured.pool,
+        )
+        if any(phase is None for phase in phases):
+            return math.inf
+        return max(phase for phase in phases if phase is not None)
 
     def selection_policy(self) -> SelectionPolicy:
         """The policy this configuration describes, before per-call overrides."""
@@ -1378,6 +1435,7 @@ class GraphQLClient:
             variables=values,
             options=options,
             omissions=(),
+            omissions_total=0,
         )
 
     # -- the call flow --------------------------------------------------------
@@ -1405,6 +1463,7 @@ class GraphQLClient:
             variables=assembled.variables,
             options=options,
             omissions=assembled.omissions,
+            omissions_total=assembled.omissions_total,
         )
         if bool(options.get("raw", False)):
             return response
@@ -1436,6 +1495,7 @@ class GraphQLClient:
         variables: Mapping[str, Any],
         options: Mapping[str, Any],
         omissions: Sequence[OmissionRecord],
+        omissions_total: int,
     ) -> RequestInfo:
         """Assemble the request, applying the C4 header precedence in order.
 
@@ -1462,6 +1522,7 @@ class GraphQLClient:
             max_diagnostic_bytes=config.max_diagnostic_bytes,
             max_recorded_errors=config.max_recorded_errors,
             omissions=tuple(omissions),
+            omissions_total=omissions_total,
         )
         if self._auth is not None:
             request = self._auth.apply(request)
@@ -1481,6 +1542,7 @@ class GraphQLClient:
         variables: Mapping[str, Any],
         options: Mapping[str, Any],
         omissions: Sequence[OmissionRecord],
+        omissions_total: int,
     ) -> GraphQLResponse[Any]:
         """SPEC 5.2 steps 7 to 13: middleware, transport, response, record."""
         request = self._build_request(
@@ -1490,9 +1552,17 @@ class GraphQLClient:
             variables=variables,
             options=options,
             omissions=omissions,
+            omissions_total=omissions_total,
         )
         request = apply_before_request(self._middleware, request)
-        timeout = float(options.get("timeout", self._config.timeout))
+        # Presence, not the value, decides whether the caller set the option:
+        # an explicit ``timeout=None`` is outside the domain and is refused,
+        # never read as "use the configured timeout".
+        timeout = (
+            checked_seconds(options["timeout"], source="the timeout option")
+            if "timeout" in options
+            else self._config.call_timeout()
+        )
 
         started = time.perf_counter()
         try:
@@ -1659,7 +1729,7 @@ class _IntrospectionExecutor:
             max_diagnostic_bytes=config.max_diagnostic_bytes,
             max_recorded_errors=config.max_recorded_errors,
         )
-        raw = self._transport.send(request, timeout=config.timeout)
+        raw = self._transport.send(request, timeout=config.call_timeout())
         envelope: dict[str, Any] = {"data": raw.data}
         if raw.errors:
             envelope["errors"] = list(raw.errors)
@@ -1671,6 +1741,9 @@ def _new_root_pool(config: ClientConfig) -> HttpxTransport:
     return HttpxTransport(
         timeout=config.timeout,
         max_attempts=config.retries + 1,
+        max_response_bytes=config.max_response_bytes,
+        trust_env=config.trust_env,
+        proxy=config.proxy,
         verify=config.verify,
         http2=config.http2,
         cookie_scope=config.cookie_scope,
@@ -1691,6 +1764,30 @@ def _load_schema(
     return source.load()
 
 
+def _configure(
+    config: ClientConfig | None, url: str, options: Mapping[str, Any]
+) -> ClientConfig:
+    """One ``ClientConfig`` from a supplied one and the factory's own options.
+
+    B4's split decides which name goes where, so this is the only rule the
+    factory needs: every data option is a ``ClientConfig`` field and lands
+    here, and every object stays a constructor argument. An option given to
+    the factory overrides the same field on a supplied ``config``, because a
+    caller who writes it at the call site meant it for this build.
+
+    An unknown name raises rather than being ignored, so a typo cannot leave
+    a client silently running on a default the caller thought they replaced.
+    """
+    base = ClientConfig() if config is None else config
+    known = tuple(f.name for f in dataclasses.fields(base))
+    for name in options:
+        if name not in known:
+            raise ArgumentError.unknown_option(
+                callable_name="build_client()", bad_name=name, candidates=known
+            )
+    return dataclasses.replace(base, **dict(options), url=url)
+
+
 def build_client(
     *,
     url: str,
@@ -1702,9 +1799,18 @@ def build_client(
     parsers: ScalarParsers | None = None,
     middleware: Sequence[Middleware] = (),
     auth: Auth | None = None,
-    headers: Mapping[str, str] | None = None,
+    **config_options: Any,
 ) -> GraphQLClient:
     """Build a client outside pytest, owning every resource it creates (C28).
+
+    This is SPEC 3.11's standalone entry point, so it is the standalone
+    spelling of the constructor and ``ClientConfig`` together. The named
+    parameters above are the objects the constructor takes; every other
+    keyword is a ``ClientConfig`` field, which is what makes the documented
+    ``build_client(url=..., headers=..., max_depth=3)`` shape work. Data
+    options land on the configuration rather than on the client, so C4's
+    default schema identity applies to them: ``headers`` given here is what
+    introspection sends, which an authenticated endpoint requires.
 
     The client transport is derived with the default flag, so no transfer
     statement is left to get wrong and the cleanup list is the single owner.
@@ -1717,8 +1823,7 @@ def build_client(
     ``build_client(transport=...)`` creates no pool and closes nothing: the
     caller owns what the caller supplied.
     """
-    config = ClientConfig() if config is None else config
-    config = dataclasses.replace(config, url=url)
+    config = _configure(config, url, config_options)
 
     if transport is not None:
         loaded = (
@@ -1733,7 +1838,6 @@ def build_client(
             parsers=parsers,
             middleware=middleware,
             auth=auth,
-            headers=headers,
             owns_transport=False,
         )
 
@@ -1757,7 +1861,6 @@ def build_client(
             parsers=parsers,
             middleware=middleware,
             auth=auth,
-            headers=headers,
         )
     except BaseException as failure:
         errors = _close_all(cleanup)
