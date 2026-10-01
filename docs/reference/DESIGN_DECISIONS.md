@@ -788,6 +788,47 @@ values to do their work. Nothing else should.
 - `ClientConfig` is plain data that no redaction stage runs over, so its `repr()` leaves
   out every field that carries a credential: `headers`, `schema_headers`, `cookies` and
   `proxy`.
+- A `GraphQLErrorInfo` keeps the server's `message`, `path` and `extensions` as sent, so
+  a test can match them, and its `repr()` shows none of that text raw. `message` and
+  `extensions` are left out. The `repr()` showing `path` is built once, when the response
+  is built: each string segment goes through the scrub of the request that produced the
+  error, and then the finished text is scrubbed again as a whole, because a server can
+  echo a credential into a path as easily as into a message, and the tuple's own
+  quoting can complete one across two segments.
+- `repr()` is a further transform: it doubles every backslash and escapes quotes after the
+  last scrub ran, so text with no secret in it can render one. Every value field the
+  library builds, in a snapshot, an excerpt, a scrubbed error object or a recorded call,
+  is therefore also checked under `repr()` where it is built, and is replaced with the
+  hardened marker when its `repr()` would contain a qualifying secret. Keys and header
+  names are output too, so the finished snapshot checks each of them under `repr()` in one
+  pass, and a numeric suffix keeps two replaced keys apart instead of merging them. An
+  exception's `repr()` shows its message as it is, without escaping it again.
+- A field checked on its own cannot see the text a representation adds around it: a class
+  name, a field name, a separator, a key joined to its value, or the fixed text between two
+  recorded calls. A qualifying secret can equal or span that text. Every representation the
+  library composes from a snapshot is therefore checked whole before it is returned: the
+  `repr()` and `str()` of `DiagnosticSnapshot`, `RecordedCall` and `GraphQLResponse`, and the
+  recorder dump, as well as `RequestInfo.__repr__` and `as_curl()`. A snapshot does not keep
+  the qualifying set. It keeps keyed digests of each value, under a key drawn once per process
+  and never stored with them, which can check text for a value but cannot show one. When the
+  check finds a value, the renderer raises `DiagnosticRenderError`. The recorder dump checks
+  each call's values against the whole dump, because a value can span from one call's lines
+  into the next.
+- An exception cannot refuse to exist, so every exception built from a request checks its
+  message instead. This includes the `DiagnosticRenderError` a refusal raises, which is a
+  public rendering too. The check covers each complete text the exception shows: its
+  `repr()`, the `repr()` of its `args`, and the last line of a Python traceback, which adds
+  the module path and `: `. A failing message is replaced with a fixed withheld notice, and
+  when the notice fails too, the exception has no message. When even the empty `repr()`
+  would show a value, the `repr()` is the class name alone. A value contained in the class
+  name or its module path cannot be hidden, because Python's own traceback prints them. An
+  execution error whose message would include the response shows
+  the withheld notice in place of a response `repr()` that refused to render, so the caller
+  still receives the error it expects.
+- Python's own representation of a container taken out of a snapshot field, such as
+  `repr(snapshot.variables)` or `repr(snapshot.omissions)`, is checked through its content but
+  not through its wrapper text: `mappingproxy(`, brackets and separators are Python's, not a
+  representation the library builds.
 
 ### Name-based and path-based redaction
 
@@ -817,13 +858,22 @@ redaction cannot cover it. The scrub closes that gap.
   credential the transport sends outside the request's headers: a proxy's username, its
   password, the pair they form, the `Proxy-Authorization` value built from them, and the
   value of every header the proxy was given, each value of a repeated header on its own,
-  as it goes on the wire. Those reach the proxy alone, below the
-  request's own redaction boundary, yet a proxy can quote them back into a body the
-  transport excerpts, so they join the set whatever `redact_headers` says. The set exists
+  as it goes on the wire. Those are built below the request's own redaction boundary, yet
+  a proxy can quote them back into a body the transport excerpts or into a GraphQL
+  response, so they join the set whatever `redact_headers` says, and the transport hands
+  them back with the response so the client renders it with the same set. Target URL
+  userinfo is sent as an `Authorization: Basic` value built from the decoded pair, which
+  no spelling of the URL contains, so the request derives the pair and that header value
+  from its own URL and adds them beside the two halves, for every renderer alike. The set exists
   only inside the stage. It is never stored on a snapshot, never logged, and never returned
   by a public API.
-- Derived forms. For a header value carrying a scheme, such as `Bearer <token>`, the part
-  after the first space is added as well. The percent-encoded form of each value is added.
+- Derived forms. For a value carrying a scheme, such as `Bearer <token>`, the part after
+  the first space is added as well. A value carries a scheme when the text before its
+  first space is an RFC 9110 `token`, which is the grammar of an auth scheme. That holds
+  for a header or a variable alike, since a variable such as `authorization` can hold one.
+  The JSON text of a list or object never starts with a token, so it gets no such form:
+  its tail after the first space would be a fragment such as `"b"]`, and replacing that
+  would cut quotes and brackets out of the text around it. The percent-encoded form of each value is added.
   Non-string values are converted with the same JSON text form used for rendering before
   being added. URL userinfo is added in both its original, still-percent-encoded spelling
   and its decoded form. A percent-escape's hex digits are case-insensitive, so matching
@@ -900,14 +950,16 @@ redaction cannot cover it. The scrub closes that gap.
   This is a validate-only backstop, never another substitution pass: finding a qualifying
   secret in the complete text at this point means no per-leaf substitution could have closed
   it, because the only remaining sources are syntax the format cannot omit or a document that
-  cannot be rewritten without corrupting it. When that happens, `RequestInfo.__repr__` and
-  `as_curl()` raise `DiagnosticRenderError` instead of returning unsafe or malformed text. The
-  exception's own state is fixed, compile-time text, its descriptive message and its `renderer`
-  label alike, and is exactly as exposed to this risk as any other fixed rendering syntax: a
-  qualifying secret can equal a substring of either one. Every such field is therefore validated
-  against the same qualifying set before the exception is raised, and an empty string is used in
-  place of whichever field collides; a qualifying value is never the empty string, so the empty
-  fallback can never repeat one, regardless of what triggered the failure. `DiagnosticRenderError`
+  cannot be rewritten without corrupting it. When that happens, `RequestInfo.__repr__`,
+  `as_curl()` and every other representation named under "Boundary" raise
+  `DiagnosticRenderError` instead of returning unsafe or malformed text. The
+  exception's own text is fixed, compile-time text and is exactly as exposed to this risk as any
+  other fixed rendering syntax. Its `renderer` label is stored on the exception, so the label is
+  replaced with an empty string when it contains a qualifying value; a qualifying value is never
+  the empty string, so the empty label can never repeat one. Its message is not checked field by
+  field: it follows the rule for every exception built from a request ("Boundary" above), which
+  checks each complete text the exception shows and falls back to the withheld notice, then to
+  no message. `DiagnosticRenderError`
   is part of the top-level exception hierarchy ("Top-level surface" above) and is exported from
   `pytest_graphql`. The ordinary case, where no qualifying value collides with fixed or generated
   syntax, never reaches this path at all.
@@ -1071,7 +1123,10 @@ client.
   client only.
 
 Header precedence, lowest to highest: `ClientConfig.headers`, the `gql_headers` fixture,
-`Auth.apply`, `with_headers()` in clone order, then per-call `headers=`. Names compare
+`Auth.apply`, `with_headers()` in clone order, then per-call `headers=`. Userinfo in the
+target URL sits below all of them: it supplies `Authorization: Basic` only when no layer set
+`Authorization`, and an explicit header is what goes on the wire. The transport decides
+this itself, because `httpx` would otherwise replace the explicit header. Names compare
 case-insensitively after stripping, and a later source replaces an earlier one for the same
 name instead of adding a second line. A genuinely repeated header uses an explicit list
 value.

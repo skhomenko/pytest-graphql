@@ -55,6 +55,22 @@ def _pluralize(word: str) -> str:
 class GraphQLTestError(Exception):
     """Base of every exception this package raises. Catch this to catch all."""
 
+    #: Set only when even an empty message would let the ``repr`` show a
+    #: request's secret (``_check_exception_text`` in diagnostics.py).
+    _shown_repr: str | None = None
+
+    def __repr__(self) -> str:
+        # The message is the library's finished, already scrubbed rendering
+        # (DESIGN_DECISIONS.md section 7). The default ``repr`` re-escapes
+        # it, doubling every backslash and quote after the last scrub ran,
+        # and that can spell a credential the scrub had removed. So the
+        # message is shown as it is, never transformed again. An exception
+        # built from a request checked this complete text, and its other
+        # standard renderings, before it was raised.
+        if self._shown_repr is not None:
+            return self._shown_repr
+        return f"{type(self).__name__}({self})"
+
 
 class GraphQLClientError(GraphQLTestError):
     """Raised before any network call."""
@@ -363,10 +379,10 @@ class DiagnosticRenderError(GraphQLClientError):
     compile-time text, and a qualifying secret can equal a substring of
     either one exactly as it can equal a renderer's own wrapper syntax
     (DESIGN_DECISIONS.md section 7, "Value scrub for free-form text"). The
-    caller that already holds the qualifying set validates both ``renderer``
-    and the composed ``message`` against it first and passes an empty string
-    in place of whichever one collides, so this constructor never needs --
-    and is never trusted -- to repeat either check itself.
+    caller that already holds the qualifying set checks ``renderer``
+    against it, passes an empty string in place of a colliding label, and
+    then checks every complete rendering of the built exception, so this
+    constructor never needs, and is never trusted, to repeat that check.
     """
 
     def __init__(self, renderer: str, message: str) -> None:
@@ -377,10 +393,9 @@ class DiagnosticRenderError(GraphQLClientError):
     def default_message(renderer: str) -> str:
         """The descriptive message a caller uses when it is safe to.
 
-        A ``@staticmethod`` rather than inline construction so the one call
-        site that raises this exception can validate this exact text against
-        the qualifying set *before* deciding whether to pass it or the empty
-        fallback to ``__init__``.
+        A ``@staticmethod`` rather than inline construction so the one
+        primitive that raises this exception owns its text, and checks the
+        built exception's complete renderings against the qualifying set.
         """
         return (
             f"{renderer} could not produce a safe representation of this "
@@ -412,6 +427,7 @@ class GraphQLTransportError(GraphQLTestError):
         self.request = request
         self.body_excerpt = body_excerpt
         super().__init__(message)
+        request._guard.check_exception(self)
 
 
 class GraphQLConnectionError(GraphQLTransportError):
@@ -463,6 +479,7 @@ class GraphQLRequestError(GraphQLTestError):
         self.media_type = media_type
         self.errors = errors
         super().__init__(message)
+        request._guard.check_exception(self)
 
 
 class GraphQLExecutionError(GraphQLTestError):

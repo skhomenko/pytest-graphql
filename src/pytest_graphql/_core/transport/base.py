@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from pytest_graphql._core.diagnostics import RequestInfo
@@ -48,6 +48,12 @@ class RawResponse:
     errors: tuple[Mapping[str, Any], ...]
     extensions: Mapping[str, Any] | None
     headers: Mapping[str, str]
+    #: C16. Credentials the transport sent on this request's behalf outside
+    #: its headers, as ``RequestInfo.transport_credentials`` pairs, so the
+    #: client renders the response with the same secret set the transport
+    #: scrubbed its own errors with. A server or proxy can echo one into an
+    #: error ``path`` as easily as into a body. Never rendered.
+    transport_credentials: tuple[tuple[str, str], ...] = field(default=(), repr=False)
 
 
 class Transport(Protocol):

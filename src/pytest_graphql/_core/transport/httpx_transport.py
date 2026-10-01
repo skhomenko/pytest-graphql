@@ -26,7 +26,6 @@ secret before escaping expanded it (module docstring of ``diagnostics.py``,
 
 from __future__ import annotations
 
-import base64
 import codecs
 import dataclasses
 import json
@@ -49,6 +48,7 @@ from httpx._utils import URLPattern, get_environment_proxies
 
 from pytest_graphql._core.diagnostics import (
     RequestInfo,
+    basic_credentials,
     safe_excerpt,
     sanitize_text,
 )
@@ -192,16 +192,29 @@ def _proxy_credentials(proxy: httpx.Proxy) -> tuple[tuple[str, str], ...]:
     found: list[tuple[str, str]] = []
     if proxy.auth is not None:
         username, password = proxy.auth
-        pair = f"{username}:{password}"
-        token = base64.b64encode(pair.encode("utf-8")).decode("ascii")
-        found += [
-            ("proxy", username),
-            ("proxy", password),
-            ("proxy", pair),
-            ("proxy-authorization", f"Basic {token}"),
-        ]
+        found += basic_credentials(
+            username, password, source="proxy", header="proxy-authorization"
+        )
     found += [(name.lower(), value) for name, value in proxy.headers.multi_items()]
     return tuple(found)
+
+
+def _request_auth(request: httpx.Request) -> httpx.Auth:
+    """The authentication step for one send, decided here rather than by httpx.
+
+    C4 places URL userinfo below every header source: it supplies Basic
+    authentication only when no layer set ``Authorization``. Left to itself,
+    ``httpx.Client.send`` turns userinfo into a Basic header after this
+    project's header merge and replaces whatever header the caller chose,
+    so every send passes an explicit ``auth`` and httpx's own URL step never
+    runs. The base ``httpx.Auth`` sends the request unchanged.
+    """
+    if "authorization" in request.headers:
+        return httpx.Auth()
+    username, password = request.url.username, request.url.password
+    if username or password:
+        return httpx.BasicAuth(username, password)
+    return httpx.Auth()
 
 
 def _build_pool(
@@ -673,7 +686,7 @@ class HttpxTransport(DerivableTransportBase):
         exception is currently being handled regardless of an explicit
         ``from`` clause.
 
-        ``request`` is first given the proxy credentials this pool sends, so
+        ``request`` is first given the credentials this transport sends, so
         every message and excerpt below scrubs them too (C16). ``timeout`` is
         refused before any I/O when it is outside :func:`checked_seconds`'
         domain.
@@ -690,6 +703,7 @@ class HttpxTransport(DerivableTransportBase):
             raise build_error
         assert httpx_request is not None
 
+        auth = _request_auth(httpx_request)
         retry_eligible = _should_retry_connect_failure(request)
         attempts_allowed = self._max_attempts if retry_eligible else 1
 
@@ -697,7 +711,7 @@ class HttpxTransport(DerivableTransportBase):
         send_error: GraphQLTransportError | None = None
         for attempt in range(1, attempts_allowed + 1):
             try:
-                response = self._client.send(httpx_request, stream=True)
+                response = self._client.send(httpx_request, stream=True, auth=auth)
             except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
                 if attempt < attempts_allowed:
                     _sleep(_backoff_seconds(attempt))
@@ -732,6 +746,13 @@ class HttpxTransport(DerivableTransportBase):
         raise classify_error
 
     def _with_transport_credentials(self, request: RequestInfo) -> RequestInfo:
+        """``request`` with every credential this pool sends on its behalf.
+
+        Those are the proxy's, which are not in ``request.headers``, so no
+        header rule can see them (C16). The Basic value httpx builds from
+        the target URL's userinfo needs nothing here: ``RequestInfo``
+        derives it from its own URL, so every renderer has it.
+        """
         if not self._proxy_credentials:
             return request
         return dataclasses.replace(
@@ -857,6 +878,7 @@ class HttpxTransport(DerivableTransportBase):
             errors=tuple(envelope.get("errors") or ()),
             extensions=extensions if isinstance(extensions, Mapping) else None,
             headers=dict(response.headers),
+            transport_credentials=self._proxy_credentials,
         )
 
     def _read_capped_body(

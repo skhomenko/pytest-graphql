@@ -1607,3 +1607,52 @@ def test_transport_module_reload_does_not_break_os_environ_get() -> None:
     assert os.environ.get("PATH") == real_path
     context = httpx_transport._resolve_ssl_context(True, trust_env=False)
     assert isinstance(context, ssl.SSLContext)
+
+
+# -- URL userinfo is a fallback below an explicit Authorization (C4) ----------
+
+_USERINFO = ("wire-user", "wire-password")
+_BASIC = "Basic " + base64.b64encode(":".join(_USERINFO).encode()).decode()
+
+
+def _recording_authorization(seen: list[str | None]) -> Any:
+    def respond(_body: bytes, headers: dict[str, str]) -> PlannedResponse:
+        seen.append(headers.get("authorization"))
+        return PlannedResponse(
+            200,
+            (("Content-Type", "application/json"),),
+            _envelope({"data": {"greet": "hi"}}),
+        )
+
+    return respond
+
+
+@pytest.mark.parametrize(
+    ("headers", "on_the_wire"),
+    [
+        ({}, _BASIC),
+        ({"Authorization": "Bearer explicit-token"}, "Bearer explicit-token"),
+        ({"authorization": "Bearer explicit-token"}, "Bearer explicit-token"),
+    ],
+)
+def test_url_userinfo_supplies_basic_auth_only_without_an_explicit_header(
+    transport: HttpxTransport, headers: dict[str, str], on_the_wire: str
+) -> None:
+    # CR-20261001T205548Z-c9bc07f-fc2f7f97-F03. Left to itself httpx turns
+    # userinfo into Basic during ``send`` and replaces the explicit header.
+    seen: list[str | None] = []
+    with local_server(_recording_authorization(seen)) as url:
+        target = url.replace("http://", "http://{}:{}@".format(*_USERINFO), 1)
+        transport.send(_make_request(url=target, headers=headers), timeout=5.0)
+
+    assert seen == [on_the_wire]
+
+
+def test_a_url_without_userinfo_sends_no_authorization(
+    transport: HttpxTransport,
+) -> None:
+    seen: list[str | None] = []
+    with local_server(_recording_authorization(seen)) as url:
+        transport.send(_make_request(url=url), timeout=5.0)
+
+    assert seen == [None]

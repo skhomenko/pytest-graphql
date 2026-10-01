@@ -61,6 +61,7 @@ from pytest_graphql._core.diagnostics import (
     DEFAULT_MIN_REDACTED_VALUE_LENGTH,
     DEFAULT_REDACT_HEADERS,
     DEFAULT_REDACT_VARIABLES,
+    WITHHELD_TEXT,
     DiagnosticsRecorder,
     OmissionRecord,
     RecordedCall,
@@ -69,6 +70,7 @@ from pytest_graphql._core.diagnostics import (
 )
 from pytest_graphql._core.errors import (
     ArgumentError,
+    DiagnosticRenderError,
     GraphQLExecutionError,
     GraphQLPartialDataError,
     SelectionError,
@@ -1585,6 +1587,14 @@ class GraphQLClient:
             raise
 
         duration_ms = (time.perf_counter() - started) * 1000.0
+        if raw.transport_credentials:
+            request = dataclasses.replace(
+                request,
+                transport_credentials=(
+                    *request.transport_credentials,
+                    *raw.transport_credentials,
+                ),
+            )
         response = build_response(
             raw,
             request=request,
@@ -1622,25 +1632,49 @@ class GraphQLClient:
         )
         if not response.errors:
             if response.data_state != "present":
-                raise GraphQLExecutionError(
+                raise _execution_error(
+                    GraphQLExecutionError,
                     "the server returned no errors and no data "
-                    f"({response.data_state}), which is a protocol violation.\n"
-                    f"  {response!r}"
+                    f"({response.data_state}), which is a protocol violation.",
+                    response,
                 )
             return
         if not raise_on_error:
             return
         if response.has_data:
             if raise_on_partial:
-                raise GraphQLPartialDataError(
+                raise _execution_error(
+                    GraphQLPartialDataError,
                     f"the server returned {len(response.errors)} error(s) "
-                    "alongside data.\n"
-                    f"  {response!r}"
+                    "alongside data.",
+                    response,
                 )
             return
-        raise GraphQLExecutionError(
-            f"the server returned {len(response.errors)} error(s).\n  {response!r}"
+        raise _execution_error(
+            GraphQLExecutionError,
+            f"the server returned {len(response.errors)} error(s).",
+            response,
         )
+
+
+def _execution_error(
+    error_type: type[GraphQLExecutionError],
+    summary: str,
+    response: GraphQLResponse[Any],
+) -> GraphQLExecutionError:
+    """An execution error whose complete message was checked against the request.
+
+    The response's ``repr`` refuses to render when it would show a secret.
+    The error is still raised then, with the response withheld, because the
+    refusal must not replace the error the caller is waiting for.
+    """
+    try:
+        shown = repr(response)
+    except DiagnosticRenderError:
+        shown = WITHHELD_TEXT
+    error = error_type(f"{summary}\n  {shown}")
+    response.request._guard.check_exception(error)
+    return error
 
 
 def _operation_definition(

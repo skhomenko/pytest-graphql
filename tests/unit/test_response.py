@@ -659,6 +659,84 @@ def test_graphql_error_info_degrades_instead_of_raising() -> None:
     assert GraphQLErrorInfo.from_mapping({"extensions": {"code": 5}}).code is None
 
 
+def test_graphql_error_info_renders_its_path_through_the_scrub() -> None:
+    # The path is server text; ``repr`` shows the scrubbed copy, while the
+    # attribute keeps what the server sent so it still matches the data.
+    from pytest_graphql._core.response import GraphQLErrorInfo
+
+    info = GraphQLErrorInfo.from_mapping(
+        {"message": "m", "path": ["user", SECRET, 0]},
+        scrub=lambda text: text.replace(SECRET, "[redacted:x]"),
+    )
+    assert info.path == ("user", SECRET, 0)
+    assert SECRET not in repr(info)
+    assert "('user', '[redacted:x]', 0)" in repr(info)
+
+
+def test_a_response_error_path_never_echoes_a_request_secret() -> None:
+    query = '{ user(id: "u1") { id } }'
+    error = {"message": "m", "path": ["user", f"echo {SECRET}"]}
+    response = build(query, {"user": None}, errors=(error,))
+    assert SECRET not in repr(response.errors)
+    assert response.errors[0].path == ("user", f"echo {SECRET}")
+
+
+def test_an_error_path_repr_cannot_recreate_a_scrubbed_secret() -> None:
+    # CR-20261001T205548Z-c9bc07f-fc2f7f97-F02. The scheme suffix is four
+    # literal backslash-n pairs; the server's segment holds four real
+    # newlines, which contain no secret until ``repr`` escapes them.
+    suffix = "\\n" * 4
+    request = RequestInfo(
+        operation=None,
+        kind="query",
+        document="{ users { id } }",
+        variables={},
+        headers={"Authorization": f"Bearer {suffix}"},
+        url="http://example.test/graphql",
+    )
+    raw = RawResponse(
+        200,
+        "application/json",
+        {"users": []},
+        ({"message": "m", "path": ["users", "\n" * 4]},),
+        None,
+        {},
+    )
+    response = build_response(
+        raw, request=request, schema=SCHEMA, document=parse("{ users { id } }")
+    )
+    assert len(suffix) == 8
+    assert suffix not in repr(response.errors)
+    assert suffix not in repr(response.errors[0])
+
+
+def test_an_error_path_repr_cannot_spell_a_secret_across_two_segments() -> None:
+    # Neither segment holds the secret, and neither does its own ``repr``;
+    # only the tuple's ``', '`` between them completes it, so the finished
+    # text is scrubbed as a whole, not only segment by segment.
+    secret = "a', 'b-0123456789"
+    request = RequestInfo(
+        operation=None,
+        kind="query",
+        document="{ users { id } }",
+        variables={},
+        headers={"X-API-Key": secret},
+        url="http://example.test/graphql",
+    )
+    raw = RawResponse(
+        200,
+        "application/json",
+        {"users": []},
+        ({"message": "m", "path": ["users", "end a", "b-0123456789 tail"]},),
+        None,
+        {},
+    )
+    response = build_response(
+        raw, request=request, schema=SCHEMA, document=parse("{ users { id } }")
+    )
+    assert secret not in repr(response.errors[0])
+
+
 # -- the top-level package surface (C9) ---------------------------------------
 
 

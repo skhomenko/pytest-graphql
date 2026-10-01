@@ -12,6 +12,7 @@ import os
 import shlex
 import stat
 import subprocess
+import traceback
 import urllib.parse
 from collections.abc import Mapping
 from pathlib import Path
@@ -27,14 +28,23 @@ from pytest_graphql._core.diagnostics import (
     DEFAULT_REDACT_HEADERS,
     DEFAULT_REDACT_VARIABLES,
     MAX_OMISSION_RECORDS,
+    WITHHELD_TEXT,
     DiagnosticSnapshot,
+    DiagnosticsRecorder,
     OmissionRecord,
+    RecordedCall,
     RequestInfo,
     _curl_header_variable,
+    _marker_contains_secret,
+    _SecretGuard,
     escape_control_characters,
     scrub_text,
 )
-from pytest_graphql._core.errors import DiagnosticRenderError
+from pytest_graphql._core.errors import (
+    DiagnosticRenderError,
+    GraphQLRequestError,
+    GraphQLTransportError,
+)
 
 # RFC 9110 tchar: DIGIT / ALPHA / one of "!#$%&'*+-.^_`|~".
 _TCHAR_SPECIALS = "!#$%&'*+-.^_`|~"
@@ -320,6 +330,64 @@ def test_percent_encoded_scheme_suffix_is_a_derived_secret() -> None:
     snapshot = request.redacted()
     assert encoded_suffix not in _snapshot_text(request)
     assert "[redacted:Authorization]" in snapshot.variables["note"]
+
+
+def test_a_scheme_suffix_is_derived_from_a_variable_value_too() -> None:
+    # A variable named ``authorization`` is a default pattern, and its value
+    # can carry a scheme just as a header's can.
+    token = "variabletoken1234567890"
+    request = _make_request(
+        variables={"authorization": f"Bearer {token}", "note": f"copy: {token}"},
+    )
+    assert token not in _snapshot_text(request)
+
+
+def test_a_json_value_gets_no_scheme_suffix_form() -> None:
+    # The JSON text of a list starts with ``[``, which is no auth scheme. A
+    # suffix form would be the list's own tail, ``"b..."]``, and replacing
+    # it would cut the closing quote and bracket out of free-form text.
+    first, second = "firstelement12345", "secondelement12345"
+    request = _make_request(
+        variables={
+            "secret": [first, second],
+            "note": f'sent ["{first}", "{second}"] and "{second}"]',
+        },
+    )
+    note = request.redacted().variables["note"]
+    assert first not in note
+    assert second not in note
+    assert note.endswith('"[redacted:secret]"]')
+
+
+def test_a_snapshot_value_cannot_recreate_a_secret_under_repr() -> None:
+    # The note holds one backslash and no secret. ``repr`` doubles the
+    # backslash, which spells the header value, so the field is replaced
+    # when the snapshot is built, before any ``repr`` runs on it.
+    secret = "ab\\\\cdefgh-0123"
+    echo = "ab\\cdefgh-0123"
+    request = _make_request(
+        headers={"X-API-Key": secret}, variables={"note": f"echo {echo}"}
+    )
+    snapshot = request.redacted()
+    assert secret not in snapshot.variables["note"]
+    assert secret not in repr(snapshot.variables["note"])
+    assert secret not in repr(snapshot)
+
+
+def test_variable_keys_replaced_by_the_repr_check_stay_distinct() -> None:
+    # A key is output like a value, so its ``repr`` is checked too. Two
+    # replaced keys get the one shared marker, and a suffix keeps both.
+    request = _make_request(
+        variables={"a\\b": 1, "c\\d": 2},
+        headers={"x-one": "a\\\\b", "x-two": "c\\\\d"},
+        redact_headers=frozenset({"x-one", "x-two"}),
+        min_redacted_value_length=1,
+    )
+    variables = request.redacted().variables
+    assert sorted(variables.values()) == [1, 2]
+    shown = repr(dict(variables))
+    assert "a\\\\b" not in shown
+    assert "c\\\\d" not in shown
 
 
 def test_secret_in_url_path_is_scrubbed_in_snapshot_and_curl() -> None:
@@ -1561,3 +1629,176 @@ def test_a_request_bounds_the_records_it_is_handed_and_counts_them_all() -> None
     assert len(request.omissions) == MAX_OMISSION_RECORDS
     assert request.omissions_total == MAX_OMISSION_RECORDS + 7
     assert request.redacted().omissions_dropped == 7
+
+
+# -- complete-output validation of snapshot representations (C2, C16) -------
+
+
+@pytest.mark.parametrize(
+    ("secret", "text", "expected"),
+    [
+        ("%2fsecret-01", "x %2Fsecret-01 y", True),
+        ("%2Fsecret-01", "x %2fsecret-01 y", True),
+        ("abcdefgh", "xxabcdefgh", True),
+        ("abcdefgh", "abcdefg", False),
+        ("abcdefgh", "", False),
+    ],
+)
+def test_the_guard_matches_exactly_like_the_qualifying_set(
+    secret: str, text: str, expected: bool
+) -> None:
+    assert _marker_contains_secret(text, (secret,)) is expected
+    assert _SecretGuard((secret, "a-longer-second-value")).contains(text) is expected
+
+
+def test_the_guard_holds_no_raw_qualifying_value() -> None:
+    secret = "guard-secret-0123456789"
+    snapshot = _make_request(headers={"Authorization": secret}).redacted()
+    guard = snapshot._guard
+    assert guard.contains(f"x{secret}x")
+    assert secret not in repr(guard)
+    assert secret.encode() not in repr(guard._state()).encode()
+
+
+def test_a_snapshot_repr_refuses_a_secret_equal_to_its_class_name() -> None:
+    request = _make_request(headers={"Authorization": "Bearer DiagnosticSnapshot"})
+    snapshot = request.redacted()
+    with pytest.raises(DiagnosticRenderError):
+        repr(snapshot)
+    with pytest.raises(DiagnosticRenderError):
+        str(snapshot)
+
+
+def test_a_snapshot_repr_refuses_a_secret_spanning_a_key_and_its_value() -> None:
+    secret = "'user': 'someone'"
+    snapshot = _make_request(
+        headers={"X-API-Key": secret}, variables={"user": "someone"}
+    ).redacted()
+    with pytest.raises(DiagnosticRenderError):
+        repr(snapshot)
+    # The fields themselves are untouched: no one of them holds the secret.
+    assert snapshot.variables == {"user": "someone"}
+
+
+def test_a_snapshot_with_no_collision_renders_as_a_dataclass() -> None:
+    snapshot = _make_request(
+        headers={"Authorization": "Bearer tok-0123456789"}
+    ).redacted()
+    shown = repr(snapshot)
+    assert shown.startswith("DiagnosticSnapshot(operation='Greet', kind=")
+    assert "_guard" not in shown
+    assert "tok-0123456789" not in shown
+
+
+def test_a_recorded_call_repr_refuses_a_secret_equal_to_its_own_wrapper() -> None:
+    secret = "RecordedCall(request="
+    snapshot = _make_request(headers={"X-API-Key": secret}).redacted()
+    assert secret not in repr(snapshot)
+    with pytest.raises(DiagnosticRenderError):
+        repr(RecordedCall(request=snapshot, outcome="ok"))
+
+
+def test_the_recorder_dump_checks_a_secret_across_two_calls() -> None:
+    # The first request's secret spans its own URL line into the second
+    # call's index line, so checking each call's lines alone would pass.
+    secret = "/graphql\n2. query"
+    first = _make_request(headers={"X-API-Key": secret}).redacted()
+    second = _make_request().redacted()
+    recorder = DiagnosticsRecorder()
+    recorder.record(RecordedCall(request=first, outcome="ok"))
+    assert secret not in recorder.dump()
+    recorder.record(RecordedCall(request=second, outcome="ok"))
+    with pytest.raises(DiagnosticRenderError):
+        recorder.dump()
+
+
+def test_an_exception_message_that_would_show_a_secret_is_withheld() -> None:
+    secret = "TransportError(boom"
+    snapshot = _make_request(headers={"X-API-Key": secret}).redacted()
+    error = GraphQLTransportError("boom", request=snapshot)
+    assert str(error) == WITHHELD_TEXT
+    assert secret not in repr(error)
+
+
+def test_an_exception_whose_class_name_is_the_secret_has_an_empty_message() -> None:
+    secret = "GraphQLTransportError"
+    snapshot = _make_request(headers={"X-API-Key": secret}).redacted()
+    error = GraphQLTransportError("boom", request=snapshot)
+    assert str(error) == ""
+
+
+def _every_text(error: BaseException) -> str:
+    """``str``, ``repr``, the ``args`` repr and the traceback's last line."""
+    return "\n".join(
+        [
+            str(error),
+            repr(error),
+            repr(error.args),
+            *traceback.format_exception_only(error),
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    "second",
+    [
+        "DiagnosticRenderError(repr()",
+        "DiagnosticRenderError: repr()",
+        '("repr() could',
+    ],
+)
+@pytest.mark.parametrize("source", ["snapshot", "live"])
+def test_a_refusal_shows_no_second_secret_in_any_rendering(
+    second: str, source: str
+) -> None:
+    # The first secret makes the rendering refuse. The second equals text
+    # the refusal would show around its own message.
+    first = "DiagnosticSnapshot" if source == "snapshot" else "RequestInfo("
+    request = _make_request(
+        headers={"Authorization": f"Bearer {first}", "X-API-Key": second}
+    )
+    target: object = request.redacted() if source == "snapshot" else request
+    with pytest.raises(DiagnosticRenderError) as caught:
+        repr(target)
+    assert second not in _every_text(caught.value)
+
+
+def test_a_refusal_keeps_its_message_when_nothing_collides() -> None:
+    request = _make_request(headers={"Authorization": "DiagnosticSnapshot"})
+    with pytest.raises(DiagnosticRenderError) as caught:
+        repr(request.redacted())
+    assert str(caught.value) == DiagnosticRenderError.default_message("repr()")
+    assert caught.value.renderer == "repr()"
+
+
+@pytest.mark.parametrize(
+    "secret", ["GraphQLTransportError: boom", "('boom',)", "TransportError(boom"]
+)
+def test_a_transport_error_shows_no_secret_in_any_rendering(secret: str) -> None:
+    snapshot = _make_request(headers={"X-API-Key": secret}).redacted()
+    error = GraphQLTransportError("boom", request=snapshot)
+    assert str(error) == WITHHELD_TEXT
+    assert secret not in _every_text(error)
+
+
+def test_an_exception_repr_drops_the_parentheses_a_secret_spans() -> None:
+    secret = "TransportError("
+    snapshot = _make_request(headers={"X-API-Key": secret}).redacted()
+    error = GraphQLTransportError("boom", request=snapshot)
+    assert str(error) == ""
+    assert repr(error) == "GraphQLTransportError"
+    assert secret not in _every_text(error)
+
+
+def test_a_request_error_shows_no_secret_in_its_traceback_line() -> None:
+    secret = "GraphQLRequestError: rejected"
+    snapshot = _make_request(headers={"X-API-Key": secret}).redacted()
+    error = GraphQLRequestError(
+        "rejected",
+        request=snapshot,
+        status_code=400,
+        media_type="application/json",
+        errors=(),
+    )
+    assert str(error) == WITHHELD_TEXT
+    assert secret not in _every_text(error)

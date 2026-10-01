@@ -483,6 +483,27 @@ def test_errors_with_no_data_raise_an_execution_error(schema: GraphQLSchema) -> 
     assert not isinstance(caught.value, GraphQLPartialDataError)
 
 
+def test_an_exception_repr_does_not_escape_its_message_again(
+    schema: GraphQLSchema,
+) -> None:
+    # The message quotes the response's ``repr``, which already escaped the
+    # variable's one backslash into two. The default exception ``repr``
+    # would escape the message again, into the four the header holds.
+    secret = "q\\\\\\\\w-0123456789"
+    client = _client_for(
+        schema,
+        _envelope(None, ({"message": "boom"},)),
+        headers={"X-API-Key": secret},
+    )
+
+    with pytest.raises(GraphQLExecutionError) as caught:
+        client.query("user", id="q\\w-0123456789", fields=["id"])
+
+    assert secret.count("\\") == 4
+    assert secret not in str(caught.value)
+    assert secret not in repr(caught.value)
+
+
 def test_errors_with_data_raise_a_partial_data_error(schema: GraphQLSchema) -> None:
     client = _client_for(
         schema, _envelope({"user": {"id": "u1"}}, ({"message": "boom"},))
@@ -895,6 +916,65 @@ def _reflect_proxy_authorization(
         headers=(("Content-Type", "text/plain"),),
         body=f"bad gateway for {headers.get('proxy-authorization')}".encode(),
     )
+
+
+_WIRE_USER, _WIRE_PASSWORD = "wire-user", "wire-password"
+_WIRE_BASIC = (
+    "Basic " + base64.b64encode(f"{_WIRE_USER}:{_WIRE_PASSWORD}".encode()).decode()
+)
+
+
+def _recording_authorization(seen: list[str | None]) -> Any:
+    def respond(_body: bytes, headers: dict[str, str]) -> PlannedResponse:
+        seen.append(headers.get("authorization"))
+        body = b'{"data": {"user": {"id": "u1"}}}'
+        return PlannedResponse(
+            200, (("Content-Type", "application/graphql-response+json"),), body
+        )
+
+    return respond
+
+
+@pytest.mark.parametrize(
+    "layer", ["none", "config", "auth", "with_headers", "per_call"]
+)
+def test_an_explicit_authorization_outranks_url_userinfo_on_the_wire(
+    schema: GraphQLSchema, layer: str
+) -> None:
+    # CR-20261001T205548Z-c9bc07f-fc2f7f97-F03. URL userinfo sits below every
+    # C4 header layer: it supplies Basic only when no layer set the header.
+    bearer = "Bearer layer-token-0123456789"
+    seen: list[str | None] = []
+    with local_server(_recording_authorization(seen)) as url:
+        target = url.replace("http://", f"http://{_WIRE_USER}:{_WIRE_PASSWORD}@", 1)
+        client = build_client(
+            url=target,
+            schema=schema,
+            headers={"Authorization": bearer} if layer == "config" else {},
+            auth=BearerAuth("layer-token-0123456789") if layer == "auth" else None,
+        )
+        each = (
+            client.with_headers({"Authorization": bearer})
+            if layer == "with_headers"
+            else client
+        )
+        try:
+            each.query(
+                "user",
+                id="u1",
+                fields=["id"],
+                **(
+                    {"headers": {"Authorization": bearer}}
+                    if layer == "per_call"
+                    else {}
+                ),
+            )
+        finally:
+            if each is not client:
+                each.close()
+            client.close()
+
+    assert seen == [_WIRE_BASIC if layer == "none" else bearer]
 
 
 def test_a_factory_proxy_credential_reaches_no_rendered_path(
