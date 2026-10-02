@@ -21,8 +21,9 @@ Three things here are load-bearing and easy to get wrong:
 
 from __future__ import annotations
 
+import _thread
 import signal
-import sys
+import threading
 import traceback
 from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
 from contextlib import contextmanager
@@ -174,29 +175,95 @@ class Timeout(BaseException):
     """A reporting call or a walk did not terminate inside its deadline."""
 
 
+class Deadline:
+    """One armed deadline: its timer, the handler it installs, and its cleanup.
+
+    A timer thread interrupts the main thread through ``interrupt_main``,
+    which simulates a ``SIGINT`` on every supported platform, Windows
+    included, where ``setitimer`` does not exist. ``handle`` turns that one
+    interrupt into ``Timeout`` at the next bytecode boundary, which is where a
+    walk that never ends spends its time. A real ``SIGINT`` still reaches the
+    previous handler.
+
+    The handler is process-wide state, so ``close`` must restore it on every
+    path out of the block, and an interrupt is exactly what can cut a cleanup
+    short: the timer can fire as the block ends, and ``signal.signal`` runs
+    any pending handler before it changes one. So ``close`` keeps an
+    interrupt that lands in it and retries its steps, all of which are
+    idempotent. It ends because each interrupt is spent once: the timer fires
+    at most once, and its ``Timeout`` is raised at most once.
+    """
+
+    def __init__(self, seconds: float) -> None:
+        self.lock = threading.Lock()
+        self.armed = True
+        self.fired = False
+        self.spent = False
+        self.previous: Any = signal.getsignal(signal.SIGINT)
+        self.timer = threading.Timer(seconds, self.expire)
+        self.timer.daemon = True
+
+    def expire(self) -> None:
+        with self.lock:
+            if self.armed:
+                self.fired = True
+                _thread.interrupt_main(signal.SIGINT)
+
+    def handle(self, signum: int, frame: Any) -> None:
+        if self.fired and not self.spent:
+            self.spent = True
+            raise Timeout("reporting did not terminate inside its deadline")
+        if callable(self.previous):
+            self.previous(signum, frame)
+        elif self.previous != signal.SIG_IGN:
+            raise KeyboardInterrupt
+
+    def close(self) -> list[BaseException]:
+        """Disarm, restore the previous handler, and return what interrupted it."""
+        caught: list[BaseException] = []
+        while True:
+            try:
+                with self.lock:
+                    self.armed = False
+                self.timer.cancel()
+                if self.timer.ident is not None:
+                    self.timer.join()
+                signal.signal(signal.SIGINT, self.previous)
+            except (Timeout, KeyboardInterrupt) as exc:  # kept, and the steps retried
+                caught.append(exc)
+                continue
+            return caught
+
+
 @contextmanager
-def deadline(seconds: float = 10.0) -> Iterator[None]:
+def deadline(seconds: float = 10.0) -> Iterator[Deadline]:
     """Fail rather than hang when a walk does not terminate.
 
-    ``setitimer`` only exists on the main thread of a POSIX platform. Where it
-    does not, the deadline is skipped: every walk in this design bounds itself
-    with a set of visited identities, so the guard is there to catch a
-    regression in that, not to make the suite pass.
+    The timer is built before the handler is installed, and everything from
+    the install on is inside the block that closes, so no failure after the
+    install can leave the handler in place. A ``Timeout`` that arrives while
+    closing is raised once the handler is restored, unless the block is
+    already leaving with an exception of its own; a real interrupt never
+    gives way to that exception.
     """
-    if not hasattr(signal, "setitimer") or sys.platform.startswith("win"):
-        yield
-        return
-
-    def fire(_signum: int, _frame: Any) -> None:
-        raise Timeout("reporting did not terminate inside its deadline")
-
-    previous = signal.signal(signal.SIGALRM, fire)
-    signal.setitimer(signal.ITIMER_REAL, seconds)
+    if threading.current_thread() is not threading.main_thread():
+        raise RuntimeError("the deadline needs the main thread to interrupt")
+    armed = Deadline(seconds)
+    if armed.previous is None:
+        raise RuntimeError("the SIGINT handler was not set from Python to restore")
     try:
-        yield
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous)
+        signal.signal(signal.SIGINT, armed.handle)
+        armed.timer.start()
+        yield armed
+    except BaseException as failure:
+        late = armed.close()
+        interrupts = [exc for exc in late if not isinstance(exc, Timeout)]
+        if interrupts:
+            raise interrupts[0] from failure
+        raise
+    late = armed.close()
+    if late:
+        raise late[0]
 
 
 # -- injection ----------------------------------------------------------------
