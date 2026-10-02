@@ -187,8 +187,8 @@ jobs:
 
   no-pytest:
     # The distribution must be usable without pytest. Per C41 in the build plan
-    # this job does not build a client at this milestone, because no client
-    # exists yet. The client half of the check joins it at M5c.
+    # the check also builds a client on a fake transport, calls it and closes
+    # it, and then looks for pytest in sys.modules again.
     name: install without pytest
     runs-on: ubuntu-latest
     steps:
