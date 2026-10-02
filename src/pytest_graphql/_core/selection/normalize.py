@@ -78,6 +78,7 @@ from graphql.language import FragmentSpreadNode
 from graphql.pyutils import is_iterable
 from graphql.utilities import ast_from_value, value_from_ast
 
+from pytest_graphql._core.diagnostics import MAX_OMISSION_RECORDS, OmissionRecord
 from pytest_graphql._core.errors import (
     ArgumentError,
     SchemaError,
@@ -226,6 +227,8 @@ def normalize(
         selection_set=SelectionSetNode(selections=tuple(selections)),
         variables=emitter.allocator.variables,
         field_count=emitter.field_count,
+        omissions=tuple(emitter.omissions),
+        omissions_total=emitter.omissions_total,
     )
 
 
@@ -575,6 +578,8 @@ class _Emitter:
         self._root_name = root_name
         self.allocator = VariableAllocator(reserved=(PAGE_SIZE_VARIABLE,))
         self.field_count = 0
+        self.omissions: list[OmissionRecord] = []
+        self.omissions_total = 0
 
     def _count(self, fields: int = 1) -> None:
         """Charge fields against ``max_fields``, which guards the document.
@@ -688,7 +693,9 @@ class _Emitter:
         path: tuple[str, ...],
     ) -> SelectionSetNode:
         if entry.auto:
-            return self._adopt(self._builder.build(child_type, self._policy))
+            return self._adopt(
+                self._builder.build(child_type, self._policy), prefix=path
+            )
         if entry.children is None or entry.children.is_empty():
             raise SelectionError(
                 f"{entry.name!r} returns {child_type.name}, so it needs a "
@@ -705,8 +712,10 @@ class _Emitter:
     ) -> InlineFragmentNode:
         fragment_type = _as_composite(self._schema.type_map[fragment.type_name])
         if fragment.auto:
+            # C56: an inline fragment is not a field, so it adds no path
+            # component and the records rebase onto the fragment's own scope.
             selection_set = self._adopt(
-                self._builder.build(fragment_type, self._policy)
+                self._builder.build(fragment_type, self._policy), prefix=path
             )
         else:
             assert fragment.children is not None
@@ -721,11 +730,28 @@ class _Emitter:
             selection_set=selection_set,
         )
 
-    def _adopt(self, built: BuiltSelection) -> SelectionSetNode:
-        """Splice a generated selection in, taking on its variables and size."""
+    def _adopt(
+        self, built: BuiltSelection, *, prefix: tuple[str, ...]
+    ) -> SelectionSetNode:
+        """Splice a generated selection in, taking on its variables, size and
+        omission records.
+
+        C56/C58: every path a generated selection reports is relative to its
+        own ``AUTO`` scope, so composing it into this document rebases those
+        paths onto where the scope was spliced in. A reader then sees the
+        field's position in the finished document rather than in the fragment
+        it came from, which is the whole point of surfacing them. The total is
+        carried across too, so a cached entry that was already truncated does
+        not silently under-report here.
+        """
         for variable in built.variables:
             self.allocator.adopt(variable)
         self._count(built.field_count)
+        self.omissions_total += built.omissions_total
+        for record in built.omissions:
+            if len(self.omissions) >= MAX_OMISSION_RECORDS:
+                break
+            self.omissions.append(record.rebased(prefix))
         return built.selection_set
 
     def _arguments(

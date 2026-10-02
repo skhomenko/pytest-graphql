@@ -66,6 +66,7 @@ from graphql import (
     is_leaf_type,
 )
 
+from pytest_graphql._core.diagnostics import OmissionRecord
 from pytest_graphql._core.errors import (
     ArgumentError,
     OperationNotFoundError,
@@ -107,6 +108,14 @@ class AssembledOperation:
     #: The exact schema field name written at the document's root, for a
     #: caller unwrapping the response by key.
     field_name: str
+
+    #: C58: what auto-selection dropped building this document, already
+    #: rebased onto the root field, for diagnostics to surface.
+    omissions: tuple[OmissionRecord, ...] = ()
+
+    #: How many omissions the selection made in total, including any past the
+    #: retention bound.
+    omissions_total: int = 0
 
 
 def resolve_operation(
@@ -366,6 +375,8 @@ def assemble_operation(
     return_type = get_named_type(field_def.type)
     child_selection_set: SelectionSetNode | None
     child_variables: tuple[GeneratedVariable, ...]
+    omissions: tuple[OmissionRecord, ...] = ()
+    omissions_total = 0
     if is_leaf_type(return_type):
         if fields is not AUTO:
             raise SelectionError.on_leaf_type(
@@ -389,6 +400,12 @@ def assemble_operation(
         )
         child_selection_set = built.selection_set
         child_variables = built.variables
+        # C56: the selection's own paths are relative to the root field's
+        # return type, so the document's root field is their prefix.
+        omissions = tuple(
+            record.rebased((resolved_field_name,)) for record in built.omissions
+        )
+        omissions_total = built.omissions_total
 
     root_allocator = VariableAllocator(
         reserved=[variable.name for variable in child_variables]
@@ -439,5 +456,9 @@ def assemble_operation(
         operation_name=resolved_field_name,
     )
     return AssembledOperation(
-        document=document, variables=variable_values, field_name=resolved_field_name
+        document=document,
+        variables=variable_values,
+        field_name=resolved_field_name,
+        omissions=omissions,
+        omissions_total=omissions_total,
     )

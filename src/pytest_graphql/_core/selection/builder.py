@@ -74,6 +74,11 @@ from graphql import (
     is_leaf_type,
 )
 
+from pytest_graphql._core.diagnostics import (
+    MAX_OMISSION_RECORDS,
+    OmissionReason,
+    OmissionRecord,
+)
 from pytest_graphql._core.errors import SelectionError, SelectionTooLargeError
 from pytest_graphql._core.selection.policy import (
     PAGE_SIZE_ARGUMENT,
@@ -143,6 +148,16 @@ class BuiltSelection:
     #: guards document size, so a caller composing this selection into a larger
     #: one adds this count to its own rather than rebuilding to find it (C56).
     field_count: int = 0
+
+    #: C58: what this selection dropped, and why, bounded by
+    #: ``MAX_OMISSION_RECORDS``. Paths are relative to this scope's root, so a
+    #: caller composing the selection into a larger document rebases them.
+    omissions: tuple[OmissionRecord, ...] = ()
+
+    #: How many omissions the walk made in total, including past the bound. A
+    #: skipped field is not counted by ``max_fields``, so this is the only
+    #: number that states the true size.
+    omissions_total: int = 0
 
 
 class SelectionBuilder:
@@ -219,6 +234,18 @@ class _Walk:
         self._emitted = 0
         self._root_name = ""
         self._uses_page_size = False
+        self._omissions: list[OmissionRecord] = []
+        self._omissions_total = 0
+        #: The reason a composite field records when the depth budget is what
+        #: removes it. The cycle policy's ``shallow`` spends that budget to
+        #: zero on purpose, and then the cycle policy is the rule that
+        #: removed the field, not the depth limit.
+        self._budget_reason: OmissionReason = "depth"
+        #: The leaf fields an interface selected itself, by the path of its
+        #: selection set, while its member fragments are walked. The response
+        #: carries such a field for every member, so a member that loses it
+        #: in its own fragment has not lost it from the document.
+        self._covered: dict[tuple[str, ...], frozenset[str]] = {}
 
     def run(self, type_: GraphQLCompositeType) -> BuiltSelection:
         self._root_name = type_.name
@@ -245,7 +272,67 @@ class _Walk:
             selection_set=SelectionSetNode(selections=tuple(selections)),
             variables=variables,
             field_count=self._emitted,
+            omissions=tuple(self._omissions),
+            omissions_total=self._omissions_total,
         )
+
+    def _omit(
+        self, parent_type_name: str, path: tuple[str, ...], reason: OmissionReason
+    ) -> None:
+        """Record one automatic omission (C58, SPEC 5.4 rule 3).
+
+        The record carries the parent type, the field path relative to this
+        scope, and the reason, and never an argument value. The bound is the
+        records' own, because a skipped field is not counted by
+        ``max_fields``: the first ``MAX_OMISSION_RECORDS`` in traversal order
+        are kept and the total is tracked, so what was cut is reported rather
+        than lost.
+
+        A field the enclosing interface already selects at the same position
+        is not an omission, whichever rule removed it from a member fragment,
+        so it is not recorded.
+        """
+        if path[-1] in self._covered.get(path[:-1], frozenset()):
+            return
+        self._omissions_total += 1
+        if len(self._omissions) < MAX_OMISSION_RECORDS:
+            self._omissions.append(
+                OmissionRecord(parent_type=parent_type_name, path=path, reason=reason)
+            )
+
+    def _cut(
+        self,
+        type_: GraphQLCompositeType,
+        path: tuple[str, ...],
+        reason: OmissionReason,
+        *,
+        keep: frozenset[str] = frozenset(),
+    ) -> None:
+        """Record every field of ``type_`` a reducing rule removed (C58).
+
+        A rule that removes a whole field records that field once. A rule
+        that keeps a type but reduces its selection, or removes a member
+        fragment that has no field of its own, removes the type's fields
+        instead, so each one is recorded. ``keep`` names the fields the rule
+        still emitted or already recorded. A field the policy hook or the
+        deprecation rule would have removed anyway is recorded under that
+        reason, in the order :meth:`_field_node` applies them.
+        """
+        if isinstance(type_, GraphQLUnionType):
+            return
+        for name, field_ in type_.fields.items():
+            if name in keep:
+                continue
+            field_path = (*path, name)
+            if not self._policy.should_include(type_.name, name, path, len(path)):
+                self._omit(type_.name, field_path, "should-include")
+            elif (
+                field_.deprecation_reason is not None
+                and not self._policy.include_deprecated
+            ):
+                self._omit(type_.name, field_path, "deprecated")
+            else:
+                self._omit(type_.name, field_path, reason)
 
     def _count(self) -> None:
         self._emitted += 1
@@ -325,6 +412,7 @@ class _Walk:
     ) -> list[SelectionNode]:
         """Rule 6: ``__typename``, own leaf fields, then one fragment per member."""
         selections: list[SelectionNode] = [typename_node()]
+        covered: set[str] = set()
         if isinstance(type_, GraphQLInterfaceType):
             for name, field_ in type_.fields.items():
                 if not is_leaf_type(get_named_type(field_.type)):
@@ -340,7 +428,34 @@ class _Walk:
                 )
                 if node is not None:
                     selections.append(node)
+                    covered.add(name)
 
+        self._covered[path] = frozenset(covered)
+        try:
+            selections.extend(
+                self._member_fragments(
+                    type_,
+                    remaining=remaining,
+                    path=path,
+                    ancestors=ancestors,
+                    connection_depth=connection_depth,
+                )
+            )
+        finally:
+            del self._covered[path]
+        return selections
+
+    def _member_fragments(
+        self,
+        type_: GraphQLInterfaceType | GraphQLUnionType,
+        *,
+        remaining: int,
+        path: tuple[str, ...],
+        ancestors: tuple[str, ...],
+        connection_depth: int,
+    ) -> list[SelectionNode]:
+        """One inline fragment per member, in the schema's order."""
+        selections: list[SelectionNode] = []
         for index, member in enumerate(self._schema.get_possible_types(type_)):
             inner = self._member_selections(
                 member,
@@ -384,6 +499,7 @@ class _Walk:
                 path=path,
                 ancestors=ancestors,
                 connection_depth=connection_depth,
+                fragment=True,
             )
         inner = self._expand(
             member,
@@ -407,6 +523,7 @@ class _Walk:
         condition.
         """
         if not self._policy.should_include(parent_type_name, name, path, len(path)):
+            self._omit(parent_type_name, (*path, name), "should-include")
             return None
         self._count()
         return FieldNode(
@@ -436,16 +553,8 @@ class _Walk:
         id_node = self._id_node(member, path)
         if id_node is not None:
             selections.append(id_node)
+        self._cut(member, path, "union-member-cap", keep=frozenset({"id"}))
         return selections
-
-    def _cycle_identity(
-        self, type_: GraphQLCompositeType, path: tuple[str, ...]
-    ) -> list[SelectionNode] | None:
-        """Rule 2's ``id_only``: ``id`` alone, or nothing if the type has none."""
-        id_node = self._id_node(type_, path)
-        if id_node is None:
-            return None
-        return [typename_node(), id_node]
 
     def _field_node(
         self,
@@ -459,18 +568,30 @@ class _Walk:
         connection_depth: int,
         depth_cost: int = 1,
     ) -> FieldNode | None:
-        """One field, or ``None`` when a rule removes it."""
+        """One field, or ``None`` when a rule removes it.
+
+        Every ``return None`` below is one of C58's reasons, and each records
+        why before it returns. The one exception is an expansion that came
+        back empty, because each field it lost has already recorded its own
+        reason. A silent skip here is the defect SPEC 5.4 rule 3 exists to
+        close: the field is gone from the document and nothing tells the
+        reader which rule removed it.
+        """
+        field_path = (*path, name)
         if not self._policy.should_include(parent_type_name, name, path, len(path)):
+            self._omit(parent_type_name, field_path, "should-include")
             return None
         if (
             field_.deprecation_reason is not None
             and not self._policy.include_deprecated
         ):
+            self._omit(parent_type_name, field_path, "deprecated")
             return None
 
         named = get_named_type(field_.type)
         if is_leaf_type(named):
             if missing_required_arguments(field_):
+                self._omit(parent_type_name, field_path, "required-argument")
                 return None
             self._count()
             return FieldNode(
@@ -483,17 +604,19 @@ class _Walk:
         # A named output type that is not a leaf is an object, an interface or
         # a union. There is no fourth case, so this narrows rather than checks.
         named = cast(GraphQLCompositeType, named)
-        child_path = (*path, name)
+        child_path = field_path
         is_connection = self._policy.relay_aware and is_connection_type(named)
         arguments: tuple[ArgumentNode, ...] = ()
         supplied: tuple[str, ...] = ()
 
         if is_connection:
             if connection_depth + 1 > self._policy.max_connection_depth:
+                self._omit(parent_type_name, child_path, "connection-depth")
                 return None
             if page_size_argument(field_) is None:
                 # C1: a connection with no page-size argument returns an
                 # unbounded number of rows, and no field cap can bound that.
+                self._omit(parent_type_name, child_path, "connection-page-size")
                 return None
             supplied = (PAGE_SIZE_ARGUMENT,)
             arguments = (
@@ -504,8 +627,10 @@ class _Walk:
             )
 
         if missing_required_arguments(field_, supplied):
+            self._omit(parent_type_name, child_path, "required-argument")
             return None
         if remaining - depth_cost < 0:
+            self._omit(parent_type_name, child_path, self._budget_reason)
             return None
 
         if named.name in ancestors:
@@ -515,6 +640,11 @@ class _Walk:
                 ancestors=ancestors,
                 connection_depth=connection_depth,
             )
+            if inner is None:
+                # The cycle policy is what removed it: "stop" refuses the
+                # expansion outright, and "shallow" can collapse to nothing.
+                self._omit(parent_type_name, child_path, "cycle")
+                return None
         else:
             inner = self._expand(
                 named,
@@ -544,22 +674,40 @@ class _Walk:
         path: tuple[str, ...],
         ancestors: tuple[str, ...],
         connection_depth: int,
+        fragment: bool = False,
     ) -> list[SelectionNode] | None:
-        """Rule 2: what a type that is already on the current path expands to."""
+        """Rule 2: what a type that is already on the current path expands to.
+
+        ``None`` removes the whole selection. For a field, the caller records
+        that one field. A member ``fragment`` has no field of its own, so the
+        fields it loses are recorded here, as are the fields ``id_only``
+        removes from a selection it keeps.
+        """
         policy = self._policy.cycle_policy
         if policy == "stop":
+            if fragment:
+                self._cut(type_, path, "cycle")
             return None
         if policy == "id_only":
-            return self._cycle_identity(type_, path)
+            id_node = self._id_node(type_, path)
+            if id_node is None and not fragment:
+                return None
+            self._cut(type_, path, "cycle", keep=frozenset({"id"}))
+            return None if id_node is None else [typename_node(), id_node]
         # "shallow": leaf fields only, which is the same walk with no budget
         # left for composites. ``id`` is a leaf, so it is already included.
-        inner = self._expand(
-            type_,
-            remaining=0,
-            path=path,
-            ancestors=(*ancestors, type_.name),
-            connection_depth=connection_depth,
-        )
+        # Every field it removes was removed by the cycle policy.
+        previous, self._budget_reason = self._budget_reason, "cycle"
+        try:
+            inner = self._expand(
+                type_,
+                remaining=0,
+                path=path,
+                ancestors=(*ancestors, type_.name),
+                connection_depth=connection_depth,
+            )
+        finally:
+            self._budget_reason = previous
         return inner if has_selectable_content(inner) else None
 
     def _expand_connection(
@@ -600,6 +748,7 @@ class _Walk:
         self, type_: GraphQLObjectType, path: tuple[str, ...]
     ) -> FieldNode | None:
         if not self._policy.should_include(type_.name, "pageInfo", path, len(path)):
+            self._omit(type_.name, (*path, "pageInfo"), "should-include")
             return None
         page_info_type = get_named_type(type_.fields["pageInfo"].type)
         if not isinstance(page_info_type, GraphQLObjectType):
@@ -632,6 +781,7 @@ class _Walk:
         connection_depth: int,
     ) -> FieldNode | None:
         if not self._policy.should_include(type_.name, "edges", path, len(path)):
+            self._omit(type_.name, (*path, "edges"), "should-include")
             return None
         edge_type = get_named_type(type_.fields["edges"].type)
         if not isinstance(edge_type, GraphQLObjectType):

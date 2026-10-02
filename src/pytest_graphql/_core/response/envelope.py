@@ -15,7 +15,12 @@ from typing import Any, Generic, Literal, TypeVar
 
 from graphql import DocumentNode, GraphQLSchema
 
-from pytest_graphql._core.diagnostics import DiagnosticSnapshot, RequestInfo
+from pytest_graphql._core.diagnostics import (
+    DiagnosticSnapshot,
+    RequestInfo,
+    require_safe_rendering,
+    sanitize_text,
+)
 from pytest_graphql._core.errors import GraphQLTestError
 from pytest_graphql._core.response.materialize import (
     Materializer,
@@ -82,11 +87,14 @@ class GraphQLResponse(Generic[T]):
 
     def __repr__(self) -> str:
         # Status, state and counts, plus the redacted request. Never a data
-        # value or an error message.
-        return (
+        # value or an error message. The fixed text around the snapshot can
+        # complete a secret, so the whole is checked.
+        return require_safe_rendering(
+            self.request,
             f"GraphQLResponse(status={self.http.status_code}, "
             f"data={self.data_state}, errors={len(self.errors)}, "
-            f"request={self.request!r})"
+            f"request={self.request!r})",
+            "repr()",
         )
 
     __str__ = __repr__
@@ -131,7 +139,12 @@ def build_response(
     return GraphQLResponse(
         data=data,
         data_state=state,
-        errors=tuple(GraphQLErrorInfo.from_mapping(item) for item in raw.errors),
+        errors=tuple(
+            GraphQLErrorInfo.from_mapping(
+                item, scrub=lambda text: sanitize_text(request, text)
+            )
+            for item in raw.errors
+        ),
         extensions=MappingProxyType(dict(raw.extensions or {})),
         http=HttpInfo(
             status_code=raw.status_code,

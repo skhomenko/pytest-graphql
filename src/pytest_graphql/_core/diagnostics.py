@@ -158,18 +158,18 @@ This is a validate-only backstop, never another substitution pass -- it
 edits nothing -- so it carries none of the "match spans a delimiter" risk a
 post-hoc scrub has.
 
-The raised exception's own state is fixed, compile-time text -- its
-descriptive message and its ``renderer`` label alike -- and is exactly as
-exposed to this risk as any other fixed rendering syntax: a qualifying
+The raised exception is itself a composed public rendering. Its message
+and its ``renderer`` label are fixed, compile-time text, and a qualifying
 secret can equal a substring of either one (DESIGN_DECISIONS.md section 7,
-"Value scrub for free-form text"). A field's fixed provenance does not make
-it safe; only checking it does, so ``_require_boundary_safe`` validates
-every string it passes to the exception constructor against the same
-qualifying set through one shared primitive (``_boundary_safe_field``), and
-passes an empty string in place of whichever field collides. A qualifying
-secret is never the empty string, so the empty fallback can never contain
-one -- this closes the property completely rather than trading one
-collision surface for another.
+"Value scrub for free-form text"). Python and this package also wrap the
+message in more fixed text: the exception's ``repr``, the ``repr`` of its
+``args`` and the traceback's last line. A field's fixed provenance does not
+make it safe, and checking the fields one at a time cannot see that
+wrapper. So the ``renderer`` label is replaced with an empty string when it
+collides, and every exception built from a request goes through one
+primitive (``_check_exception_text``), which checks each complete rendering
+of the exception and falls back, still checked, to a withheld notice and
+then to no message at all.
 
 The curl placeholder variable's mapping from header name to variable is
 deterministic and injective (module docstring, "as_curl()"), and truncating
@@ -182,20 +182,23 @@ prefix cannot be charged.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import re
 import shlex
 import unicodedata
 import urllib.parse
-from collections import defaultdict
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from collections import defaultdict, deque
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, fields, replace
 from fnmatch import fnmatchcase
+from secrets import token_bytes as _random_secret_token_bytes
 from secrets import token_hex as _random_secret_token_hex
 from types import MappingProxyType
-from typing import Any, cast
+from typing import Any, Literal, cast
 
-from pytest_graphql._core.errors import DiagnosticRenderError
+from pytest_graphql._core.errors import DiagnosticRenderError, GraphQLTestError
 from pytest_graphql._core.naming import to_snake
 from pytest_graphql._core.schema.info import OperationKind
 
@@ -226,6 +229,10 @@ DEFAULT_REDACT_VARIABLES: tuple[str, ...] = (
 DEFAULT_MIN_REDACTED_VALUE_LENGTH = 8
 DEFAULT_MAX_DIAGNOSTIC_BYTES = 4096
 DEFAULT_MAX_RECORDED_ERRORS = 20
+
+#: B3: the diagnostics recorder is a bounded deque, default 50 calls, set by
+#: ``ClientConfig.max_recorded_calls``. The plugin clears it per test.
+DEFAULT_MAX_RECORDED_CALLS = 50
 
 #: C2 total cap per snapshot, across every field.
 _TOTAL_DIAGNOSTIC_BYTES_CAP = 32768
@@ -609,37 +616,196 @@ def _require_boundary_safe(
     :class:`~pytest_graphql._core.errors.DiagnosticRenderError` instead of
     returning unsafe or malformed text.
 
-    Every string the raised exception carries is validated the same way, not
-    only its message: a qualifying secret can equal a substring of any fixed,
-    compile-time text the exception stores, including the ``renderer`` label
-    itself, exactly as it can equal a renderer's own wrapper syntax
-    (DESIGN_DECISIONS.md section 7, "Value scrub for free-form text"). Fixed
-    provenance does not make a field safe; only checking it against the
-    qualifying set does. This never returns such a field
-    unchecked; when one contains a qualifying secret, the exception carries
-    an empty string in its place instead. A qualifying secret is never the
-    empty string (:func:`_add_secret` never adds one), so the empty fallback
-    can never contain one, regardless of what collided.
+    The raised exception is checked too, as a complete rendering, by
+    :func:`_refusal`.
     """
     if not (qualifying_values and _marker_contains_secret(rendered, qualifying_values)):
         return rendered
-    message = DiagnosticRenderError.default_message(renderer)
-    raise DiagnosticRenderError(
-        _boundary_safe_field(renderer, qualifying_values),
-        _boundary_safe_field(message, qualifying_values),
+    raise _refusal(
+        renderer, lambda text: _marker_contains_secret(text, qualifying_values)
     )
 
 
-def _boundary_safe_field(text: str, qualifying_values: tuple[str, ...]) -> str:
-    """A string bound for a raised :class:`DiagnosticRenderError`'s public
-    state, replaced with ``""`` when it contains a qualifying secret.
+def _refusal(renderer: str, contains: Callable[[str], bool]) -> DiagnosticRenderError:
+    """The :class:`DiagnosticRenderError` a refused rendering raises.
 
-    Shared by every field :func:`_require_boundary_safe` passes to the
-    exception constructor, so a field is never classified safe by its origin
-    (module-fixed text, a caller-supplied label) instead of by checking it
-    (DESIGN_DECISIONS.md section 7, "Value scrub for free-form text").
+    The refusal is a public rendering in its own right, so it is checked
+    against the same qualifying set as the text it refused. The
+    ``renderer`` label is stored on the exception, so it is replaced with an
+    empty string when it collides. A qualifying secret is never the empty
+    string (:func:`_add_secret` never adds one). The message and every
+    complete rendering of the exception are checked by
+    :func:`_check_exception_text`.
     """
-    return "" if _marker_contains_secret(text, qualifying_values) else text
+    error = DiagnosticRenderError(
+        "" if contains(renderer) else renderer,
+        DiagnosticRenderError.default_message(renderer),
+    )
+    _check_exception_text(error, contains)
+    return error
+
+
+def _exception_renderings(
+    error_type: type[BaseException], args: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Every standard text an exception with ``args`` shows.
+
+    The ``repr`` every exception in this package renders, the ``repr`` of
+    its ``args``, and the last line of a Python traceback, which names the
+    class by its module path. Each one contains ``str()``.
+    """
+    message = args[0] if args else ""
+    head = f"{error_type.__module__}.{error_type.__qualname__}"
+    return (
+        f"{error_type.__name__}({message})",
+        repr(args),
+        f"{head}: {message}" if message else head,
+    )
+
+
+def _check_exception_text(
+    error: GraphQLTestError, contains: Callable[[str], bool]
+) -> None:
+    """Make every standard rendering of ``error`` free of a qualifying secret.
+
+    An exception cannot refuse to exist the way a ``repr`` can refuse to
+    render, so a message that fails is replaced, not raised over. It is
+    tried as given, then as :data:`WITHHELD_TEXT`, then as no message at
+    all. Each try is checked as the complete renderings
+    :func:`_exception_renderings` lists, not as a field, because those
+    renderings add text around the message that a secret can span. A
+    secret inside the class name alone, or its module path, still fails the
+    last try: a Python traceback prints that name, so no message can hide
+    it. The ``repr`` is then the class name alone, which shows nothing more.
+    """
+    message = str(error)
+    for args in ((message,), (WITHHELD_TEXT,), ()):
+        if not any(map(contains, _exception_renderings(type(error), args))):
+            break
+    error.args = args
+    if not args and contains(f"{type(error).__name__}()"):
+        error._shown_repr = type(error).__name__
+
+
+#: Keys the guard's digests. Drawn once per process and never stored with a
+#: guard, so a guard copied out of the process cannot be checked offline.
+_GUARD_KEY = _random_secret_token_bytes(16)
+
+#: What an exception shows in place of a message that would render a
+#: qualifying secret. Checked like any other text before it is used.
+WITHHELD_TEXT = "[withheld: this text would show a redacted value]"
+
+
+def _guard_digest(text: str) -> bytes:
+    return hashlib.blake2b(
+        text.encode("utf-8", "surrogatepass"), key=_GUARD_KEY, digest_size=16
+    ).digest()
+
+
+class _SecretGuard:
+    """A request's qualifying set, in a form that can check text but not show it.
+
+    A snapshot leaves the request that built it, and every representation
+    composed from it later -- the snapshot's own ``repr``, a recorded
+    call's, a response's, an exception message, the recorder dump -- adds
+    fixed text (a class name, a field name, a separator) around fields that
+    were checked one at a time. A qualifying secret can equal or span that
+    text. Checking the complete output needs the qualifying set at the
+    moment the output is built, and the snapshot must not carry the raw
+    set (C16: the set is "never returned by a public API"). So the guard
+    keeps only keyed digests of each value, and :meth:`contains` hashes
+    every window of the text of each stored length. The match is the same
+    case-folded percent-escape equivalence :func:`_marker_contains_secret`
+    uses. Windows are first filtered by a digest of their shortest-length
+    prefix, so most positions cost one digest.
+    """
+
+    __slots__ = ("_anchor_length", "_anchors", "_by_length")
+
+    def __init__(self, qualifying_values: Iterable[str] = ()) -> None:
+        canonical = {
+            _canonicalize_percent_escapes(value) for value in qualifying_values if value
+        }
+        self._anchor_length = min(map(len, canonical), default=0)
+        self._anchors = frozenset(
+            _guard_digest(value[: self._anchor_length]) for value in canonical
+        )
+        by_length: dict[int, set[bytes]] = defaultdict(set)
+        for value in canonical:
+            by_length[len(value)].add(_guard_digest(value))
+        self._by_length = tuple(
+            (length, frozenset(digests))
+            for length, digests in sorted(by_length.items())
+        )
+
+    def contains(self, text: str) -> bool:
+        """Whether ``text`` contains a qualifying secret."""
+        if not self._anchors:
+            return False
+        canon = _canonicalize_percent_escapes(text)
+        size = len(canon)
+        for start in range(size - self._anchor_length + 1):
+            if _guard_digest(canon[start : start + self._anchor_length]) not in (
+                self._anchors
+            ):
+                continue
+            for length, digests in self._by_length:
+                if start + length > size:
+                    break
+                if _guard_digest(canon[start : start + length]) in digests:
+                    return True
+        return False
+
+    def require(self, rendered: str, renderer: str) -> str:
+        """``rendered``, or :class:`DiagnosticRenderError` when it holds a secret.
+
+        The same validate-only backstop as :func:`_require_boundary_safe`,
+        for a renderer that holds a snapshot rather than the live request.
+        """
+        if not self.contains(rendered):
+            return rendered
+        raise _refusal(renderer, self.contains)
+
+    def check_exception(self, error: GraphQLTestError) -> None:
+        """Make every standard rendering of ``error`` free of this request's
+        secrets (:func:`_check_exception_text`).
+
+        Called by every exception built from a snapshot, once its message is
+        set, before it is raised.
+        """
+        _check_exception_text(error, self.contains)
+
+    def _state(self) -> tuple[object, ...]:
+        return (self._anchor_length, self._anchors, self._by_length)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, _SecretGuard):
+            return NotImplemented
+        return self._state() == other._state()
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def __repr__(self) -> str:
+        return "_SecretGuard()"
+
+
+def require_safe_rendering(
+    snapshot: DiagnosticSnapshot, text: str, renderer: str
+) -> str:
+    """Validate a complete rendering that embeds ``snapshot``, failing closed.
+
+    For a renderer outside this module, such as ``GraphQLResponse.__repr__``,
+    that holds the snapshot but not the request it came from.
+    """
+    return snapshot._guard.require(text, renderer)
+
+
+def _checked_dataclass_repr(obj: Any, guard: _SecretGuard) -> str:
+    """A dataclass's default ``repr`` text, validated whole by ``guard``."""
+    shown = ", ".join(
+        f"{each.name}={getattr(obj, each.name)!r}" for each in fields(obj) if each.repr
+    )
+    return guard.require(f"{type(obj).__qualname__}({shown})", "repr()")
 
 
 def scrub_text(text: str, secrets: Mapping[str, str]) -> str:
@@ -710,7 +876,9 @@ def scrub_text(text: str, secrets: Mapping[str, str]) -> str:
     return "".join(pieces)
 
 
-def _scrub_and_escape(text: str, secrets: Mapping[str, str]) -> str:
+def _scrub_and_escape(
+    text: str, secrets: Mapping[str, str], *, repr_safe: bool = True
+) -> str:
     """Scrub ``text``, escape it, then scrub the escaped result again.
 
     The documented stage order runs the first scrub before escaping, so an
@@ -724,8 +892,35 @@ def _scrub_and_escape(text: str, secrets: Mapping[str, str]) -> str:
     one -- so it only ever catches a spelling escaping just produced, and it
     never needs another escape pass of its own: this is every field's
     complete construction, not only a marker's.
+
+    A value is also checked under ``repr`` (:func:`_repr_safe`), because a
+    value can carry server text, for one a message a test copied from an
+    earlier response into a variable. A key or a header name is built with
+    ``repr_safe=False``: it comes from the schema or the caller, never from
+    a server, and replacing two keys with the one shared marker here would
+    merge them. The finished snapshot checks every key and header name under
+    ``repr`` in one pass instead (:meth:`RequestInfo._build_snapshot`), where
+    a suffix keeps two replaced keys apart.
     """
-    return scrub_text(escape_control_characters(scrub_text(text, secrets)), secrets)
+    safe = scrub_text(escape_control_characters(scrub_text(text, secrets)), secrets)
+    if not repr_safe:
+        return safe
+    return _repr_safe(safe, tuple(secrets))
+
+
+def _repr_safe(text: str, qualifying_values: tuple[str, ...]) -> str:
+    """``text``, or the hardened marker when ``repr(text)`` holds a secret.
+
+    A field leaves this module as a plain string, and the first thing most
+    readers do with it is ``repr()``: a dataclass ``repr``, a tuple of
+    errors, pytest's assertion message. ``repr()`` doubles every backslash
+    and escapes a quote after the last scrub ran, so a field with no secret
+    in it can still render one, as the module docstring's "A further
+    transform" describes for ``RequestInfo.__repr__``. Checking the field's
+    own ``repr`` where the field is built makes every container ``repr`` of
+    it safe leaf by leaf, wherever that ``repr`` later runs.
+    """
+    return cast("str", _boundary_safe_structure(text, qualifying_values, repr))
 
 
 # --------------------------------------------------------------------------
@@ -783,11 +978,11 @@ def _walk_variables(
     return value, using only the ``on_leaf``/``on_match`` side effects.
     """
     if isinstance(value, Mapping):
-        result = {}
+        result: dict[str, Any] = {}
         for key, sub in value.items():
             segment = to_snake(str(key))
             new_path = (*path, segment)
-            safe_key = _scrub_and_escape(str(key), secrets)
+            safe_key = _scrub_and_escape(str(key), secrets, repr_safe=False)
             if _path_matches_any(patterns, new_path):
                 result[safe_key] = on_match(sub, new_path)
             else:
@@ -860,12 +1055,22 @@ def _collect_leaf_secrets(value: Any, label: str, sources: dict[str, set[str]]) 
         _add_secret(value, label, sources)
 
 
+#: An RFC 9110 ``token``, the grammar of an auth scheme such as ``Bearer``.
+_AUTH_SCHEME_PATTERN = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+
+
 def _add_secret(value: object, label: str, sources: dict[str, set[str]]) -> None:
     """Add ``value`` and every derived form C16 names to the secret set.
 
     The scheme-suffix form (the text after a header value's first space,
     for a value such as ``Bearer <token>``) is derived from the verbatim
-    value; the percent-encoded form is then derived from *each* form
+    value when the text before that space is an RFC 9110 token, which is
+    what an auth scheme is. Any value can carry one, a variable named
+    ``authorization`` included, so the source does not decide it. The JSON
+    text of a list or object never starts with a token, so it gets no
+    suffix: one would be its own tail, such as ``"b"]``, and replacing that
+    would cut the closing quote and bracket out of an excerpt. The
+    percent-encoded form is then derived from *each* form
     already collected, verbatim and scheme-suffix alike, so a caller who
     copies the percent-encoded spelling of either is still caught (section
     7, "Derived forms": "The percent-encoded form of each value is added").
@@ -874,8 +1079,8 @@ def _add_secret(value: object, label: str, sources: dict[str, set[str]]) -> None
     if not text:
         return
     forms = {text}
-    _, _, scheme_rest = text.partition(" ")
-    if scheme_rest:
+    scheme, _, scheme_rest = text.partition(" ")
+    if scheme_rest and _AUTH_SCHEME_PATTERN.fullmatch(scheme):
         forms.add(scheme_rest)
     for form in list(forms):
         quoted = urllib.parse.quote(form, safe="")
@@ -883,6 +1088,27 @@ def _add_secret(value: object, label: str, sources: dict[str, set[str]]) -> None
             forms.add(quoted)
     for form in forms:
         sources[form].add(label)
+
+
+def basic_credentials(
+    username: str, password: str, *, source: str, header: str
+) -> list[tuple[str, str]]:
+    """A userinfo pair as the C16 secret set needs it, built as it is sent.
+
+    Basic authentication puts neither half on the wire as written: it sends
+    the base64 of the UTF-8 ``username:password`` pair, which no other form
+    in the set spells. The two halves, the pair and the header value go in
+    together, so a reflection of any of them is scrubbed. The target URL's
+    userinfo and a proxy's both go through this one function.
+    """
+    pair = f"{username}:{password}"
+    token = base64.b64encode(pair.encode("utf-8")).decode("ascii")
+    return [
+        (source, username),
+        (source, password),
+        (source, pair),
+        (header, f"Basic {token}"),
+    ]
 
 
 def _parse_cookie_values(header_value: str) -> list[str]:
@@ -898,6 +1124,24 @@ def _parse_cookie_values(header_value: str) -> list[str]:
         if sep:
             values.append(value)
     return values
+
+
+def cookie_credentials(
+    *, sent: Iterable[str] = (), received: Iterable[str] = ()
+) -> list[tuple[str, str]]:
+    """Every cookie value on the wire, as the C16 secret set needs it (C17).
+
+    A transport with a cookie jar sends and receives cookies outside the
+    request's headers, so no header rule sees them, yet a server can echo
+    one into a body the transport quotes. ``sent`` is each ``Cookie`` line
+    as it goes on the wire, and ``received`` each ``Set-Cookie`` line, whose
+    attributes after the first ``;`` carry no value of the cookie's own.
+    """
+    pairs = [("cookie", value) for line in sent for value in _parse_cookie_values(line)]
+    for line in received:
+        first, _, _ = line.partition(";")
+        pairs.extend(("set-cookie", value) for value in _parse_cookie_values(first))
+    return pairs
 
 
 #: Matches a ``scheme://netloc`` prefix directly on raw URL text, without any
@@ -1064,6 +1308,61 @@ _JSON_KEY_SEP_COST = 2
 _JSON_QUOTE_COST = 2
 
 
+#: C58: an automatic omission's reason, one of the eight the design document
+#: names. A record never carries an argument value, only the position and the
+#: reason, so no request data can reach a report through this channel.
+OmissionReason = Literal[
+    "required-argument",
+    "deprecated",
+    "connection-page-size",
+    "connection-depth",
+    "depth",
+    "cycle",
+    "should-include",
+    "union-member-cap",
+]
+
+#: C58: a skipped field is not counted by ``max_fields``, so the records carry
+#: their own bound. The first 50 in traversal order are retained, the total is
+#: tracked, and the number omitted is reported visibly.
+MAX_OMISSION_RECORDS = 50
+
+
+@dataclass(frozen=True)
+class OmissionRecord:
+    """One field auto-selection dropped, and why (C58, SPEC 5.4 rule 3).
+
+    ``path`` is relative to the ``AUTO`` scope the record was produced in,
+    because ``AUTO`` is a scope and every position a policy describes is
+    measured from that scope's root. Diagnostics prefixes it when it composes
+    a nested or cached selection into a larger document, so a reader sees the
+    field's position in the finished document rather than in the fragment it
+    came from.
+    """
+
+    parent_type: str
+    path: tuple[str, ...]
+    reason: OmissionReason
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "path", tuple(self.path))
+
+    def rebased(self, prefix: Sequence[str]) -> OmissionRecord:
+        """This record with ``prefix`` in front of its path (C56)."""
+        if not prefix:
+            return self
+        return OmissionRecord(
+            parent_type=self.parent_type,
+            path=(*prefix, *self.path),
+            reason=self.reason,
+        )
+
+    @property
+    def field_path(self) -> str:
+        """The dotted rendering a report shows."""
+        return ".".join(self.path)
+
+
 @dataclass(frozen=True)
 class _HeaderEntry:
     """One header in ``DiagnosticSnapshot.curl_headers``, in request order (C48, C54).
@@ -1106,10 +1405,34 @@ class DiagnosticSnapshot:
     idempotent: bool
     curl_headers: tuple[_HeaderEntry, ...] = ()
     truncated: tuple[str, ...] = ()
+    #: C58. Bounded by ``MAX_OMISSION_RECORDS`` rather than by
+    #: ``max_diagnostic_bytes``, because a skipped field is not counted by
+    #: ``max_fields`` either and the records need a bound of their own.
+    omissions: tuple[OmissionRecord, ...] = ()
+    #: How many omissions the selection produced in total, including the ones
+    #: past the bound. ``omissions_dropped`` is what a report states visibly.
+    omissions_total: int = 0
+    #: The request's qualifying set as digests only, so a representation
+    #: built from this snapshot later can be checked whole (C2, C16).
+    _guard: _SecretGuard = field(
+        default_factory=_SecretGuard, repr=False, compare=False, kw_only=True
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "headers", MappingProxyType(dict(self.headers)))
         object.__setattr__(self, "variables", MappingProxyType(dict(self.variables)))
+        object.__setattr__(self, "omissions", tuple(self.omissions))
+
+    def __repr__(self) -> str:
+        # Every field was checked under ``repr`` where it was built, but the
+        # class name, the field names and the separators were not, and a
+        # qualifying secret can equal or span them.
+        return _checked_dataclass_repr(self, self._guard)
+
+    @property
+    def omissions_dropped(self) -> int:
+        """How many omission records the bound cut. Never silent (C2, C58)."""
+        return max(self.omissions_total - len(self.omissions), 0)
 
 
 class _FieldBudget:
@@ -1416,7 +1739,7 @@ def _apply_size_limits(
                 break
             budget.charge(overhead)
             available = budget.remaining()
-            escaped_name = _scrub_and_escape(name, secrets)
+            escaped_name = _scrub_and_escape(name, secrets, repr_safe=False)
             display_name = take_text(
                 budget, escaped_name, cap=available - _JSON_QUOTE_COST
             )
@@ -1501,9 +1824,41 @@ class RequestInfo:
     min_redacted_value_length: int = DEFAULT_MIN_REDACTED_VALUE_LENGTH
     max_diagnostic_bytes: int = DEFAULT_MAX_DIAGNOSTIC_BYTES
     max_recorded_errors: int = DEFAULT_MAX_RECORDED_ERRORS
+    #: C58. The automatic omissions the selection behind this request made,
+    #: already rebased onto the finished document by whoever composed it.
+    #: ``redacted()`` scrubs, escapes and bounds them onto the snapshot.
+    omissions: tuple[OmissionRecord, ...] = ()
+    #: C58. How many omissions that selection made in total, including the
+    #: ones already cut before the records reached this request. It is carried
+    #: rather than recounted, because ``omissions`` is bounded and a count
+    #: taken from a bounded list can only ever report that nothing was cut.
+    #: A caller that supplies records and no total gets the count of the
+    #: records it supplied, which is the one value that cannot under-report.
+    omissions_total: int = 0
+    #: C16. Credentials the transport sends on this request's behalf outside
+    #: ``headers``, as ``(source label, value)`` pairs: a proxy's userinfo,
+    #: the ``Proxy-Authorization`` value built from it, any other proxy
+    #: header, and every cookie value its jar sends or a response sets
+    #: (C17). No header rule can see them, yet a proxy or server can reflect
+    #: them into a body the transport then quotes.
+    #: Each one joins the secret set unconditionally and none is ever
+    #: rendered. A transport sets this, never the caller.
+    transport_credentials: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "variables", MappingProxyType(dict(self.variables)))
+        object.__setattr__(
+            self,
+            "transport_credentials",
+            tuple(
+                (str(label), str(value)) for label, value in self.transport_credentials
+            ),
+        )
+        omissions = tuple(self.omissions)
+        object.__setattr__(
+            self, "omissions_total", max(self.omissions_total, len(omissions))
+        )
+        object.__setattr__(self, "omissions", omissions[:MAX_OMISSION_RECORDS])
         headers = {str(k): str(v) for k, v in self.headers.items()}
         object.__setattr__(self, "headers", MappingProxyType(headers))
         object.__setattr__(
@@ -1564,8 +1919,20 @@ class RequestInfo:
         if password:
             _add_secret(password, "url", sources)
             _add_secret(urllib.parse.unquote(password), "url", sources)
+        if username or password:
+            # An HTTP client sends userinfo as ``Authorization: Basic``, built
+            # from the decoded pair, and no spelling of the URL contains it.
+            for label, value in basic_credentials(
+                urllib.parse.unquote(username or ""),
+                urllib.parse.unquote(password or ""),
+                source="url",
+                header="authorization",
+            ):
+                _add_secret(value, label, sources)
         for _, value in urllib.parse.parse_qsl(query, keep_blank_values=True):
             _add_secret(value, "url", sources)
+        for label, value in self.transport_credentials:
+            _add_secret(value, label, sources)
 
         min_length = self.min_redacted_value_length
         qualifying_values = tuple(
@@ -1656,10 +2023,26 @@ class RequestInfo:
             method=_scrub_and_escape(self.method, secrets),
             url=_scrub_and_escape(_safe_url(self.url), secrets),
             idempotent=self.idempotent,
+            omissions=tuple(
+                OmissionRecord(
+                    parent_type=_scrub_and_escape(record.parent_type, secrets),
+                    path=tuple(
+                        _scrub_and_escape(segment, secrets) for segment in record.path
+                    ),
+                    reason=record.reason,
+                )
+                for record in self.omissions
+            ),
+            omissions_total=self.omissions_total,
         )
         snapshot = _apply_size_limits(
             snapshot, self.max_diagnostic_bytes, header_sources, secrets, marker_for
         )
+        # Values are already checked under ``repr``; this adds the keys and
+        # header names, with a suffix that keeps two replaced keys apart.
+        qualifying_values = tuple(secrets)
+        snapshot = _boundary_safe_structure(snapshot, qualifying_values, repr)
+        snapshot = replace(snapshot, _guard=_SecretGuard(qualifying_values))
         return snapshot, secrets
 
     def redacted(self) -> DiagnosticSnapshot:
@@ -1800,3 +2183,170 @@ def _curl_redacted_header_argument(
     """
     literal = quote(f"{name}: ")
     return f'-H {literal}"${{{variable}}}"'
+
+
+# -- free-form text, made safe to record (C16 "Coverage") ---------------------
+#
+# One primitive, used everywhere free-form text crosses the boundary: a
+# transport exception's body excerpt or error message (M5a), and the recorder
+# dump, log records and report sections below (M5c). A second implementation
+# of the same three stages is how one of those paths ends up missing one.
+
+
+def sanitize_text(request: RequestInfo, text: str) -> str:
+    """Scrub, escape, scrub again: the stage order C16 documents.
+
+    The second scrub is not redundant. Escaping can synthesize a different
+    qualifying secret's spelling out of text that was already safe before it
+    ran, exactly as the module docstring describes for a secret's source
+    label.
+    """
+    if not request.redact_values:
+        return escape_control_characters(text)
+    secrets, _ = request._redaction_context()
+    return _scrub_and_escape(text, secrets)
+
+
+def truncate_text(text: str, limit: int) -> tuple[str, int]:
+    """Truncate ``text`` to at most ``limit`` UTF-8 bytes, on a code-point boundary.
+
+    Returns the truncated text and the number of bytes cut. A binary search
+    over code-point counts, the same technique :func:`_truncate_json_string`
+    uses for a JSON string body, adapted for a plain string with no
+    surrounding quotes.
+    """
+    limit = max(limit, 0)
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return text, 0
+    low, high = 0, len(text)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if len(text[:mid].encode("utf-8")) <= limit:
+            low = mid
+        else:
+            high = mid - 1
+    truncated = text[:low]
+    return truncated, len(encoded) - len(truncated.encode("utf-8"))
+
+
+def safe_excerpt(request: RequestInfo, text: str) -> str:
+    """A scrubbed, escaped, length-capped excerpt of free-form text (C3, C16).
+
+    Truncation runs last (C16 "Stage order"), after the scrub and the escape,
+    so a cut can never leave part of a secret behind. The cut is stated
+    rather than silent (C2 "Truncation is visible, never silent").
+    """
+    safe = sanitize_text(request, text)
+    truncated, cut = truncate_text(safe, request.max_diagnostic_bytes)
+    excerpt = f"{truncated}... (truncated, {cut} byte(s) cut)" if cut else truncated
+    if not request.redact_values:
+        return excerpt
+    # Cutting can drop the one quote character that decided how ``repr``
+    # quotes the text, which changes how every other quote is escaped, so
+    # the finished excerpt is checked again rather than inherited as safe.
+    secrets, _ = request._redaction_context()
+    return _repr_safe(excerpt, tuple(secrets))
+
+
+# -- the recorder (B3) --------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RecordedCall:
+    """One call a client made, in the only form that may be recorded (C2).
+
+    Every field here is already redacted, scrubbed, escaped and bounded.
+    ``request`` is a ``DiagnosticSnapshot``, never a live ``RequestInfo``,
+    and ``failure`` is free-form text that went through :func:`safe_excerpt`.
+    Nothing on this object carries a live header value, a variable value or
+    a response value, so a dump of it cannot leak one.
+    """
+
+    request: DiagnosticSnapshot
+    outcome: Literal["ok", "errors", "failed"]
+    status_code: int | None = None
+    duration_ms: float = 0.0
+    error_count: int = 0
+    failure: str = ""
+
+    def __repr__(self) -> str:
+        return _checked_dataclass_repr(self, self.request._guard)
+
+
+class DiagnosticsRecorder:
+    """A bounded record of the calls one client made (B3).
+
+    A ``deque`` with ``maxlen``, so the oldest call is evicted rather than
+    the recorder growing without limit outside pytest, which is the defect
+    B3 exists to close. The plugin clears it per test.
+    """
+
+    __slots__ = ("_calls",)
+
+    def __init__(self, max_calls: int = DEFAULT_MAX_RECORDED_CALLS) -> None:
+        self._calls: deque[RecordedCall] = deque(maxlen=max(max_calls, 0))
+
+    def record(self, call: RecordedCall) -> None:
+        self._calls.append(call)
+
+    def clear(self) -> None:
+        self._calls.clear()
+
+    @property
+    def calls(self) -> tuple[RecordedCall, ...]:
+        return tuple(self._calls)
+
+    @property
+    def max_calls(self) -> int:
+        return self._calls.maxlen or 0
+
+    def __len__(self) -> int:
+        return len(self._calls)
+
+    def dump(self) -> str:
+        """The text form a report section or a log record carries.
+
+        Built only from the recorded snapshots, which already passed every
+        redaction stage, so this method performs no scrub of its own and has
+        no live value to scrub. The finished text is still validated whole,
+        and :class:`~pytest_graphql._core.errors.DiagnosticRenderError` is
+        raised when a qualifying secret spans the fixed text between fields.
+        """
+        if not self._calls:
+            return "no GraphQL calls recorded"
+        lines: list[str] = []
+        for index, call in enumerate(self._calls, start=1):
+            snapshot = call.request
+            status = "-" if call.status_code is None else str(call.status_code)
+            lines.append(
+                f"{index}. {snapshot.kind} {snapshot.operation or '<anonymous>'} "
+                f"-> {call.outcome} (status {status}, "
+                f"{call.duration_ms:.1f} ms, {call.error_count} error(s))"
+            )
+            lines.append(f"   {snapshot.method} {snapshot.url}")
+            if call.failure:
+                lines.append(f"   failure: {call.failure}")
+            if snapshot.truncated:
+                lines.append(f"   truncated: {', '.join(snapshot.truncated)}")
+            if snapshot.omissions:
+                shown = ", ".join(
+                    f"{record.parent_type}.{record.field_path} ({record.reason})"
+                    for record in snapshot.omissions
+                )
+                lines.append(f"   auto-selection omitted: {shown}")
+            if snapshot.omissions_dropped:
+                lines.append(
+                    f"   ... and {snapshot.omissions_dropped} further omission(s) "
+                    f"not shown, of {snapshot.omissions_total} total"
+                )
+        text = "\n".join(lines)
+        # The lines join fields of different calls with fixed text, so each
+        # call's secrets are checked against the whole dump, not its lines.
+        guards: list[_SecretGuard] = []
+        for call in self._calls:
+            if call.request._guard not in guards:
+                guards.append(call.request._guard)
+        for guard in guards:
+            guard.require(text, "dump()")
+        return text

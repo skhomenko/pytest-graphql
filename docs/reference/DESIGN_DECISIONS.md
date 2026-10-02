@@ -236,6 +236,17 @@ Importable from their own modules, and carrying a compatibility promise only at 
 and `middleware`. `seed` is configuration and lives on `ClientConfig` only, never on the
 client constructor.
 
+`build_client()` is the standalone spelling of the same split, so the same rule decides
+where each of its keywords goes. `url`, `transport`, `cleanup`, `config`, `schema`,
+`schema_source`, `parsers`, `middleware` and `auth` are its own; every other keyword is a
+`ClientConfig` field and is applied to the configuration the whole build uses, overriding
+the same field on a supplied `config`. An unknown name raises `ArgumentError` rather than
+being ignored, so a misspelled option cannot leave a client on a default the caller
+believed they had replaced. Data options land on the configuration and not on the client,
+which is what makes C4's default schema identity apply to them: `headers` given to the
+factory is what introspection sends. A header that must sit above `Auth` is set on the
+returned client with `with_headers()`, which is the layer C4 gives that precedence to.
+
 ### Typing promise
 
 The package is fully typed, ships `py.typed`, and passes `mypy --strict`. The dynamic
@@ -335,16 +346,45 @@ Any field with at least one required argument, meaning non-null with no default,
 no value was supplied, is skipped, whatever its return type. Skipping only composite fields
 would emit a scalar field without its required argument and produce an invalid document.
 
-Every automatic omission is recorded and surfaced in diagnostics, not only this one. Seven
+Every automatic omission is recorded and surfaced in diagnostics, not only this one. Eight
 reasons drop a field: a required argument with no supplied value, a deprecated field, a
 connection with no page-size argument, the connection-depth limit, the depth limit, the
-cycle policy, and `should_include`. Selection normalization returns a structured record for
-each, carrying the parent type, the field path relative to its scope, and the reason, and
-never an argument value. Diagnostics prefixes those relative paths when it composes a nested
+cycle policy, `should_include`, and the `max_union_members` cap. Selection normalization
+returns a structured record for each, carrying the parent type, the field path relative to
+its scope, and the reason, and never an argument value.
+
+- A rule that removes a whole field records that one field.
+- A rule that keeps a type but reduces its selection records each field it removed. This
+  covers a member past the `max_union_members` cap, which keeps `__typename` and `id`, and
+  the cycle policy's `id_only`, which keeps `id`.
+- A rule that removes an interface or union member's fragment records each field of that
+  member, because a fragment has no field of its own. A fragment adds no path component, so
+  the parent type is what tells two members' records apart.
+- A field removed by a reducing rule that `should_include` or the deprecation rule would
+  have removed anyway is recorded under that reason instead.
+- The cycle policy's `shallow` spends the depth budget to zero, so a composite field it
+  removes is recorded as `cycle`, not as `depth`.
+- A member field that the interface already selects at the same position in the same
+  automatic selection is not an omission, whichever rule removed it from the member's
+  fragment, because the response carries it for every member. The records describe one
+  automatic scope, so a field that an explicit selection around a spliced `AUTO` selects is
+  still recorded when that scope left it out.
+- A field that no rule selects in the first place is not an omission. Examples are a
+  connection field outside the rule 4 template, and an interface's composite field, which
+  rule 6 selects through each member's fragment instead, so a member that loses it records
+  it there.
+- An interface that no object type implements has no member fragment, so its composite
+  fields are neither selected nor recorded. No value of that interface can exist, so the
+  server never returns one, and no data is left out.
+
+Diagnostics prefixes those relative paths when it composes a nested
 or cached automatic selection, so a reader sees the field's position in the finished
 document. The records are bounded on their own, because a skipped field is not counted by
 `max_fields`: the first 50 in traversal order are retained, the total is tracked, and the
-number omitted is reported visibly.
+number omitted is reported visibly. The total is carried across every stage that passes the
+records on, from selection through assembly and the request to the snapshot a report reads.
+A stage that recounts it from the retained list instead can only ever report that nothing
+was dropped, which is the one thing this rule exists to prevent.
 
 `__typename` is emitted on every object selection, not only on interfaces and unions, and it
 does not count against `max_fields`. Explicit `fields=` adds nothing, so `Node.__typename__`
@@ -678,6 +718,19 @@ otherwise becomes a transport error naming it.
 
 - `ClientConfig.timeout` accepts a float applied to all four phases, or a
   `Timeout(connect, read, write, pool)` value. The default is 30 seconds per phase.
+- Every timeout has one domain: a real number greater than zero and at most 1e6 seconds
+  (about 11.5 days), or `math.inf`, which means "no limit". A `Timeout` phase may also be
+  `None`. A larger finite value cannot become a socket deadline on every platform, so it
+  is refused rather than read as "no limit". The tightest platform is Windows, where
+  CPython refuses a socket timeout above `INT_MAX` milliseconds (about 24.8 days). NaN, zero, any negative value (negative
+  infinity included) and a value above the maximum raise `ValueError`. A value that is
+  not a number, `None` given as the per-call option included, raises `TypeError`. Only
+  an omitted per-call option means "use the configured timeout". The domain holds for
+  the value after conversion to `float` as well as before it, so a positive value that
+  rounds to zero, such as `Fraction(1, 10**400)`, raises `ValueError`. Every accepted
+  value, `Timeout` phases included, is used as that `float`. The check runs before any
+  I/O, on `ClientConfig.timeout`, the per-call `timeout` option, and the `timeout` given
+  to `HttpxTransport`'s constructor and to its `send()`.
 - `Transport.send()`'s mandatory per-call `timeout: float` (SPEC.md 5.6) is a ceiling on
   each of the transport's own four configured phases, not a replacement of them: the
   request actually sent uses `min(configured_phase, call_timeout)` for connect, read,
@@ -687,9 +740,17 @@ otherwise becomes a transport error naming it.
   to it. This is the one combination rule that needs no information beyond what
   `HttpxTransport.send()` already has on hand: it never has to guess whether the caller's
   scalar is a deliberate override or a passed-through default, because it does not matter
-  to a ceiling either way. It does not by itself state how a future `GraphQLClient.execute()`
-  turns a per-call `timeout` option or `ClientConfig.timeout` into the scalar it passes to
-  `send()`; that remains M5c's call-convention design.
+  to a ceiling either way.
+- The client's own side of that rule: `ClientConfig.call_timeout(override)` produces the
+  scalar every call hands to `send()`. A per-call `timeout` option is used exactly as
+  given, which is how one call tightens a configured phase. With no per-call option, a
+  scalar `ClientConfig.timeout` is passed through, and a phase-specific one produces the
+  largest configured phase, which is the smallest scalar that clamps no phase the project
+  set. A phase left at `None` is a deliberate "no limit", so any `None` phase produces no
+  bound at all rather than a value the ceiling would impose. The client therefore never
+  shortens a configured phase on its own: only an explicit per-call `timeout` does that.
+  At the transport, an unbounded phase reaches `httpx` as `None`, its spelling of "no
+  limit". An infinite number never reaches it, because a socket rejects one.
 - Retries are connect-failure only. `max_attempts` defaults to 3, so at most two retries.
   Backoff is `min(0.1 * 2 ** (attempt - 1), 2.0)` seconds with full jitter. A request that
   reached the server is never retried.
@@ -698,9 +759,16 @@ otherwise becomes a transport error naming it.
 - `trust_env` defaults to `False`, so ambient `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`,
   `SSLKEYLOGFILE` and netrc are ignored unless a project opts in through
   `ClientConfig.trust_env` or `--gql-trust-env`. This keeps runs reproducible and stops
-  requests from silently routing through an ambient proxy.
-- `ClientConfig.proxy` and `ClientConfig.verify` follow `httpx` semantics. `verify` accepts
-  `True`, a CA bundle path, or an `ssl.SSLContext`. `verify=False` emits a warning.
+  requests from silently routing through an ambient proxy. With `trust_env=True` the
+  transport resolves the proxy variables itself, with `httpx`'s own reader and matching
+  rule, `NO_PROXY` included, and routes inside the shared pool, so every client derived
+  from it uses them. `httpx.Client` cannot do this here, because it ignores the environment
+  whenever it is handed a transport.
+- `ClientConfig.proxy` and `ClientConfig.verify` follow `httpx` semantics. An explicit
+  `proxy` takes every request and outranks the environment. A proxy URL the transport
+  cannot use is refused with a message that names the problem and never quotes the URL,
+  because the URL is where a proxy password lives. `verify` accepts `True`, a CA bundle
+  path, or an `ssl.SSLContext`. `verify=False` emits a warning.
 - Redirects are not followed.
 
 ### Derivation
@@ -744,6 +812,50 @@ values to do their work. Nothing else should.
   exception, a pytest report section, the diagnostics recorder, a log record, or
   `as_curl()`. `__repr__` and `__str__` on `RequestInfo`, `GraphQLResponse` and every
   exception render the snapshot form.
+- `ClientConfig` is plain data that no redaction stage runs over, so its `repr()` leaves
+  out every field that carries a credential: `headers`, `schema_headers`, `cookies` and
+  `proxy`.
+- A `GraphQLErrorInfo` keeps the server's `message`, `path` and `extensions` as sent, so
+  a test can match them, and its `repr()` shows none of that text raw. `message` and
+  `extensions` are left out. The `repr()` showing `path` is built once, when the response
+  is built: each string segment goes through the scrub of the request that produced the
+  error, and then the finished text is scrubbed again as a whole, because a server can
+  echo a credential into a path as easily as into a message, and the tuple's own
+  quoting can complete one across two segments.
+- `repr()` is a further transform: it doubles every backslash and escapes quotes after the
+  last scrub ran, so text with no secret in it can render one. Every value field the
+  library builds, in a snapshot, an excerpt, a scrubbed error object or a recorded call,
+  is therefore also checked under `repr()` where it is built, and is replaced with the
+  hardened marker when its `repr()` would contain a qualifying secret. Keys and header
+  names are output too, so the finished snapshot checks each of them under `repr()` in one
+  pass, and a numeric suffix keeps two replaced keys apart instead of merging them. An
+  exception's `repr()` shows its message as it is, without escaping it again.
+- A field checked on its own cannot see the text a representation adds around it: a class
+  name, a field name, a separator, a key joined to its value, or the fixed text between two
+  recorded calls. A qualifying secret can equal or span that text. Every representation the
+  library composes from a snapshot is therefore checked whole before it is returned: the
+  `repr()` and `str()` of `DiagnosticSnapshot`, `RecordedCall` and `GraphQLResponse`, and the
+  recorder dump, as well as `RequestInfo.__repr__` and `as_curl()`. A snapshot does not keep
+  the qualifying set. It keeps keyed digests of each value, under a key drawn once per process
+  and never stored with them, which can check text for a value but cannot show one. When the
+  check finds a value, the renderer raises `DiagnosticRenderError`. The recorder dump checks
+  each call's values against the whole dump, because a value can span from one call's lines
+  into the next.
+- An exception cannot refuse to exist, so every exception built from a request checks its
+  message instead. This includes the `DiagnosticRenderError` a refusal raises, which is a
+  public rendering too. The check covers each complete text the exception shows: its
+  `repr()`, the `repr()` of its `args`, and the last line of a Python traceback, which adds
+  the module path and `: `. A failing message is replaced with a fixed withheld notice, and
+  when the notice fails too, the exception has no message. When even the empty `repr()`
+  would show a value, the `repr()` is the class name alone. A value contained in the class
+  name or its module path cannot be hidden, because Python's own traceback prints them. An
+  execution error whose message would include the response shows
+  the withheld notice in place of a response `repr()` that refused to render, so the caller
+  still receives the error it expects.
+- Python's own representation of a container taken out of a snapshot field, such as
+  `repr(snapshot.variables)` or `repr(snapshot.omissions)`, is checked through its content but
+  not through its wrapper text: `mappingproxy(`, brackets and separators are Python's, not a
+  representation the library builds.
 
 ### Name-based and path-based redaction
 
@@ -769,11 +881,28 @@ redaction cannot cover it. The scrub closes that gap.
 - Secret set. For each request and response pair the redaction stage collects the values it
   already knows are sensitive: every header value matched by `redact_headers`, the value at
   every variable path and response path matched by `redact_variables`, every cookie value,
-  and the userinfo and query-string values stripped from the URL. The set exists only inside
-  the stage. It is never stored on a snapshot, never logged, and never returned by a public
-  API.
-- Derived forms. For a header value carrying a scheme, such as `Bearer <token>`, the part
-  after the first space is added as well. The percent-encoded form of each value is added.
+  and the userinfo and query-string values stripped from the URL. It also holds every
+  credential the transport sends outside the request's headers: a proxy's username, its
+  password, the pair they form, the `Proxy-Authorization` value built from them, and the
+  value of every header the proxy was given, each value of a repeated header on its own,
+  as it goes on the wire. They also include every cookie value the transport's own jar
+  sends in its `Cookie` line, and every value a response sets in a `Set-Cookie` line, under
+  either `cookie_scope`. Those are built below the request's own redaction boundary, yet a
+  proxy or server can quote them back into a body the transport excerpts or into a GraphQL
+  response, so they join the set whatever `redact_headers` says, and the transport hands
+  them back with the response so the client renders it with the same set. Target URL
+  userinfo is sent as an `Authorization: Basic` value built from the decoded pair, which
+  no spelling of the URL contains, so the request derives the pair and that header value
+  from its own URL and adds them beside the two halves, for every renderer alike. The set exists
+  only inside the stage. It is never stored on a snapshot, never logged, and never returned
+  by a public API.
+- Derived forms. For a value carrying a scheme, such as `Bearer <token>`, the part after
+  the first space is added as well. A value carries a scheme when the text before its
+  first space is an RFC 9110 `token`, which is the grammar of an auth scheme. That holds
+  for a header or a variable alike, since a variable such as `authorization` can hold one.
+  The JSON text of a list or object never starts with a token, so it gets no such form:
+  its tail after the first space would be a fragment such as `"b"]`, and replacing that
+  would cut quotes and brackets out of the text around it. The percent-encoded form of each value is added.
   Non-string values are converted with the same JSON text form used for rendering before
   being added. URL userinfo is added in both its original, still-percent-encoded spelling
   and its decoded form. A percent-escape's hex digits are case-insensitive, so matching
@@ -850,14 +979,16 @@ redaction cannot cover it. The scrub closes that gap.
   This is a validate-only backstop, never another substitution pass: finding a qualifying
   secret in the complete text at this point means no per-leaf substitution could have closed
   it, because the only remaining sources are syntax the format cannot omit or a document that
-  cannot be rewritten without corrupting it. When that happens, `RequestInfo.__repr__` and
-  `as_curl()` raise `DiagnosticRenderError` instead of returning unsafe or malformed text. The
-  exception's own state is fixed, compile-time text, its descriptive message and its `renderer`
-  label alike, and is exactly as exposed to this risk as any other fixed rendering syntax: a
-  qualifying secret can equal a substring of either one. Every such field is therefore validated
-  against the same qualifying set before the exception is raised, and an empty string is used in
-  place of whichever field collides; a qualifying value is never the empty string, so the empty
-  fallback can never repeat one, regardless of what triggered the failure. `DiagnosticRenderError`
+  cannot be rewritten without corrupting it. When that happens, `RequestInfo.__repr__`,
+  `as_curl()` and every other representation named under "Boundary" raise
+  `DiagnosticRenderError` instead of returning unsafe or malformed text. The
+  exception's own text is fixed, compile-time text and is exactly as exposed to this risk as any
+  other fixed rendering syntax. Its `renderer` label is stored on the exception, so the label is
+  replaced with an empty string when it contains a qualifying value; a qualifying value is never
+  the empty string, so the empty label can never repeat one. Its message is not checked field by
+  field: it follows the rule for every exception built from a request ("Boundary" above), which
+  checks each complete text the exception shows and falls back to the withheld notice, then to
+  no message. `DiagnosticRenderError`
   is part of the top-level exception hierarchy ("Top-level surface" above) and is exported from
   `pytest_graphql`. The ordinary case, where no qualifying value collides with fixed or generated
   syntax, never reaches this path at all.
@@ -939,7 +1070,12 @@ instead of an environment-variable indirection, which is still safe because that
 no real secret. The error list truncates at `max_recorded_errors`, default 20. Truncation
 is visible, never silent, and states how many bytes or entries were cut. The diagnostics
 recorder is a bounded `deque`, default 50 calls, set by `ClientConfig.max_recorded_calls`,
-and the plugin clears it per test.
+and the plugin clears it per test. A client records exactly one call for every request it
+hands to the transport, and records it before any exception leaves the call. That includes
+a call that fails after the transport returned, through a response that contradicts the
+schema or a raising `after_response`, which is recorded as failed with its status code. A
+call refused before it is sent records nothing. Recording never replaces the exception the
+caller receives: a failure whose message cannot be rendered is recorded by its type name.
 
 `as_curl()` quotes every literal component with `shlex.quote`. A redacted header is not a
 literal component. It renders as two adjacent quoted segments that form one shell word and
@@ -1021,7 +1157,10 @@ client.
   client only.
 
 Header precedence, lowest to highest: `ClientConfig.headers`, the `gql_headers` fixture,
-`Auth.apply`, `with_headers()` in clone order, then per-call `headers=`. Names compare
+`Auth.apply`, `with_headers()` in clone order, then per-call `headers=`. Userinfo in the
+target URL sits below all of them: it supplies `Authorization: Basic` only when no layer set
+`Authorization`, and an explicit header is what goes on the wire. The transport decides
+this itself, because `httpx` would otherwise replace the explicit header. Names compare
 case-insensitively after stripping, and a later source replaces an earlier one for the same
 name instead of adding a second line. A genuinely repeated header uses an explicit list
 value.
@@ -1076,10 +1215,17 @@ protocol, so the call site keeps its argument types and no `Any` crosses the tra
 boundary. A wrong argument, a missing argument, or a result with no `close()` is a strict
 type-check error.
 
+The transport constructor follows the same rule for the pools it builds. Each pool, the
+direct one and one per ambient proxy, is adopted by the constructor's own cleanup list
+before it is built. A failure before the transport's `httpx` client exists closes every pool
+already built, exactly once. A pool the constructor was given, as a derived transport is, is
+not its own and is never closed by its failure.
+
 ### 9.3 One sweep, one close authority
 
-There are two releasing call sites, the client and the factory unwinding path. They share
-one sweep implementation, so a later correction cannot reach one and miss the other.
+There are four releasing call sites: the client, the factory unwinding path, the transport
+constructor unwinding path, and the proxy router closing its pools. They share one sweep and
+one report implementation, so a later correction cannot reach one and miss another.
 
 - Every item is attempted exactly once, in reverse order, whatever the earlier ones did. A
   failing transport teardown cannot strand the root pool.
@@ -1088,7 +1234,8 @@ one sweep implementation, so a later correction cannot reach one and miss the ot
   rather than chained behind a transport error, so an `except Exception` around the call
   cannot swallow it.
 - Among ordinary exceptions the caller's preferred exception wins. The client prefers the
-  last failure in sweep order, which is the earliest-acquired resource. The factory prefers
+  last failure in sweep order, which is the earliest-acquired resource, and so does the proxy
+  router, whose direct pool is built first. The factory and the transport constructor prefer
   the construction failure, because that is why the caller's call failed.
 - `close()` is idempotent, and so is leaving the context manager twice. The closed flag is
   set before the sweep, so a second close adds no calls even when the first raised.
@@ -1111,8 +1258,14 @@ context of its own.
 **Sealed.** Everything that must survive is placed where the coming `raise` cannot reach it,
 because a `raise` inside an active `except` block replaces `__context__` on the exception it
 raises whatever that link already held. When the slot that survives the raise has been
-refused, what is left is the exception the raise itself writes into that link, so the report
-hangs under that one instead of above it.
+refused, or holds an explicit cause whose chain refuses the report, what is left is the
+exception the raise itself writes into that link, so the report hangs under that one instead
+of above it. Before the seal is written, the reported exception is taken out of every link
+into it that a walk of the graph sees, not only the printed one. A failure raised `from`
+another while the factory handles its construction failure carries a context link into that
+failure under its own cause, and such a link holds only the exception that becomes the head,
+so cutting it drops nothing. An explicit cause of the reported exception is never spliced into
+the chain under it, because the reported exception keeps that cause and reaches it already.
 
 **Hook-independent.** Reporting reads and writes only the storage the interpreter itself
 uses for these names, taken from `BaseException`, and stores its record in the real instance
@@ -1144,11 +1297,23 @@ the `raise`'s link is refused too: a refusal does not stop the interpreter makin
 A refusal counts as reported only once it is somewhere the caller reaches, never on the
 strength of having been offered a place. The chain is built to be printed, so no placement in
 it writes a context link under a populated cause, where the link would never appear in a
-traceback. Those links are still links the caller reaches, so a refusal that every rendering
+traceback. Those links are still links the caller reaches, so a value that every rendering
 placement passed over is put in one of them rather than nowhere. That last-resort placement
-runs only for reporting's own refusals, only while the record is not carrying the report, and
-only into an empty slot the value does not reach back to, so it drops nothing and closes no
-cycle.
+runs only while the record is not carrying the report, and only into an empty slot the value
+does not reach back to, so it closes no cycle.
+
+It runs for the caller's own failures before it runs for reporting's own refusals, which is
+the rank above. A link given to a refusal is one a failure cannot then have, so offering them
+in the other order would drop a failure to keep a refusal. A value that reaches every empty
+slot is held there by some link in its own chain. That link is cut only where what it holds
+stays reachable from the head anyway, which is what the non-destructive property allows, and
+the cut makes the value a leaf rather than a second head. The link is looked for through the
+whole of the value's own chain and not only on the value itself, because a failure raised
+while handling another failure leads back through the middle one, and cutting at the value
+alone would leave that path in place. One link is cut at a time and the placement is tried
+again after each, so no cut is made that the placement did not need. A chain that refused a
+write earlier in the same pass is not offered the caller's failures at all, because a chain
+that just refused is not a channel right now and the next pass offers them again.
 
 The chain ranks under the record rather than beside it. While the record carries the report
 the chain is best effort, and it is never given a cycle the caller's own graph did not arrive
@@ -1160,7 +1325,11 @@ with.
 failures are put when the record cannot hold them. It carries every distinct failure the
 report covers, raised one first, including what the raised exception itself already carried,
 because the coming `raise` can take that out of the chain. Refused writes are reported too,
-so a type that interferes with reporting cannot also hide that it did.
+so a type that interferes with reporting cannot also hide that it did. A failure that an
+earlier report raised keeps everything that report covered: a transport constructor that
+fails and closes what it built reports inside the factory's sweep, and a proxy router that
+fails to close its pools reports inside the client's, so the outer report takes in the inner
+record rather than replacing it.
 
 A single-link exception graph cannot always express every failure at once, and
 `BaseExceptionGroup` is unavailable at the supported floor. What can be lost is bounded and
@@ -1171,7 +1340,7 @@ named.
 1. Every link that could carry the failure is refused, with the record gone.
 2. The caller's own graph leaves the chain no room, which happens when the record is gone and
    two or more cleanup failures carry an explicit cause that leads back to the reported
-   exception. Each such run loses exactly one fewer failure than it carries.
+   exception. What is lost is always one of those failures and never any other.
 
 **Two permitted refusal-omission shapes, and no others.**
 
@@ -1183,19 +1352,30 @@ named.
 A run that keeps every caller failure keeps the refusal too. There is no run in which
 reporting loses only its own write failure.
 
-Both loss sets are asserted by identity and by set equality, never by count. The bound comes
-from three exhaustive products over reported-exception state, handler state, record presence,
-cleanup-failure shape and refused-write ordinal, the widest running to five cleanup failures.
-It is a measured bound and not a proof for a sequence of any length, and nothing is claimed
-beyond five.
+The caller-failure loss set of the second shape is asserted by membership and by count, and
+the membership is the part that carries the rule. What is lost is a subset of the cleanup
+failures whose explicit cause leads back to the reported exception. No free failure, no
+failure that leads back through a context link, no failure carrying a chain of its own, and
+nothing the reported exception itself arrived with may be lost. The count is at most one
+fewer than that subset holds, and it is fewer when the reported exception or an active
+handler brings a link the chain can use. Which member of that subset is lost is not asserted:
+its members are alike in structure, and the order the cleanup list happens to hold them in
+gives that identity no separate meaning. The first shape and both refusal-omission sets are
+asserted by identity and by set equality.
+
+The bound comes from three exhaustive products over reported-exception state, handler state,
+record presence, cleanup-failure shape and refused-write ordinal, the widest running to five
+cleanup failures. It is a measured bound and not a proof for a sequence of any length, and
+nothing is claimed beyond five.
 
 ### 9.6 Termination and cost
 
-Reporting is bounded in passes and in write attempts. Against a surface that refuses every
-write, reporting ends after **56 attempts outside an active exception handler** and **59
-inside one**, with an ordinary refusal and with an interrupt alike. Inside a handler the
-extra attempts are the crowning and anchoring writes. A change that moves either number has
-changed behavior.
+Reporting is bounded in passes and in write attempts. It writes the record at most four
+times. Against a surface that refuses every write, with one cleanup failure, reporting ends
+after **56 attempts outside an active exception handler** and **59 inside one**, with an
+ordinary refusal and with an interrupt alike. Inside a handler the extra attempts are the
+crowning and anchoring writes. Each further cleanup failure adds write attempts and no pass.
+A change that moves either number has changed behavior.
 
 Three channel cases bound what the report can promise, measured inside an active handler and
 outside one.
@@ -1235,6 +1415,26 @@ These are stated rather than claimed away.
   keeps it. The second is the two boundaries inside each owned-wrapper constructor between
   the underlying constructor returning and the store into the wrapper. Windows inside a
   third-party constructor sit below this and are not reachable from this code.
+- **Unwinding interrupts.** An interrupt on the unwinding path leaves open every item the
+  sweep has not yet attempted. At a releasing call site, the boundaries from the decision to
+  release up to the call into the sweep strand every item. Inside the sweep, the boundaries
+  between one item's attempt and the next strand the items not yet attempted. This is the
+  one case where the rule in 9.3 that every item is attempted does not hold. No handler can
+  close it, because a handler that catches an interrupt there has an entry of its own. An
+  interrupt inside one item's attempt, before its `close()` runs, is that item's close
+  failure: it is reported, and every later item is still attempted. The client marks itself
+  closed before it sweeps, so a second `close()` does not retry. The pytest path removes the
+  releasing call-site and between-item windows for the factory's list, as it removes the
+  return boundary: the session fixture sweeps the list it supplied again at teardown, and
+  every wrapper on that list closes at most once. A list that a transport constructor builds
+  for its own pools has no second sweep, so those windows stay open there.
+- **Once-only close interrupts.** Every close that guards a resource runs at most once: the
+  owned wrapper, the transport, and the wrapper that closes a shared pool for its owner. Each
+  marks itself closed before it releases. An interrupt from that mark up to the call that
+  releases leaves that one resource open, and nothing retries it: not a second `close()`, and
+  not the fixture's second sweep, which skips a wrapper already marked closed. The pytest path
+  does not remove this window. Marking after the release would instead let an interrupt
+  between the two close the resource twice, which section 9.1 rules out.
 - **Final-pass omissions.** The refusals of the final unanswered pass are a stated omission
   rather than a claim this design meets.
 

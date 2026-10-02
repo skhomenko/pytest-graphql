@@ -12,10 +12,12 @@ it, exactly once, when it closes itself.
 Every exception this module raises carries ``request.redacted()``, never the
 live ``request``, and every piece of response-controlled or exception-derived
 text that reaches one -- a body excerpt, a structured GraphQL error, an
-underlying ``httpx`` exception's own message -- is scrubbed and escaped with
-the two primitives the Diagnostics foundation milestone exposed for exactly
-this (C59): ``RequestInfo.scrub`` and ``escape_control_characters``. The
-scrub runs twice around the escape pass, mirroring ``diagnostics.py``'s own
+underlying ``httpx`` exception's own message -- goes through the shared
+primitives ``diagnostics.py`` owns: ``sanitize_text`` and ``safe_excerpt``.
+They live there rather than here because M5c's recorder dump, log records and
+report sections need the same three stages, and a second implementation of
+them is how one of those paths ends up missing one. The scrub runs twice
+around the escape pass, mirroring ``diagnostics.py``'s own
 ``_scrub_and_escape``, because escaping can itself synthesize a different
 qualifying secret's spelling from a raw control character that was not that
 secret before escaping expanded it (module docstring of ``diagnostics.py``,
@@ -25,23 +27,31 @@ secret before escaping expanded it (module docstring of ``diagnostics.py``,
 from __future__ import annotations
 
 import codecs
+import dataclasses
 import json
+import math
+import numbers
 import random
+import reprlib
 import ssl
 import sys
 import time
 import warnings
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 import certifi
 import httpx
 from httpx._config import create_ssl_context as _httpx_create_ssl_context
+from httpx._utils import URLPattern, get_environment_proxies
 
 from pytest_graphql._core.diagnostics import (
     RequestInfo,
-    escape_control_characters,
+    basic_credentials,
+    cookie_credentials,
+    safe_excerpt,
+    sanitize_text,
 )
 from pytest_graphql._core.errors import (
     GraphQLConnectionError,
@@ -50,6 +60,7 @@ from pytest_graphql._core.errors import (
     GraphQLTimeoutError,
     GraphQLTransportError,
 )
+from pytest_graphql._core.lifecycle import Closable, _close_all, _Owned, _report
 from pytest_graphql._core.transport.base import DerivableTransportBase, RawResponse
 
 #: SPEC 5.6, C3: the fixed request Accept header, honored unless the caller's
@@ -65,8 +76,23 @@ _LEGACY_JSON_MEDIA_TYPE = "application/json"
 
 #: C13 defaults.
 DEFAULT_TIMEOUT_SECONDS = 30.0
+
+#: The largest finite timeout, about 11.5 days. A larger finite value cannot
+#: become a socket deadline on every platform, so it is refused instead.
+#: CPython on Windows has no ``poll()`` and refuses a socket timeout above
+#: ``INT_MAX`` milliseconds (about 2147483.6 seconds) with ``OverflowError``,
+#: and 64-bit macOS refuses one near 1e12 seconds. ``math.inf`` is the way
+#: to ask for no limit.
+MAX_TIMEOUT_SECONDS = 1e6
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+
+#: C4/C17. Cookie isolation is a property of this transport, not of the
+#: client: an ``httpx.Client`` persists cookies by design, so the scope has
+#: to be applied where the jar lives. ``"none"``, the default, clears the
+#: jar after every response, so no ``Set-Cookie`` survives a call.
+#: ``"client"`` keeps it for that one logical client.
+CookieScope = Literal["none", "client"]
 
 #: C13: "Backoff is min(0.1 * 2 ** (attempt - 1), 2.0) seconds with full jitter."
 _BACKOFF_BASE_SECONDS = 0.1
@@ -98,6 +124,167 @@ class _NonClosingPoolWrapper(httpx.BaseTransport):
             self._pool.close()
 
 
+class _ProxyRouter(httpx.BaseTransport):
+    """One pool that sends each request through the proxy its URL selects.
+
+    ``httpx.Client`` resolves ambient proxies only when it builds its own
+    transport, and this module always supplies one, because the pool has to
+    be shared across derived clients (C19). So ``trust_env=True`` resolves
+    the environment here instead, with ``httpx``'s own reader and matching
+    rule: the most specific pattern wins, a ``NO_PROXY`` pattern maps to the
+    direct pool, and an unmatched URL goes direct. Living inside the shared
+    pool, the routing reaches every client derived from it.
+    """
+
+    def __init__(
+        self,
+        direct: httpx.BaseTransport,
+        mounts: Mapping[URLPattern, httpx.BaseTransport | None],
+    ) -> None:
+        self._direct = direct
+        self._mounts = dict(sorted(mounts.items()))
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        for pattern, pool in self._mounts.items():
+            if pattern.matches(request.url):
+                return (pool or self._direct).handle_request(request)
+        return self._direct.handle_request(request)
+
+    def close(self) -> None:
+        """Close every pool once, through the one sweep (9.3).
+
+        A pool that fails to close does not leave the others open. Among
+        ordinary failures the direct pool's wins, as it was built first.
+        """
+        pools = [self._direct, *(pool for pool in self._mounts.values() if pool)]
+        errors = _close_all(pools)
+        if errors:
+            _report(errors, errors[-1])
+
+
+#: The proxy schemes ``httpx.Proxy`` accepts.
+_PROXY_SCHEMES = "http, https, socks5 or socks5h"
+
+
+def _parse_proxy(value: httpx.Proxy | str, *, source: str) -> httpx.Proxy:
+    """``value`` as an ``httpx.Proxy``, refusing it without echoing it.
+
+    ``httpx.Proxy`` puts the whole URL, userinfo included, into the message
+    it raises for an unknown scheme. A proxy URL is where a proxy password
+    lives, so the refusal here names the problem and never the value.
+    """
+    if isinstance(value, httpx.Proxy):
+        return value
+    refusal: str | None = None
+    try:
+        return httpx.Proxy(value)
+    except httpx.InvalidURL:
+        refusal = f"the {source} URL is not a valid URL."
+    except ValueError:
+        refusal = f"the {source} URL must use {_PROXY_SCHEMES}."
+    raise ValueError(refusal)
+
+
+def _proxy_credentials(proxy: httpx.Proxy) -> tuple[tuple[str, str], ...]:
+    """Every credential ``proxy`` makes the pool send, for the C16 secret set.
+
+    The userinfo is sent as a ``Proxy-Authorization: Basic`` value that
+    ``httpcore`` builds below every redaction boundary, so the value is
+    rebuilt here the same way, and the username, the password and the pair
+    they encode are added beside it. Any header the proxy was given is sent
+    to the proxy alone, so each one counts as a credential as well. A
+    repeated header goes on the wire as one line per value, so each value is
+    added on its own: ``items()`` would join them into a text no proxy ever
+    receives or reflects.
+    """
+    found: list[tuple[str, str]] = []
+    if proxy.auth is not None:
+        username, password = proxy.auth
+        found += basic_credentials(
+            username, password, source="proxy", header="proxy-authorization"
+        )
+    found += [(name.lower(), value) for name, value in proxy.headers.multi_items()]
+    return tuple(found)
+
+
+def _request_auth(request: httpx.Request) -> httpx.Auth:
+    """The authentication step for one send, decided here rather than by httpx.
+
+    C4 places URL userinfo below every header source: it supplies Basic
+    authentication only when no layer set ``Authorization``. Left to itself,
+    ``httpx.Client.send`` turns userinfo into a Basic header after this
+    project's header merge and replaces whatever header the caller chose,
+    so every send passes an explicit ``auth`` and httpx's own URL step never
+    runs. The base ``httpx.Auth`` sends the request unchanged.
+    """
+    if "authorization" in request.headers:
+        return httpx.Auth()
+    username, password = request.url.username, request.url.password
+    if username or password:
+        return httpx.BasicAuth(username, password)
+    return httpx.Auth()
+
+
+def _build_pool(
+    cleanup: list[Closable],
+    *,
+    verify: bool | str | ssl.SSLContext,
+    trust_env: bool,
+    http2: bool,
+    proxy: httpx.Proxy | str | None,
+) -> tuple[httpx.BaseTransport, tuple[tuple[str, str], ...]]:
+    """The root pool and the proxy credentials it sends (C13, C16).
+
+    An explicit ``proxy`` takes every request, as ``httpx`` gives it
+    precedence over the environment. With none, ``trust_env=True`` routes
+    by the ambient ``HTTP_PROXY``, ``HTTPS_PROXY``, ``ALL_PROXY`` and
+    ``NO_PROXY`` through :class:`_ProxyRouter`, and ``trust_env=False``
+    reads none of them. Every proxy URL is parsed before any pool exists,
+    so a refused one leaves nothing half built. Every pool is adopted by
+    ``cleanup`` before it is built (9.2), so when a later pool or step fails
+    the caller closes exactly the pools that exist.
+    """
+    resolved_verify = _resolve_ssl_context(verify, trust_env=trust_env)
+
+    def new_pool(selected: httpx.Proxy | None) -> httpx.HTTPTransport:
+        return httpx.HTTPTransport(
+            verify=resolved_verify,
+            trust_env=trust_env,
+            http2=http2,
+            proxy=selected,
+            retries=0,
+        )
+
+    def pool_for(selected: httpx.Proxy | None) -> httpx.HTTPTransport:
+        return _Owned(cleanup, new_pool, selected).value
+
+    if proxy is not None:
+        selected = _parse_proxy(proxy, source="proxy")
+        return pool_for(selected), _proxy_credentials(selected)
+    if not trust_env:
+        return pool_for(None), ()
+    ambient = {
+        URLPattern(pattern): (
+            None if url is None else _parse_proxy(url, source="environment proxy")
+        )
+        for pattern, url in get_environment_proxies().items()
+    }
+    if not ambient:
+        return pool_for(None), ()
+    credentials = tuple(
+        credential
+        for selected in ambient.values()
+        if selected is not None
+        for credential in _proxy_credentials(selected)
+    )
+    direct = pool_for(None)
+    mounts = {
+        pattern: None if selected is None else pool_for(selected)
+        for pattern, selected in ambient.items()
+    }
+    return _ProxyRouter(direct, mounts), credentials
+
+
 def _media_type(content_type: str) -> str:
     """The media type alone, lowercased, stripped of any ``; charset=...`` params."""
     return content_type.split(";", 1)[0].strip().lower()
@@ -111,48 +298,6 @@ def _declared_charset(content_type: str) -> str | None:
     return None
 
 
-def _sanitize_text(request: RequestInfo, text: str) -> str:
-    """Scrub, escape, scrub again: the stage order C16 documents (module docstring)."""
-    once = request.scrub(text)
-    escaped = escape_control_characters(once)
-    return request.scrub(escaped)
-
-
-def _truncate_text(text: str, limit: int) -> tuple[str, int]:
-    """Truncate ``text`` to at most ``limit`` UTF-8 bytes, on a code-point boundary.
-
-    Returns the truncated text and the number of bytes cut. A binary search
-    over code-point counts, the same technique ``diagnostics.py`` uses for a
-    JSON string body, adapted for a plain string with no surrounding quotes.
-    """
-    limit = max(limit, 0)
-    encoded = text.encode("utf-8")
-    if len(encoded) <= limit:
-        return text, 0
-    low, high = 0, len(text)
-    while low < high:
-        mid = (low + high + 1) // 2
-        if len(text[:mid].encode("utf-8")) <= limit:
-            low = mid
-        else:
-            high = mid - 1
-    truncated = text[:low]
-    return truncated, len(encoded) - len(truncated.encode("utf-8"))
-
-
-def _safe_excerpt(request: RequestInfo, text: str) -> str:
-    """A scrubbed, escaped, length-capped body excerpt for an exception (C3).
-
-    Truncation runs last (C16 "Stage order"), after the scrub and the
-    escape, so a cut can never leave part of a secret behind.
-    """
-    safe = _sanitize_text(request, text)
-    truncated, cut = _truncate_text(safe, request.max_diagnostic_bytes)
-    if cut:
-        return f"{truncated}... (truncated, {cut} byte(s) cut)"
-    return truncated
-
-
 def _sanitize_json_value(request: RequestInfo, value: Any) -> Any:
     """Recursively scrub and escape every string in a parsed JSON value.
 
@@ -162,10 +307,10 @@ def _sanitize_json_value(request: RequestInfo, value: Any) -> Any:
     (DESIGN_DECISIONS.md section 7) like any other.
     """
     if isinstance(value, str):
-        return _sanitize_text(request, value)
+        return sanitize_text(request, value)
     if isinstance(value, Mapping):
         return {
-            (_sanitize_text(request, key) if isinstance(key, str) else key): (
+            (sanitize_text(request, key) if isinstance(key, str) else key): (
                 _sanitize_json_value(request, sub)
             )
             for key, sub in value.items()
@@ -382,6 +527,67 @@ def _resolve_ssl_context(
     return _local_default_ssl_context(cafile=verify)
 
 
+def checked_seconds(value: object, *, source: str) -> float:
+    """``value`` as a timeout in seconds, or a refusal naming ``source``.
+
+    A timeout is a real number greater than zero and at most
+    :data:`MAX_TIMEOUT_SECONDS`, or ``math.inf``, which means "no limit".
+    Everything else is refused here, before any I/O: NaN reaches the socket
+    layer as a raw ``ValueError``, zero makes the socket non-blocking, an
+    unchecked negative infinity would read as "no limit" and remove every
+    configured bound, and a larger finite value overflows the socket
+    deadline. The range is compared on ``value`` itself, before ``float()``,
+    because an ``int`` beyond float range overflows that conversion too. It
+    is compared again on the converted ``float``, which is the value every
+    caller uses: a positive ``Fraction`` below float range rounds to zero.
+    ``value`` is converted exactly once, and that stored ``float`` is both
+    the one compared and the one returned, so a ``Real`` whose conversion
+    changes between calls cannot pass with one result and return another.
+    The refusal shows ``value`` through ``reprlib``, so a huge ``int``
+    cannot fill the message.
+    """
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        raise TypeError(
+            f"{source} must be a number of seconds, got {type(value).__name__}."
+        )
+    # ``numbers.Real`` declares no comparison for the type checker. ``int``,
+    # ``float`` and ``Fraction`` all compare with a ``float`` exactly.
+    real = cast("float", value)
+    seconds = float(real) if _in_timeout_domain(real) else math.nan
+    if not _in_timeout_domain(seconds):
+        raise ValueError(
+            f"{source} must be greater than zero and at most "
+            f"{MAX_TIMEOUT_SECONDS:g} seconds, or math.inf for no limit; "
+            f"got {reprlib.repr(value)}."
+        )
+    return seconds
+
+
+def _in_timeout_domain(real: float) -> bool:
+    return real > 0 and (real == math.inf or real <= MAX_TIMEOUT_SECONDS)
+
+
+def checked_timeout(
+    value: float | httpx.Timeout, *, source: str
+) -> float | httpx.Timeout:
+    """``value`` with every phase checked by :func:`checked_seconds`.
+
+    A phase-specific ``Timeout`` keeps ``None`` as its own spelling of "no
+    limit"; every other phase is held to the same domain as a scalar. The
+    result is rebuilt from the checked ``float`` phases, because ``httpx``
+    stores a phase as given and the socket refuses a ``Fraction``.
+    """
+    if not isinstance(value, httpx.Timeout):
+        return checked_seconds(value, source=source)
+    phases = {
+        name: None
+        if (phase := getattr(value, name)) is None
+        else checked_seconds(phase, source=f"{source} {name} phase")
+        for name in ("connect", "read", "write", "pool")
+    }
+    return httpx.Timeout(**phases)
+
+
 def _ceiling_timeout(configured: httpx.Timeout, call_timeout: float) -> httpx.Timeout:
     """Clamp each of ``configured``'s four phases to at most ``call_timeout``
     (DESIGN_DECISIONS.md, "Operational limits").
@@ -396,10 +602,19 @@ def _ceiling_timeout(configured: httpx.Timeout, call_timeout: float) -> httpx.Ti
     whenever it is not looser than the caller's budget, and a phase with no
     configured limit (``None``) is bounded by the ceiling instead of staying
     unbounded.
+
+    An unbounded result leaves as ``None``, which is how ``httpx`` spells
+    "no limit". An infinite ceiling, the client's spelling of the same
+    thing, would otherwise reach ``socket.settimeout()``, which rejects it
+    with ``OverflowError``. So ``None`` under an infinite ceiling stays
+    ``None``, and an infinite configured phase becomes ``None`` too. Both
+    inputs were already held to :func:`checked_seconds`' domain, so the only
+    infinity that can arrive here is the positive one.
     """
 
-    def _clamped(phase: float | None) -> float:
-        return call_timeout if phase is None else min(phase, call_timeout)
+    def _clamped(phase: float | None) -> float | None:
+        bound = call_timeout if phase is None else min(phase, call_timeout)
+        return None if bound == math.inf else bound
 
     return httpx.Timeout(
         connect=_clamped(configured.connect),
@@ -428,6 +643,25 @@ def _backoff_seconds(attempt: int) -> float:
 _sleep = time.sleep
 
 
+def _with_credentials(
+    request: RequestInfo, credentials: Sequence[tuple[str, str]]
+) -> RequestInfo:
+    """``request`` with credentials this transport sends on its behalf.
+
+    Those are the proxy's and the cookie jar's, which are not in
+    ``request.headers``, so no header rule can see them (C16, C17). The
+    Basic value httpx builds from the target URL's userinfo needs nothing
+    here: ``RequestInfo`` derives it from its own URL, so every renderer has
+    it.
+    """
+    if not credentials:
+        return request
+    return dataclasses.replace(
+        request,
+        transport_credentials=(*request.transport_credentials, *credentials),
+    )
+
+
 class HttpxTransport(DerivableTransportBase):
     """The ``httpx``-backed ``Transport`` (SPEC 5.6), one client per session."""
 
@@ -441,8 +675,11 @@ class HttpxTransport(DerivableTransportBase):
         proxy: httpx.Proxy | str | None = None,
         verify: bool | str | ssl.SSLContext = True,
         http2: bool = False,
+        cookie_scope: CookieScope = "none",
         _shared_pool: httpx.BaseTransport | None = None,
+        _proxy_credentials: tuple[tuple[str, str], ...] = (),
     ) -> None:
+        timeout = checked_timeout(timeout, source="timeout")
         if verify is False:
             warnings.warn(
                 "verify=False disables TLS certificate verification; do not "
@@ -451,19 +688,31 @@ class HttpxTransport(DerivableTransportBase):
             )
         self._max_attempts = max_attempts
         self._max_response_bytes = max_response_bytes
-        self._pool: httpx.BaseTransport = _shared_pool or httpx.HTTPTransport(
-            verify=_resolve_ssl_context(verify, trust_env=trust_env),
-            trust_env=trust_env,
-            http2=http2,
-            proxy=proxy,
-            retries=0,
-        )
-        self._client = httpx.Client(
-            transport=self._pool,
-            timeout=timeout,
-            trust_env=trust_env,
-            follow_redirects=False,
-        )
+        self._cookie_scope: CookieScope = cookie_scope
+        self._trust_env = trust_env
+        self._pool: httpx.BaseTransport
+        # The pools this call builds, and nothing it was given. They have no
+        # other owner until the client below exists, so a failure before
+        # then closes them here, through the one sweep and report (9.3).
+        built: list[Closable] = []
+        try:
+            if _shared_pool is None:
+                self._pool, self._proxy_credentials = _build_pool(
+                    built, verify=verify, trust_env=trust_env, http2=http2, proxy=proxy
+                )
+            else:
+                self._pool, self._proxy_credentials = _shared_pool, _proxy_credentials
+            self._client = httpx.Client(
+                transport=self._pool,
+                timeout=timeout,
+                trust_env=trust_env,
+                follow_redirects=False,
+            )
+        except BaseException as failure:
+            errors = _close_all(built)
+            if errors:
+                _report(errors, failure)
+            raise
         self._closed = False
 
     # -- Transport protocol ---------------------------------------------------
@@ -480,7 +729,14 @@ class HttpxTransport(DerivableTransportBase):
         with ``from None``, since a bare ``raise`` re-attaches whatever
         exception is currently being handled regardless of an explicit
         ``from`` clause.
+
+        ``request`` is first given the credentials this transport sends, so
+        every message and excerpt below scrubs them too (C16). ``timeout`` is
+        refused before any I/O when it is outside :func:`checked_seconds`'
+        domain.
         """
+        timeout = checked_seconds(timeout, source="timeout")
+        request = _with_credentials(request, self._proxy_credentials)
         httpx_request: httpx.Request | None = None
         build_error: GraphQLTransportError | None = None
         try:
@@ -490,7 +746,13 @@ class HttpxTransport(DerivableTransportBase):
         if build_error is not None:
             raise build_error
         assert httpx_request is not None
+        # C17. The jar's cookies are on the built request now, not in
+        # ``request.headers``, so they join the secret set from the wire.
+        request = _with_credentials(
+            request, cookie_credentials(sent=httpx_request.headers.get_list("cookie"))
+        )
 
+        auth = _request_auth(httpx_request)
         retry_eligible = _should_retry_connect_failure(request)
         attempts_allowed = self._max_attempts if retry_eligible else 1
 
@@ -498,7 +760,7 @@ class HttpxTransport(DerivableTransportBase):
         send_error: GraphQLTransportError | None = None
         for attempt in range(1, attempts_allowed + 1):
             try:
-                response = self._client.send(httpx_request, stream=True)
+                response = self._client.send(httpx_request, stream=True, auth=auth)
             except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
                 if attempt < attempts_allowed:
                     _sleep(_backoff_seconds(attempt))
@@ -517,6 +779,10 @@ class HttpxTransport(DerivableTransportBase):
             raise send_error
 
         assert response is not None
+        request = _with_credentials(
+            request,
+            cookie_credentials(received=response.headers.get_list("set-cookie")),
+        )
         classify_error: GraphQLTransportError
         try:
             return self._classify(request, response)
@@ -524,7 +790,18 @@ class HttpxTransport(DerivableTransportBase):
             classify_error = self._timeout_error(request, exc)
         except httpx.HTTPError as exc:
             classify_error = self._connection_error(request, exc)
+        finally:
+            # C17. Under the default scope no ``Set-Cookie`` survives a call,
+            # so the jar is cleared whatever the response did, including on a
+            # classification failure: a response that set a cookie and then
+            # failed to parse must not leave that cookie behind either.
+            self._clear_cookies_if_scoped()
         raise classify_error
+
+    def _clear_cookies_if_scoped(self) -> None:
+        """Drop every cookie this client holds, under ``cookie_scope="none"``."""
+        if self._cookie_scope == "none":
+            self._client.cookies.clear()
 
     def close(self) -> None:
         if self._closed:
@@ -545,7 +822,10 @@ class HttpxTransport(DerivableTransportBase):
             timeout=self._client.timeout,
             max_attempts=self._max_attempts,
             max_response_bytes=self._max_response_bytes,
+            trust_env=self._trust_env,
+            cookie_scope=self._cookie_scope,
             _shared_pool=wrapper,
+            _proxy_credentials=self._proxy_credentials,
         )
 
     # -- request encoding -------------------------------------------------
@@ -593,8 +873,8 @@ class HttpxTransport(DerivableTransportBase):
             _LEGACY_JSON_MEDIA_TYPE,
         )
         if not is_graphql_media_type or not _is_envelope(parsed):
-            excerpt = _safe_excerpt(request, text)
-            safe_content_type = _sanitize_text(request, content_type)
+            excerpt = safe_excerpt(request, text)
+            safe_content_type = sanitize_text(request, content_type)
             if 200 <= status < 300:
                 raise GraphQLTransportError(
                     f"response was not a valid GraphQL envelope "
@@ -633,6 +913,7 @@ class HttpxTransport(DerivableTransportBase):
             errors=tuple(envelope.get("errors") or ()),
             extensions=extensions if isinstance(extensions, Mapping) else None,
             headers=dict(response.headers),
+            transport_credentials=request.transport_credentials,
         )
 
     def _read_capped_body(
@@ -666,7 +947,7 @@ class HttpxTransport(DerivableTransportBase):
 
         partial = b"".join(chunks)
         if overflowed:
-            excerpt = _safe_excerpt(request, partial.decode("utf-8", errors="replace"))
+            excerpt = safe_excerpt(request, partial.decode("utf-8", errors="replace"))
             raise GraphQLTransportError(
                 f"response body exceeded max_response_bytes="
                 f"{self._max_response_bytes:,}: {excerpt}",
@@ -688,7 +969,7 @@ class HttpxTransport(DerivableTransportBase):
         except LookupError:
             unknown_charset = True
         if unknown_charset:
-            safe_charset = _sanitize_text(request, charset)
+            safe_charset = sanitize_text(request, charset)
             raise GraphQLTransportError(
                 f"response declared an unknown charset {safe_charset!r}.",
                 request=request.redacted(),
@@ -713,13 +994,13 @@ class HttpxTransport(DerivableTransportBase):
     def _connection_error(
         self, request: RequestInfo, exc: Exception
     ) -> GraphQLConnectionError:
-        message = _sanitize_text(request, f"connection failed: {exc}")
+        message = sanitize_text(request, f"connection failed: {exc}")
         return GraphQLConnectionError(message, request=request.redacted())
 
     def _timeout_error(
         self, request: RequestInfo, exc: Exception
     ) -> GraphQLTimeoutError:
-        message = _sanitize_text(request, f"request timed out: {exc}")
+        message = sanitize_text(request, f"request timed out: {exc}")
         return GraphQLTimeoutError(message, request=request.redacted())
 
     def _request_construction_error(
@@ -735,5 +1016,5 @@ class HttpxTransport(DerivableTransportBase):
         exception types are guaranteed to be an ``httpx.HTTPError`` subclass
         the other handlers already catch.
         """
-        message = _sanitize_text(request, f"failed to build the request: {exc}")
+        message = sanitize_text(request, f"failed to build the request: {exc}")
         return GraphQLTransportError(message, request=request.redacted())
