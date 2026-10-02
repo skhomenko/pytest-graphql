@@ -1126,6 +1126,24 @@ def _parse_cookie_values(header_value: str) -> list[str]:
     return values
 
 
+def cookie_credentials(
+    *, sent: Iterable[str] = (), received: Iterable[str] = ()
+) -> list[tuple[str, str]]:
+    """Every cookie value on the wire, as the C16 secret set needs it (C17).
+
+    A transport with a cookie jar sends and receives cookies outside the
+    request's headers, so no header rule sees them, yet a server can echo
+    one into a body the transport quotes. ``sent`` is each ``Cookie`` line
+    as it goes on the wire, and ``received`` each ``Set-Cookie`` line, whose
+    attributes after the first ``;`` carry no value of the cookie's own.
+    """
+    pairs = [("cookie", value) for line in sent for value in _parse_cookie_values(line)]
+    for line in received:
+        first, _, _ = line.partition(";")
+        pairs.extend(("set-cookie", value) for value in _parse_cookie_values(first))
+    return pairs
+
+
 #: Matches a ``scheme://netloc`` prefix directly on raw URL text, without any
 #: of ``urlsplit``'s own bracket or NFKC-normalization validation. Used only
 #: as :func:`_lenient_userinfo`'s fallback once ``urlsplit`` itself has
@@ -1818,9 +1836,10 @@ class RequestInfo:
     omissions_total: int = 0
     #: C16. Credentials the transport sends on this request's behalf outside
     #: ``headers``, as ``(source label, value)`` pairs: a proxy's userinfo,
-    #: the ``Proxy-Authorization`` value built from it, and any other proxy
-    #: header. They reach only the proxy, so no header rule can see them,
-    #: yet a proxy can reflect them into a body the transport then quotes.
+    #: the ``Proxy-Authorization`` value built from it, any other proxy
+    #: header, and every cookie value its jar sends or a response sets
+    #: (C17). No header rule can see them, yet a proxy or server can reflect
+    #: them into a body the transport then quotes.
     #: Each one joins the secret set unconditionally and none is ever
     #: rendered. A transport sets this, never the caller.
     transport_credentials: tuple[tuple[str, str], ...] = ()

@@ -48,8 +48,9 @@ class RawResponse:
     errors: tuple[Mapping[str, Any], ...]
     extensions: Mapping[str, Any] | None
     headers: Mapping[str, str]
-    #: C16. Credentials the transport sent on this request's behalf outside
-    #: its headers, as ``RequestInfo.transport_credentials`` pairs, so the
+    #: C16, C17. Credentials the transport sent or received on this
+    #: request's behalf outside its headers, a proxy's and every cookie
+    #: value, as ``RequestInfo.transport_credentials`` pairs, so the
     #: client renders the response with the same secret set the transport
     #: scrubbed its own errors with. A server or proxy can echo one into an
     #: error ``path`` as easily as into a body. Never rendered.

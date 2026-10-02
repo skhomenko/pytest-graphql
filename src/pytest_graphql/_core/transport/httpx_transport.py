@@ -37,7 +37,7 @@ import ssl
 import sys
 import time
 import warnings
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -49,6 +49,7 @@ from httpx._utils import URLPattern, get_environment_proxies
 from pytest_graphql._core.diagnostics import (
     RequestInfo,
     basic_credentials,
+    cookie_credentials,
     safe_excerpt,
     sanitize_text,
 )
@@ -642,6 +643,25 @@ def _backoff_seconds(attempt: int) -> float:
 _sleep = time.sleep
 
 
+def _with_credentials(
+    request: RequestInfo, credentials: Sequence[tuple[str, str]]
+) -> RequestInfo:
+    """``request`` with credentials this transport sends on its behalf.
+
+    Those are the proxy's and the cookie jar's, which are not in
+    ``request.headers``, so no header rule can see them (C16, C17). The
+    Basic value httpx builds from the target URL's userinfo needs nothing
+    here: ``RequestInfo`` derives it from its own URL, so every renderer has
+    it.
+    """
+    if not credentials:
+        return request
+    return dataclasses.replace(
+        request,
+        transport_credentials=(*request.transport_credentials, *credentials),
+    )
+
+
 class HttpxTransport(DerivableTransportBase):
     """The ``httpx``-backed ``Transport`` (SPEC 5.6), one client per session."""
 
@@ -716,7 +736,7 @@ class HttpxTransport(DerivableTransportBase):
         domain.
         """
         timeout = checked_seconds(timeout, source="timeout")
-        request = self._with_transport_credentials(request)
+        request = _with_credentials(request, self._proxy_credentials)
         httpx_request: httpx.Request | None = None
         build_error: GraphQLTransportError | None = None
         try:
@@ -726,6 +746,11 @@ class HttpxTransport(DerivableTransportBase):
         if build_error is not None:
             raise build_error
         assert httpx_request is not None
+        # C17. The jar's cookies are on the built request now, not in
+        # ``request.headers``, so they join the secret set from the wire.
+        request = _with_credentials(
+            request, cookie_credentials(sent=httpx_request.headers.get_list("cookie"))
+        )
 
         auth = _request_auth(httpx_request)
         retry_eligible = _should_retry_connect_failure(request)
@@ -754,6 +779,10 @@ class HttpxTransport(DerivableTransportBase):
             raise send_error
 
         assert response is not None
+        request = _with_credentials(
+            request,
+            cookie_credentials(received=response.headers.get_list("set-cookie")),
+        )
         classify_error: GraphQLTransportError
         try:
             return self._classify(request, response)
@@ -768,24 +797,6 @@ class HttpxTransport(DerivableTransportBase):
             # failed to parse must not leave that cookie behind either.
             self._clear_cookies_if_scoped()
         raise classify_error
-
-    def _with_transport_credentials(self, request: RequestInfo) -> RequestInfo:
-        """``request`` with every credential this pool sends on its behalf.
-
-        Those are the proxy's, which are not in ``request.headers``, so no
-        header rule can see them (C16). The Basic value httpx builds from
-        the target URL's userinfo needs nothing here: ``RequestInfo``
-        derives it from its own URL, so every renderer has it.
-        """
-        if not self._proxy_credentials:
-            return request
-        return dataclasses.replace(
-            request,
-            transport_credentials=(
-                *request.transport_credentials,
-                *self._proxy_credentials,
-            ),
-        )
 
     def _clear_cookies_if_scoped(self) -> None:
         """Drop every cookie this client holds, under ``cookie_scope="none"``."""
@@ -902,7 +913,7 @@ class HttpxTransport(DerivableTransportBase):
             errors=tuple(envelope.get("errors") or ()),
             extensions=extensions if isinstance(extensions, Mapping) else None,
             headers=dict(response.headers),
-            transport_credentials=self._proxy_credentials,
+            transport_credentials=request.transport_credentials,
         )
 
     def _read_capped_body(

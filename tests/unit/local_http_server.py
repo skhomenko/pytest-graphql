@@ -55,13 +55,22 @@ def fixed(
 
 
 @contextmanager
-def local_server(responder: Responder) -> Iterator[str]:
-    """Start a real HTTP server on loopback and yield its ``/graphql`` URL."""
+def local_server(
+    responder: Responder, *, peers: list[tuple[str, int]] | None = None
+) -> Iterator[str]:
+    """Start a real HTTP server on loopback and yield its ``/graphql`` URL.
+
+    ``peers`` receives the client address of every request, in order. Two
+    requests from the same address arrived on the same connection, which is
+    how a test sees that two clients share one connection pool.
+    """
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
         def _handle(self) -> None:
+            if peers is not None:
+                peers.append(self.client_address[:2])
             length = int(self.headers.get("Content-Length", "0") or "0")
             body = self.rfile.read(length) if length else b""
             # A repeated field keeps its first value, as ``Message.get()``

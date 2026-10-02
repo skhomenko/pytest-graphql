@@ -859,8 +859,10 @@ redaction cannot cover it. The scrub closes that gap.
   credential the transport sends outside the request's headers: a proxy's username, its
   password, the pair they form, the `Proxy-Authorization` value built from them, and the
   value of every header the proxy was given, each value of a repeated header on its own,
-  as it goes on the wire. Those are built below the request's own redaction boundary, yet
-  a proxy can quote them back into a body the transport excerpts or into a GraphQL
+  as it goes on the wire. They also include every cookie value the transport's own jar
+  sends in its `Cookie` line, and every value a response sets in a `Set-Cookie` line, under
+  either `cookie_scope`. Those are built below the request's own redaction boundary, yet a
+  proxy or server can quote them back into a body the transport excerpts or into a GraphQL
   response, so they join the set whatever `redact_headers` says, and the transport hands
   them back with the response so the client renders it with the same set. Target URL
   userinfo is sent as an `Authorization: Basic` value built from the decoded pair, which
