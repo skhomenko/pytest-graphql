@@ -1070,7 +1070,12 @@ instead of an environment-variable indirection, which is still safe because that
 no real secret. The error list truncates at `max_recorded_errors`, default 20. Truncation
 is visible, never silent, and states how many bytes or entries were cut. The diagnostics
 recorder is a bounded `deque`, default 50 calls, set by `ClientConfig.max_recorded_calls`,
-and the plugin clears it per test.
+and the plugin clears it per test. A client records exactly one call for every request it
+hands to the transport, and records it before any exception leaves the call. That includes
+a call that fails after the transport returned, through a response that contradicts the
+schema or a raising `after_response`, which is recorded as failed with its status code. A
+call refused before it is sent records nothing. Recording never replaces the exception the
+caller receives: a failure whose message cannot be rendered is recorded by its type name.
 
 `as_curl()` quotes every literal component with `shlex.quote`. A redacted header is not a
 literal component. It renders as two adjacent quoted segments that form one shell word and

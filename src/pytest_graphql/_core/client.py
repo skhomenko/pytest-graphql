@@ -536,44 +536,45 @@ class GraphQLClient:
         )
 
         started = time.perf_counter()
+        status_code: int | None = None
         try:
             raw = self._transport.send(request, timeout=timeout)
+            status_code = raw.status_code
+            duration_ms = (time.perf_counter() - started) * 1000.0
+            if raw.transport_credentials:
+                request = dataclasses.replace(
+                    request,
+                    transport_credentials=(
+                        *request.transport_credentials,
+                        *raw.transport_credentials,
+                    ),
+                )
+            response = build_response(
+                raw,
+                request=request,
+                schema=self._schema,
+                document=document,
+                parsers=self._parsers,
+                operation_name=operation_name,
+                duration_ms=duration_ms,
+            )
+            response = apply_after_response(self._middleware, response)
         except BaseException as failure:
             # Recorded before the exception leaves, because a failed call is
-            # the one a report most needs. `safe_excerpt` is the same three
-            # stages every other free-form text goes through, so a server's
-            # echoed credential cannot reach the dump through a message.
+            # the one a report most needs. A call fails here when the
+            # transport raises, and also after it returned: a response that
+            # contradicts the schema, or a raising `after_response`.
             self._recorder.record(
                 RecordedCall(
                     request=request.redacted(),
                     outcome="failed",
+                    status_code=status_code,
                     duration_ms=(time.perf_counter() - started) * 1000.0,
-                    failure=safe_excerpt(
-                        request, f"{type(failure).__name__}: {failure}"
-                    ),
+                    failure=safe_excerpt(request, _failure_text(failure)),
                 )
             )
             raise
 
-        duration_ms = (time.perf_counter() - started) * 1000.0
-        if raw.transport_credentials:
-            request = dataclasses.replace(
-                request,
-                transport_credentials=(
-                    *request.transport_credentials,
-                    *raw.transport_credentials,
-                ),
-            )
-        response = build_response(
-            raw,
-            request=request,
-            schema=self._schema,
-            document=document,
-            parsers=self._parsers,
-            operation_name=operation_name,
-            duration_ms=duration_ms,
-        )
-        response = apply_after_response(self._middleware, response)
         self._recorder.record(
             RecordedCall(
                 request=response.request,
@@ -644,6 +645,20 @@ def _execution_error(
     error = error_type(f"{summary}\n  {shown}")
     response.request._guard.check_exception(error)
     return error
+
+
+def _failure_text(failure: BaseException) -> str:
+    """The text a recorded call shows for the exception that failed it.
+
+    Recording must not replace the exception the caller is waiting for, so
+    a message that cannot be rendered is left out and the type name stays.
+    """
+    name = type(failure).__name__
+    try:
+        message = str(failure)
+    except Exception:
+        return f"{name}: <message unavailable>"
+    return f"{name}: {message}"
 
 
 def _operation_definition(
