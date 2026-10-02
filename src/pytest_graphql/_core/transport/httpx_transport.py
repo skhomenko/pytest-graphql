@@ -75,12 +75,13 @@ _LEGACY_JSON_MEDIA_TYPE = "application/json"
 #: C13 defaults.
 DEFAULT_TIMEOUT_SECONDS = 30.0
 
-#: The largest finite timeout, about 31 years. A larger finite value cannot
-#: become a socket deadline on every platform (CPython raises
-#: ``OverflowError`` near 1e12 seconds on 64-bit macOS, and a 32-bit
-#: ``time_t`` ends at 2**31), so it is refused instead. ``math.inf`` is the
-#: way to ask for no limit.
-MAX_TIMEOUT_SECONDS = 1e9
+#: The largest finite timeout, about 11.5 days. A larger finite value cannot
+#: become a socket deadline on every platform, so it is refused instead.
+#: CPython on Windows has no ``poll()`` and refuses a socket timeout above
+#: ``INT_MAX`` milliseconds (about 2147483.6 seconds) with ``OverflowError``,
+#: and 64-bit macOS refuses one near 1e12 seconds. ``math.inf`` is the way
+#: to ask for no limit.
+MAX_TIMEOUT_SECONDS = 1e6
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 

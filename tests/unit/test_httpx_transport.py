@@ -1060,7 +1060,16 @@ def test_a_send_timeout_outside_the_domain_is_refused_before_io(bad: float) -> N
         root.close()
 
 
-_TOO_LARGE_TIMEOUTS = (MAX_TIMEOUT_SECONDS * 2, 1e12, 1e308, 10**1000)
+#: 2_147_484 is the first whole second CPython on Windows refuses as a
+#: socket timeout (``INT_MAX`` milliseconds), and 1e9 was the old maximum.
+_TOO_LARGE_TIMEOUTS = (
+    MAX_TIMEOUT_SECONDS * 2,
+    2_147_484,
+    1e9,
+    1e12,
+    1e308,
+    10**1000,
+)
 
 
 @pytest.mark.parametrize("bad", _TOO_LARGE_TIMEOUTS)

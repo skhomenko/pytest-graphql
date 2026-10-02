@@ -692,10 +692,11 @@ otherwise becomes a transport error naming it.
 
 - `ClientConfig.timeout` accepts a float applied to all four phases, or a
   `Timeout(connect, read, write, pool)` value. The default is 30 seconds per phase.
-- Every timeout has one domain: a real number greater than zero and at most 1e9 seconds
-  (about 31 years), or `math.inf`, which means "no limit". A `Timeout` phase may also be
+- Every timeout has one domain: a real number greater than zero and at most 1e6 seconds
+  (about 11.5 days), or `math.inf`, which means "no limit". A `Timeout` phase may also be
   `None`. A larger finite value cannot become a socket deadline on every platform, so it
-  is refused rather than read as "no limit". NaN, zero, any negative value (negative
+  is refused rather than read as "no limit". The tightest platform is Windows, where
+  CPython refuses a socket timeout above `INT_MAX` milliseconds (about 24.8 days). NaN, zero, any negative value (negative
   infinity included) and a value above the maximum raise `ValueError`. A value that is
   not a number, `None` given as the per-call option included, raises `TypeError`. Only
   an omitted per-call option means "use the configured timeout". The domain holds for
