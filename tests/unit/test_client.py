@@ -388,10 +388,13 @@ def test_an_unrelated_derive_member_is_never_called(
     client = GraphQLClient(transport=unrelated, schema=schema)
 
     clone = client.with_headers({"X-A": "1"})
+    clone.close()
+    client.close()
 
     assert calls == []
     assert clone.transport is unrelated
     assert clone.owns_transport is False
+    assert unrelated.close_calls == 0
 
 
 # -- the factory (part 5 of 2.14) ---------------------------------------------

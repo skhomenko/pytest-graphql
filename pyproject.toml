@@ -108,6 +108,12 @@ select = [
 [tool.ruff.lint.isort]
 known-first-party = ["pytest_graphql"]
 
+[tool.ruff.lint.per-file-ignores]
+# The typing fixtures call mypy's `reveal_type`, which exists only for the
+# checker. Their test runs mypy over them, so a real undefined name there is
+# still reported, as a `name-defined` error with no marker.
+"tests/typing/*.py" = ["F821"]
+
 [tool.mypy]
 python_version = "3.10"
 strict = true
