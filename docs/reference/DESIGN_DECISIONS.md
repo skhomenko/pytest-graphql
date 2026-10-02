@@ -1382,6 +1382,26 @@ These are stated rather than claimed away.
   keeps it. The second is the two boundaries inside each owned-wrapper constructor between
   the underlying constructor returning and the store into the wrapper. Windows inside a
   third-party constructor sit below this and are not reachable from this code.
+- **Unwinding interrupts.** An interrupt on the unwinding path leaves open every item the
+  sweep has not yet attempted. At a releasing call site, the boundaries from the decision to
+  release up to the call into the sweep strand every item. Inside the sweep, the boundaries
+  between one item's attempt and the next strand the items not yet attempted. This is the
+  one case where the rule in 9.3 that every item is attempted does not hold. No handler can
+  close it, because a handler that catches an interrupt there has an entry of its own. An
+  interrupt inside one item's attempt, before its `close()` runs, is that item's close
+  failure: it is reported, and every later item is still attempted. The client marks itself
+  closed before it sweeps, so a second `close()` does not retry. The pytest path removes the
+  releasing call-site and between-item windows for the factory's list, as it removes the
+  return boundary: the session fixture sweeps the list it supplied again at teardown, and
+  every wrapper on that list closes at most once. A list that a transport constructor builds
+  for its own pools has no second sweep, so those windows stay open there.
+- **Once-only close interrupts.** Every close that guards a resource runs at most once: the
+  owned wrapper, the transport, and the wrapper that closes a shared pool for its owner. Each
+  marks itself closed before it releases. An interrupt from that mark up to the call that
+  releases leaves that one resource open, and nothing retries it: not a second `close()`, and
+  not the fixture's second sweep, which skips a wrapper already marked closed. The pytest path
+  does not remove this window. Marking after the release would instead let an interrupt
+  between the two close the resource twice, which section 9.1 rules out.
 - **Final-pass omissions.** The refusals of the final unanswered pass are a stated omission
   rather than a claim this design meets.
 
