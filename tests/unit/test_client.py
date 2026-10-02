@@ -14,6 +14,7 @@ import base64
 import math
 import os
 import ssl
+from collections.abc import Callable
 from fractions import Fraction
 from typing import Any
 
@@ -39,6 +40,7 @@ from pytest_graphql._core.errors import (
 from pytest_graphql._core.middleware import BaseMiddleware
 from pytest_graphql._core.response import GraphQLResponse
 from pytest_graphql._core.transport.base import RawResponse
+from pytest_graphql._core.transport.httpx_transport import HttpxTransport
 from tests.schema.fake_transport import FakeGraphQLTransport, FakeTransport
 from tests.schema.resolvers import build_schema
 from tests.unit.local_http_server import PlannedResponse, local_server
@@ -355,6 +357,47 @@ def test_owns_transport_reads_true_on_exactly_the_paths_that_close_it(
     assert transport.close_calls == 0
     owning.close()
     assert transport.close_calls == 1
+
+
+def test_a_clone_over_a_derivable_transport_closes_its_own_and_no_pool(
+    schema: GraphQLSchema, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # C19: the clone derives a transport and owns it. The pool stays with
+    # whoever owns the root, so the clone closes its own transport once,
+    # however often it is closed, and never the pool.
+    closes: dict[int, int] = {}
+
+    def counting(real: Callable[[Any], None]) -> Callable[[Any], None]:
+        def close(closable: Any) -> None:
+            closes[id(closable)] = closes.get(id(closable), 0) + 1
+            real(closable)
+
+        return close
+
+    monkeypatch.setattr(httpx.Client, "close", counting(httpx.Client.close))
+    monkeypatch.setattr(
+        httpx.HTTPTransport, "close", counting(httpx.HTTPTransport.close)
+    )
+    root = HttpxTransport()
+    parent = GraphQLClient(transport=root, schema=schema)
+    clone = parent.as_("token")
+    derived = clone.transport
+
+    assert isinstance(derived, HttpxTransport)
+    assert derived is not root
+    assert clone.owns_transport is True
+    assert parent.owns_transport is False
+
+    clone.close()
+    clone.close()
+    parent.close()
+
+    assert closes.get(id(derived._client), 0) == 1
+    assert closes.get(id(root._client), 0) == 0
+    assert closes.get(id(root._pool), 0) == 0
+
+    root.close()
+    assert closes.get(id(root._pool), 0) == 1
 
 
 def test_a_two_method_transport_constructs_clones_and_closes(

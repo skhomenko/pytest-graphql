@@ -29,8 +29,10 @@ from graphql import GraphQLSchema
 
 from pytest_graphql._core import client as factory
 from pytest_graphql._core.client import ClientConfig, build_client
-from pytest_graphql._core.errors import ArgumentError
+from pytest_graphql._core.diagnostics import RequestInfo
+from pytest_graphql._core.errors import ArgumentError, SchemaError
 from pytest_graphql._core.lifecycle import _close_all, reported_errors
+from pytest_graphql._core.transport.base import RawResponse
 from pytest_graphql._core.transport.httpx_transport import HttpxTransport
 from tests.schema.fake_transport import FakeGraphQLTransport
 from tests.schema.resolvers import build_schema
@@ -290,6 +292,56 @@ def test_an_injected_transport_is_left_open_when_the_schema_fails(
     assert injected.close_calls == 0
 
 
+class _RefusingIntrospection(FakeGraphQLTransport):
+    """An injected transport whose introspection request fails."""
+
+    def send(self, request: RequestInfo, *, timeout: float) -> RawResponse:  # noqa: ARG002 -- the protocol's own shape
+        self.sent.append(request)
+        raise Failure("introspection")
+
+
+class _InvalidSchema(FakeGraphQLTransport):
+    """An injected transport that answers introspection with no schema."""
+
+    def send(self, request: RequestInfo, *, timeout: float) -> RawResponse:  # noqa: ARG002 -- the protocol's own shape
+        self.sent.append(request)
+        return RawResponse(
+            status_code=200,
+            media_type="application/json",
+            data={"__schema": "not a schema"},
+            errors=(),
+            extensions=None,
+            headers={},
+        )
+
+
+_INJECTED_FAILURES: dict[str, tuple[type[FakeGraphQLTransport], type[Exception]]] = {
+    "introspection": (_RefusingIntrospection, Failure),
+    "invalid-schema": (_InvalidSchema, SchemaError),
+    "constructor": (FakeGraphQLTransport, Failure),
+}
+
+
+@pytest.mark.parametrize("step", list(_INJECTED_FAILURES))
+def test_an_injected_transport_is_left_open_on_every_construction_failure(
+    schema: GraphQLSchema, step: str
+) -> None:
+    # The same failures that close every owned resource close nothing here,
+    # because the factory owns nothing on this path. Each one fails after the
+    # introspection request reached the injected transport.
+    kind, expected = _INJECTED_FAILURES[step]
+    injected = kind(schema)
+    options: dict[str, Any] = {}
+    if step == "constructor":
+        options["middleware"] = _RefusedMiddleware(Failure("constructor"))
+
+    with pytest.raises(expected):
+        build_client(url=URL, transport=injected, **options)
+
+    assert len(injected.sent) == 1
+    assert injected.close_calls == 0
+
+
 # -- cleanup failures while the factory unwinds -------------------------------
 
 
@@ -316,6 +368,25 @@ def test_the_construction_failure_wins_over_ordinary_cleanup_failures(
     assert {id(exc) for exc in report} == {id(failure), id(probe_close), id(root_close)}
     # Every item is attempted, whatever the earlier ones did.
     assert ledger.closes() == ["close probe", "close root"]
+
+
+def test_a_failed_constructor_wins_over_a_failed_transport_close(
+    schema: GraphQLSchema, install: Any
+) -> None:
+    # The constructor is the one step that can fail once the client's own
+    # transport exists. That transport's failed close must not stop the
+    # sweep before the root pool, or replace the constructor's failure.
+    failure, owner_close = Failure("constructor"), Failure("owner close")
+    ledger = install(_Ledger(schema, close_failures={"owner": owner_close}))
+
+    with pytest.raises(Failure) as raised:
+        _build(ledger, middleware=_RefusedMiddleware(failure))
+
+    assert raised.value is failure
+    report = reported_errors(raised.value)
+    assert report[0] is failure
+    assert {id(exc) for exc in report} == {id(failure), id(owner_close)}
+    assert ledger.closes() == ["close probe", "close owner", "close root"]
 
 
 def test_an_interrupt_in_cleanup_wins_over_the_construction_failure(
