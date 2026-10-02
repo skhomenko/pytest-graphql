@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import pytest
 
-from pytest_graphql._core import client as lifecycle
+from pytest_graphql._core import lifecycle
 from tests.unit.lifecycle_harness import (
     Failure,
     Interrupt,
@@ -429,3 +429,31 @@ def test_the_report_always_raises_and_never_returns() -> None:
     """``_report`` is typed ``NoReturn``, so this is the runtime half of that."""
     with pytest.raises(Failure):
         lifecycle._report([Failure("cleanup")], Failure("construction"))
+
+
+@pytest.mark.parametrize("outer", [Failure("outer cleanup"), Interrupt("outer stop")])
+def test_a_report_keeps_every_failure_an_earlier_report_covered(
+    outer: BaseException,
+) -> None:
+    """A constructor that closes what it built reports inside the caller's sweep."""
+    inner_failure = Failure("construction")
+    inner_cleanup = [Failure(f"cleanup {index}") for index in range(3)]
+
+    def construct() -> None:
+        try:
+            raise inner_failure
+        except Failure as failure:
+            lifecycle._report(inner_cleanup, failure)
+
+    with pytest.raises(BaseException) as raised:
+        try:
+            construct()
+        except Failure as failure:
+            lifecycle._report([outer], failure)
+
+    expected = outer if isinstance(outer, Interrupt) else inner_failure
+    assert raised.value is expected
+    covered = lifecycle.reported_errors(raised.value)
+    assert covered[0] is expected
+    assert set(map(id, covered)) == set(map(id, [inner_failure, *inner_cleanup, outer]))
+    assert len(covered) == 5

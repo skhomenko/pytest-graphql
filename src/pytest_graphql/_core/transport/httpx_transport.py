@@ -59,6 +59,7 @@ from pytest_graphql._core.errors import (
     GraphQLTimeoutError,
     GraphQLTransportError,
 )
+from pytest_graphql._core.lifecycle import Closable, _close_all, _Owned, _report
 from pytest_graphql._core.transport.base import DerivableTransportBase, RawResponse
 
 #: SPEC 5.6, C3: the fixed request Accept header, honored unless the caller's
@@ -149,10 +150,15 @@ class _ProxyRouter(httpx.BaseTransport):
         return self._direct.handle_request(request)
 
     def close(self) -> None:
-        self._direct.close()
-        for pool in self._mounts.values():
-            if pool is not None:
-                pool.close()
+        """Close every pool once, through the one sweep (9.3).
+
+        A pool that fails to close does not leave the others open. Among
+        ordinary failures the direct pool's wins, as it was built first.
+        """
+        pools = [self._direct, *(pool for pool in self._mounts.values() if pool)]
+        errors = _close_all(pools)
+        if errors:
+            _report(errors, errors[-1])
 
 
 #: The proxy schemes ``httpx.Proxy`` accepts.
@@ -219,6 +225,7 @@ def _request_auth(request: httpx.Request) -> httpx.Auth:
 
 
 def _build_pool(
+    cleanup: list[Closable],
     *,
     verify: bool | str | ssl.SSLContext,
     trust_env: bool,
@@ -232,11 +239,13 @@ def _build_pool(
     by the ambient ``HTTP_PROXY``, ``HTTPS_PROXY``, ``ALL_PROXY`` and
     ``NO_PROXY`` through :class:`_ProxyRouter`, and ``trust_env=False``
     reads none of them. Every proxy URL is parsed before any pool exists,
-    so a refused one leaves nothing half built.
+    so a refused one leaves nothing half built. Every pool is adopted by
+    ``cleanup`` before it is built (9.2), so when a later pool or step fails
+    the caller closes exactly the pools that exist.
     """
     resolved_verify = _resolve_ssl_context(verify, trust_env=trust_env)
 
-    def pool_for(selected: httpx.Proxy | None) -> httpx.HTTPTransport:
+    def new_pool(selected: httpx.Proxy | None) -> httpx.HTTPTransport:
         return httpx.HTTPTransport(
             verify=resolved_verify,
             trust_env=trust_env,
@@ -244,6 +253,9 @@ def _build_pool(
             proxy=selected,
             retries=0,
         )
+
+    def pool_for(selected: httpx.Proxy | None) -> httpx.HTTPTransport:
+        return _Owned(cleanup, new_pool, selected).value
 
     if proxy is not None:
         selected = _parse_proxy(proxy, source="proxy")
@@ -264,11 +276,12 @@ def _build_pool(
         if selected is not None
         for credential in _proxy_credentials(selected)
     )
+    direct = pool_for(None)
     mounts = {
         pattern: None if selected is None else pool_for(selected)
         for pattern, selected in ambient.items()
     }
-    return _ProxyRouter(pool_for(None), mounts), credentials
+    return _ProxyRouter(direct, mounts), credentials
 
 
 def _media_type(content_type: str) -> str:
@@ -658,18 +671,28 @@ class HttpxTransport(DerivableTransportBase):
         self._cookie_scope: CookieScope = cookie_scope
         self._trust_env = trust_env
         self._pool: httpx.BaseTransport
-        if _shared_pool is None:
-            self._pool, self._proxy_credentials = _build_pool(
-                verify=verify, trust_env=trust_env, http2=http2, proxy=proxy
+        # The pools this call builds, and nothing it was given. They have no
+        # other owner until the client below exists, so a failure before
+        # then closes them here, through the one sweep and report (9.3).
+        built: list[Closable] = []
+        try:
+            if _shared_pool is None:
+                self._pool, self._proxy_credentials = _build_pool(
+                    built, verify=verify, trust_env=trust_env, http2=http2, proxy=proxy
+                )
+            else:
+                self._pool, self._proxy_credentials = _shared_pool, _proxy_credentials
+            self._client = httpx.Client(
+                transport=self._pool,
+                timeout=timeout,
+                trust_env=trust_env,
+                follow_redirects=False,
             )
-        else:
-            self._pool, self._proxy_credentials = _shared_pool, _proxy_credentials
-        self._client = httpx.Client(
-            transport=self._pool,
-            timeout=timeout,
-            trust_env=trust_env,
-            follow_redirects=False,
-        )
+        except BaseException as failure:
+            errors = _close_all(built)
+            if errors:
+                _report(errors, failure)
+            raise
         self._closed = False
 
     # -- Transport protocol ---------------------------------------------------

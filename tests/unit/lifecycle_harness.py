@@ -32,7 +32,7 @@ from typing import Any
 
 import pytest
 
-from pytest_graphql._core import client as lifecycle
+from pytest_graphql._core import lifecycle
 
 # -- building exceptions with controlled links --------------------------------
 

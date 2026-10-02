@@ -1182,10 +1182,17 @@ protocol, so the call site keeps its argument types and no `Any` crosses the tra
 boundary. A wrong argument, a missing argument, or a result with no `close()` is a strict
 type-check error.
 
+The transport constructor follows the same rule for the pools it builds. Each pool, the
+direct one and one per ambient proxy, is adopted by the constructor's own cleanup list
+before it is built. A failure before the transport's `httpx` client exists closes every pool
+already built, exactly once. A pool the constructor was given, as a derived transport is, is
+not its own and is never closed by its failure.
+
 ### 9.3 One sweep, one close authority
 
-There are two releasing call sites, the client and the factory unwinding path. They share
-one sweep implementation, so a later correction cannot reach one and miss the other.
+There are four releasing call sites: the client, the factory unwinding path, the transport
+constructor unwinding path, and the proxy router closing its pools. They share one sweep and
+one report implementation, so a later correction cannot reach one and miss another.
 
 - Every item is attempted exactly once, in reverse order, whatever the earlier ones did. A
   failing transport teardown cannot strand the root pool.
@@ -1194,7 +1201,8 @@ one sweep implementation, so a later correction cannot reach one and miss the ot
   rather than chained behind a transport error, so an `except Exception` around the call
   cannot swallow it.
 - Among ordinary exceptions the caller's preferred exception wins. The client prefers the
-  last failure in sweep order, which is the earliest-acquired resource. The factory prefers
+  last failure in sweep order, which is the earliest-acquired resource, and so does the proxy
+  router, whose direct pool is built first. The factory and the transport constructor prefer
   the construction failure, because that is why the caller's call failed.
 - `close()` is idempotent, and so is leaving the context manager twice. The closed flag is
   set before the sweep, so a second close adds no calls even when the first raised.
@@ -1278,7 +1286,11 @@ with.
 failures are put when the record cannot hold them. It carries every distinct failure the
 report covers, raised one first, including what the raised exception itself already carried,
 because the coming `raise` can take that out of the chain. Refused writes are reported too,
-so a type that interferes with reporting cannot also hide that it did.
+so a type that interferes with reporting cannot also hide that it did. A failure that an
+earlier report raised keeps everything that report covered: a transport constructor that
+fails and closes what it built reports inside the factory's sweep, and a proxy router that
+fails to close its pools reports inside the client's, so the outer report takes in the inner
+record rather than replacing it.
 
 A single-link exception graph cannot always express every failure at once, and
 `BaseExceptionGroup` is unavailable at the supported floor. What can be lost is bounded and

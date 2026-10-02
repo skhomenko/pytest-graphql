@@ -30,7 +30,6 @@ from graphql import GraphQLSchema
 from graphql import build_schema as build_graphql_schema
 
 from pytest_graphql import BaseMiddleware, GraphQLClient, RequestInfo, build_client
-from pytest_graphql._core.client import reported_errors
 from pytest_graphql._core.diagnostics import WITHHELD_TEXT
 from pytest_graphql._core.errors import (
     DiagnosticRenderError,
@@ -40,6 +39,7 @@ from pytest_graphql._core.errors import (
     GraphQLRequestError,
     GraphQLTransportError,
 )
+from pytest_graphql._core.lifecycle import reported_errors
 from pytest_graphql._core.response import GraphQLResponse
 from tests.unit.local_http_server import PlannedResponse, local_server
 
