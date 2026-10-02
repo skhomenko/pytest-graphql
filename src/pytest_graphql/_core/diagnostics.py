@@ -1308,7 +1308,7 @@ _JSON_KEY_SEP_COST = 2
 _JSON_QUOTE_COST = 2
 
 
-#: C58: an automatic omission's reason, one of the seven the design document
+#: C58: an automatic omission's reason, one of the eight the design document
 #: names. A record never carries an argument value, only the position and the
 #: reason, so no request data can reach a report through this channel.
 OmissionReason = Literal[
@@ -1319,6 +1319,7 @@ OmissionReason = Literal[
     "depth",
     "cycle",
     "should-include",
+    "union-member-cap",
 ]
 
 #: C58: a skipped field is not counted by ``max_fields``, so the records carry

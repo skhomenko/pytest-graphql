@@ -346,12 +346,38 @@ Any field with at least one required argument, meaning non-null with no default,
 no value was supplied, is skipped, whatever its return type. Skipping only composite fields
 would emit a scalar field without its required argument and produce an invalid document.
 
-Every automatic omission is recorded and surfaced in diagnostics, not only this one. Seven
+Every automatic omission is recorded and surfaced in diagnostics, not only this one. Eight
 reasons drop a field: a required argument with no supplied value, a deprecated field, a
 connection with no page-size argument, the connection-depth limit, the depth limit, the
-cycle policy, and `should_include`. Selection normalization returns a structured record for
-each, carrying the parent type, the field path relative to its scope, and the reason, and
-never an argument value. Diagnostics prefixes those relative paths when it composes a nested
+cycle policy, `should_include`, and the `max_union_members` cap. Selection normalization
+returns a structured record for each, carrying the parent type, the field path relative to
+its scope, and the reason, and never an argument value.
+
+- A rule that removes a whole field records that one field.
+- A rule that keeps a type but reduces its selection records each field it removed. This
+  covers a member past the `max_union_members` cap, which keeps `__typename` and `id`, and
+  the cycle policy's `id_only`, which keeps `id`.
+- A rule that removes an interface or union member's fragment records each field of that
+  member, because a fragment has no field of its own. A fragment adds no path component, so
+  the parent type is what tells two members' records apart.
+- A field removed by a reducing rule that `should_include` or the deprecation rule would
+  have removed anyway is recorded under that reason instead.
+- The cycle policy's `shallow` spends the depth budget to zero, so a composite field it
+  removes is recorded as `cycle`, not as `depth`.
+- A member field that the interface already selects at the same position in the same
+  automatic selection is not an omission, whichever rule removed it from the member's
+  fragment, because the response carries it for every member. The records describe one
+  automatic scope, so a field that an explicit selection around a spliced `AUTO` selects is
+  still recorded when that scope left it out.
+- A field that no rule selects in the first place is not an omission. Examples are a
+  connection field outside the rule 4 template, and an interface's composite field, which
+  rule 6 selects through each member's fragment instead, so a member that loses it records
+  it there.
+- An interface that no object type implements has no member fragment, so its composite
+  fields are neither selected nor recorded. No value of that interface can exist, so the
+  server never returns one, and no data is left out.
+
+Diagnostics prefixes those relative paths when it composes a nested
 or cached automatic selection, so a reader sees the field's position in the finished
 document. The records are bounded on their own, because a skipped field is not counted by
 `max_fields`: the first 50 in traversal order are retained, the total is tracked, and the
