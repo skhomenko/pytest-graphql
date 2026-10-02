@@ -24,7 +24,7 @@ from __future__ import annotations
 import signal
 import sys
 import traceback
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from types import TracebackType
@@ -213,14 +213,55 @@ class Injection:
     #: could carry it, so this is what tells the two cases apart: a refusal made
     #: before the last successful record has a later write and must be reported.
     refusal_marks: list[int] = field(default_factory=list)
+    #: For each refusal, how many record writes had been attempted when it was
+    #: made, counting a record's own refusal as made by that record. A refusal
+    #: whose count equals ``records`` was produced by the final pass.
+    refusal_passes: list[int] = field(default_factory=list)
     records: int = 0
     records_ok: int = 0
     record_refusals: int = 0
+    #: The refusals the record site itself made, in order.
+    record_refused: list[BaseException] = field(default_factory=list)
+    #: One entry per record attempt: the tuple it tried to store, every refusal
+    #: made up to and including that attempt, and whether it was read back.
+    record_log: list[RecordAttempt] = field(default_factory=list)
     stores: int = 0
+    #: Writes ``refuse_if`` selected, and how many of those it refused.
+    matched: int = 0
+    matched_refused: int = 0
+    #: Read-backs ``no_readback`` answered with nothing.
+    loads_hidden: int = 0
 
     @property
     def refused_count(self) -> int:
         return len(self.refusals)
+
+    def refuse(self, made: BaseException) -> BaseException:
+        self.refusals.append(made)
+        self.refusal_marks.append(self.records_ok)
+        self.refusal_passes.append(self.records)
+        return made
+
+    def final_pass_refusals(self) -> list[BaseException]:
+        return [
+            exc
+            for exc, made_in in zip(self.refusals, self.refusal_passes, strict=True)
+            if made_in == self.records
+        ]
+
+    def last_stored(self) -> tuple[BaseException, ...] | None:
+        """The last record the report carries, or None when none was stored."""
+        for attempt in reversed(self.record_log):
+            if attempt.stored:
+                return attempt.reported
+        return None
+
+
+@dataclass(frozen=True)
+class RecordAttempt:
+    reported: tuple[BaseException, ...]
+    refused_by_then: tuple[BaseException, ...]
+    stored: bool
 
 
 @contextmanager
@@ -229,45 +270,70 @@ def injected(
     *,
     refuse_writes: bool = False,
     write_ordinal: int | None = None,
+    refuse_if: Callable[[BaseException, str, object], bool] | None = None,
+    refuse_limit: int | None = None,
     refuse_record: bool = False,
     record_ordinal: int | None = None,
+    record_ordinals: Collection[int] = (),
     no_store: bool = False,
+    no_readback: bool = False,
     refusal: Callable[[], BaseException] = lambda: Failure("refused"),
 ) -> Iterator[Injection]:
     """Drive reporting's own write sites.
 
     ``refuse_writes`` refuses every chain write. ``write_ordinal`` refuses only
     the write at that 1-based ordinal, which is how a case covers the sites
-    that exist rather than a guessed list. ``no_store`` takes the record away
-    entirely, and ``refuse_record`` refuses the record write while leaving the
-    store reachable.
+    that exist rather than a guessed list. ``refuse_if`` names a write site by
+    what it writes instead, and ``refuse_limit`` caps how many of the writes it
+    selects are refused, so a site can be refused once or for good.
+    ``no_store`` takes the record away entirely, ``refuse_record`` refuses the
+    record write while leaving the store reachable, ``record_ordinals``
+    refuses the record attempts at those 1-based ordinals, and ``no_readback``
+    leaves the write accepted and makes it read back as nothing.
     """
     state = Injection()
     real_write = lifecycle._write
     real_record = lifecycle._record
     real_store = lifecycle._store
+    real_load = lifecycle._load
+
+    def selected(node: BaseException, name: str, value: object) -> bool:
+        if refuse_if is None or not refuse_if(node, name, value):
+            return False
+        state.matched += 1
+        if refuse_limit is not None and state.matched_refused >= refuse_limit:
+            return False
+        state.matched_refused += 1
+        return True
 
     def fake_write(node: BaseException, name: str, value: object) -> Any:
         state.writes += 1
-        if refuse_writes or (
-            write_ordinal is not None and state.writes == write_ordinal
+        if (
+            refuse_writes
+            or (write_ordinal is not None and state.writes == write_ordinal)
+            or selected(node, name, value)
         ):
-            made = refusal()
-            state.refusals.append(made)
-            state.refusal_marks.append(state.records_ok)
-            return made
+            return state.refuse(refusal())
         return real_write(node, name, value)
 
     def fake_record(node: BaseException, reported: Any) -> Any:
         state.records += 1
-        if refuse_record or (
-            record_ordinal is not None and state.records == record_ordinal
+        if (
+            refuse_record
+            or (record_ordinal is not None and state.records == record_ordinal)
+            or state.records in record_ordinals
         ):
             state.record_refusals += 1
-            return False, refusal()
-        answer = real_record(node, reported)
-        if answer[0]:
-            state.records_ok += 1
+            made = state.refuse(refusal())
+            state.record_refused.append(made)
+            answer: tuple[bool, BaseException | None] = (False, made)
+        else:
+            answer = real_record(node, reported)
+            if answer[0]:
+                state.records_ok += 1
+        state.record_log.append(
+            RecordAttempt(tuple(reported), tuple(state.refusals), answer[0])
+        )
         return answer
 
     def fake_store(node: BaseException) -> Any:
@@ -276,9 +342,16 @@ def injected(
             return None
         return real_store(node)
 
+    def fake_load(node: BaseException) -> object:
+        if no_readback:
+            state.loads_hidden += 1
+            return None
+        return real_load(node)
+
     monkeypatch.setattr(lifecycle, "_write", fake_write)
     monkeypatch.setattr(lifecycle, "_record", fake_record)
     monkeypatch.setattr(lifecycle, "_store", fake_store)
+    monkeypatch.setattr(lifecycle, "_load", fake_load)
     try:
         yield state
     finally:
@@ -290,6 +363,7 @@ def injected(
         monkeypatch.setattr(lifecycle, "_write", real_write)
         monkeypatch.setattr(lifecycle, "_record", real_record)
         monkeypatch.setattr(lifecycle, "_store", real_store)
+        monkeypatch.setattr(lifecycle, "_load", real_load)
 
 
 # -- running one report -------------------------------------------------------

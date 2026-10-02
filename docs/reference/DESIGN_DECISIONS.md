@@ -1225,8 +1225,14 @@ context of its own.
 **Sealed.** Everything that must survive is placed where the coming `raise` cannot reach it,
 because a `raise` inside an active `except` block replaces `__context__` on the exception it
 raises whatever that link already held. When the slot that survives the raise has been
-refused, what is left is the exception the raise itself writes into that link, so the report
-hangs under that one instead of above it.
+refused, or holds an explicit cause whose chain refuses the report, what is left is the
+exception the raise itself writes into that link, so the report hangs under that one instead
+of above it. Before the seal is written, the reported exception is taken out of every link
+into it that a walk of the graph sees, not only the printed one. A failure raised `from`
+another while the factory handles its construction failure carries a context link into that
+failure under its own cause, and such a link holds only the exception that becomes the head,
+so cutting it drops nothing. An explicit cause of the reported exception is never spliced into
+the chain under it, because the reported exception keeps that cause and reaches it already.
 
 **Hook-independent.** Reporting reads and writes only the storage the interpreter itself
 uses for these names, taken from `BaseException`, and stores its record in the real instance
@@ -1331,11 +1337,12 @@ nothing is claimed beyond five.
 
 ### 9.6 Termination and cost
 
-Reporting is bounded in passes and in write attempts. Against a surface that refuses every
-write, reporting ends after **56 attempts outside an active exception handler** and **59
-inside one**, with an ordinary refusal and with an interrupt alike. Inside a handler the
-extra attempts are the crowning and anchoring writes. A change that moves either number has
-changed behavior.
+Reporting is bounded in passes and in write attempts. It writes the record at most four
+times. Against a surface that refuses every write, with one cleanup failure, reporting ends
+after **56 attempts outside an active exception handler** and **59 inside one**, with an
+ordinary refusal and with an interrupt alike. Inside a handler the extra attempts are the
+crowning and anchoring writes. Each further cleanup failure adds write attempts and no pass.
+A change that moves either number has changed behavior.
 
 Three channel cases bound what the report can promise, measured inside an active handler and
 outside one.

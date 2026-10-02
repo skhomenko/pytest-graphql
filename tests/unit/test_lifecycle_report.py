@@ -326,7 +326,7 @@ def test_product_three_refuses_each_write_that_actually_happens() -> None:
                     f"{fresh.label}: the refusal at ordinal {ordinal} was dropped"
                 )
     assert bases == 720
-    assert runs == 2_469
+    assert runs == 2_521
     assert silent == 8
 
 

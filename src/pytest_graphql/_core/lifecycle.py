@@ -483,6 +483,14 @@ def _bypass(
     answer.
     """
     successor = _below(target, pending) if keeps else None
+    if successor is not None and successor is _read(target, "__cause__"):
+        # An explicit cause stays on `target`, which keeps the head, and the raise does
+        # not touch it, so it is reached through `target` already. Splicing it in here
+        # as well makes a second path to it, and every placement under it is then
+        # refused as a cycle.
+        successor = None
+    if not _unhook(head, target, refused, spare=spare, pending=pending):
+        return False
     for node in _rendered(head, pending=pending):
         if _read(node, "__cause__") is target:
             return False
@@ -507,6 +515,52 @@ def _bypass(
             # refused the first write has not necessarily refused this one.
             return _kept(_write(node, "__suppress_context__", True), refused)
     return True  # `target` is not on the chain
+
+
+def _unhook(
+    head: BaseException,
+    target: BaseException,
+    refused: list[BaseException],
+    *,
+    spare: BaseException | None = None,
+    pending: _Edge | None = None,
+) -> bool:
+    """Cut every link into `target` that a traceback of `head` does not print.
+
+    `_bypass` takes `target` out of the printed chain. The cycle guards ask about both
+    links, so a context link under a populated cause, or one on a node the printed
+    chain never visits, still leads back to `target` for them, and every placement
+    under `target` is then refused as a cycle. A failure raised `from` another while
+    the factory handles its construction failure carries exactly that link. It holds
+    only `target`, which is about to be the head, so cutting it drops nothing.
+
+    The walk does not pass through `target`, because what sits under the head is not
+    a path back into it. Answers False when an explicit cause leads into `target`,
+    which is never cut, or when a cut was refused.
+    """
+    shown = _rendered(head, pending=pending)
+    seen: set[int] = {id(target)}
+    queue = [head]
+    while queue:
+        node = queue.pop(0)
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        cause = _read(node, "__cause__")
+        context = _seen(node, "__context__", pending)
+        printed = _holds(shown, node) and cause is None
+        if cause is target and not printed:
+            return False
+        if context is target and not printed:
+            if node is spare or (pending is not None and node is pending[0]):
+                continue  # the coming `raise` writes this link itself
+            if not _kept(_write(node, "__context__", None), refused):
+                return False
+            context = None
+        for found in (cause, context):
+            if isinstance(found, BaseException):
+                queue.append(found)
+    return True
 
 
 def _keep(
@@ -695,14 +749,23 @@ def _seal(
     if isinstance(prior, BaseException) and (
         prior is owned or prior is below or not forced
     ):
-        _anchor(
-            primary,
-            below,
-            refused,
-            None,  # extend the explicit
-            forced=forced,
-            pending=pending,
-        )  # chain, never replace it
+        if (
+            not _anchor(
+                primary,
+                below,
+                refused,
+                None,  # extend the explicit
+                forced=forced,
+                pending=pending,
+            )  # chain, never replace it
+            and forced
+        ):
+            # The deep end of that chain is refused, and the record is not carrying
+            # the report, so the exception the coming `raise` attaches is the place
+            # that is left, exactly as when the seal itself is refused below.
+            below = _crown(
+                primary, handler, below, refused, forced=forced, pending=pending
+            )
         return below
     if _read(primary, "__suppress_context__") and not forced:
         return below  # an explicit `raise ... from None` is kept
