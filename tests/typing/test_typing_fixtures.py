@@ -96,6 +96,7 @@ def reported(tmp_path_factory: pytest.TempPathFactory) -> set[Finding]:
 def test_there_are_fixtures_to_check() -> None:
     assert {path.name for path in _FIXTURES} == {
         "derivable_transport.py",
+        "factory_callbacks.py",
         "owned_acquisition.py",
     }
 

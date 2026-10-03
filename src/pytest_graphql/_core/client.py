@@ -53,6 +53,7 @@ from pytest_graphql._core.errors import (
     GraphQLPartialDataError,
     SelectionError,
 )
+from pytest_graphql._core.factory import FakeContext, FakeNamespace, ScalarRegistry
 from pytest_graphql._core.headers import merge_headers
 from pytest_graphql._core.lifecycle import Closable, _close_all, _Owned, _report
 from pytest_graphql._core.matching.expect import ExpectNamespace
@@ -63,7 +64,6 @@ from pytest_graphql._core.middleware import (
 )
 from pytest_graphql._core.operation import assemble_operation
 from pytest_graphql._core.response import GraphQLResponse, build_response
-from pytest_graphql._core.response.materialize import ScalarParsers
 from pytest_graphql._core.schema.info import OperationKind
 from pytest_graphql._core.schema.source import IntrospectionSource, SchemaSource
 from pytest_graphql._core.selection.builder import SelectionBuilder
@@ -139,8 +139,8 @@ class ClientConfig:
     The split is B4's rule, restated in the "Constructor and configuration
     split" section of ``docs/reference/DESIGN_DECISIONS.md``: this object
     holds data, and the constructor holds objects (``transport``, ``schema``,
-    ``parsers``, ``middleware``). ``seed`` lives here and never on the client
-    constructor.
+    ``scalars``, ``fake_context``, ``middleware``). ``seed`` lives here and never
+    on the client constructor.
 
     ``include_deprecated`` defaults to ``False``, not to SPEC 3.10's ``True``:
     C1 turned it off and the design document states the current rule, so the
@@ -270,7 +270,8 @@ class GraphQLClient:
         transport: Transport,
         schema: GraphQLSchema,
         config: ClientConfig | None = None,
-        parsers: ScalarParsers | None = None,
+        scalars: ScalarRegistry | None = None,
+        fake_context: FakeContext | None = None,
         middleware: Sequence[Middleware] = (),
         auth: Auth | None = None,
         headers: Mapping[str, str] | None = None,
@@ -294,7 +295,25 @@ class GraphQLClient:
 
         self._schema = schema
         self._config = config if config is not None else ClientConfig()
-        self._parsers = parsers
+        if scalars is not None and not isinstance(scalars, ScalarRegistry):
+            raise TypeError(
+                "scalars must be a ScalarRegistry or None, got "
+                f"{type(scalars).__name__}."
+            )
+        if fake_context is not None and not isinstance(fake_context, FakeContext):
+            raise TypeError(
+                "fake_context must be a FakeContext or None, got "
+                f"{type(fake_context).__name__}."
+            )
+        # One registry serves decoding, serialization and the factory, so a
+        # scalar registered at any time is seen by all three on the next call.
+        # Clones share it, and share the context, whose unique source must be
+        # one object or two clones would each count from zero.
+        self._scalars = scalars if scalars is not None else ScalarRegistry()
+        self._fake_context = (
+            fake_context if fake_context is not None else FakeContext.standalone()
+        )
+        self._fake: FakeNamespace | None = None
         self._middleware = tuple(middleware)
         self._auth = auth
         self._headers = dict(headers or {})
@@ -336,6 +355,24 @@ class GraphQLClient:
         return self._expect
 
     @property
+    def fake(self) -> FakeNamespace:
+        """``gql.fake.Type(**overrides)``: seeded input payloads (SPEC 3.7)."""
+        if self._fake is None:
+            self._fake = FakeNamespace(
+                self._schema,
+                self._scalars,
+                global_seed=self._config.seed,
+                node_id=self._fake_context.node_id,
+                unique_source=self._fake_context.unique_source,
+            )
+        return self._fake
+
+    @property
+    def scalars(self) -> ScalarRegistry:
+        """The custom scalars this client decodes, serializes and fakes."""
+        return self._scalars
+
+    @property
     def config(self) -> ClientConfig:
         return self._config
 
@@ -368,7 +405,8 @@ class GraphQLClient:
                 transport=transport,
                 schema=self._schema,
                 config=self._config,
-                parsers=self._parsers,
+                scalars=self._scalars,
+                fake_context=self._fake_context,
                 middleware=self._middleware,
                 auth=auth,
                 headers=headers,
@@ -429,6 +467,7 @@ class GraphQLClient:
             _declared_variables(self._schema, definition, variables or {}),
             kind=definition.operation.value,
             operation_name=operation_name or "<anonymous>",
+            scalars=self._scalars,
         )
         return self._send(
             kind=_operation_kind(definition),
@@ -461,6 +500,7 @@ class GraphQLClient:
             builder=self._builder,
             operation_name=options.get("operation_name"),
             validate=bool(options.get("validate", self._config.validate)),
+            scalars=self._scalars,
         )
         response = self._send(
             kind=kind,
@@ -589,7 +629,7 @@ class GraphQLClient:
                 request=request,
                 schema=self._schema,
                 document=document,
-                parsers=self._parsers,
+                parsers=self._scalars.parsers(),
                 operation_name=operation_name,
                 duration_ms=duration_ms,
             )
@@ -849,7 +889,8 @@ def build_client(
     config: ClientConfig | None = None,
     schema: GraphQLSchema | None = None,
     schema_source: SchemaSource | None = None,
-    parsers: ScalarParsers | None = None,
+    scalars: ScalarRegistry | None = None,
+    fake_context: FakeContext | None = None,
     middleware: Sequence[Middleware] = (),
     auth: Auth | None = None,
     **config_options: Any,
@@ -888,7 +929,8 @@ def build_client(
             transport=transport,
             schema=loaded,
             config=config,
-            parsers=parsers,
+            scalars=scalars,
+            fake_context=fake_context,
             middleware=middleware,
             auth=auth,
             owns_transport=False,
@@ -911,7 +953,8 @@ def build_client(
             cleanup=cleanup,
             schema=loaded,
             config=config,
-            parsers=parsers,
+            scalars=scalars,
+            fake_context=fake_context,
             middleware=middleware,
             auth=auth,
         )

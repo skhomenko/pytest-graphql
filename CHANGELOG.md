@@ -10,6 +10,57 @@ cycle is promised.
 
 ## [Unreleased]
 
+### Added
+
+- `DeterministicRandom`, a sampler built on SHA-256 in counter mode, with `bits`,
+  `below`, `choice`, `float_unit` and `sample_string`. It does not use `random`,
+  so a seed gives the same values on every supported Python.
+- `ScalarSpec` and `ScalarRegistry` for custom scalars. `ScalarSpec.fake` takes a
+  `DeterministicRandom`. `ScalarRegistry.parsers()` gives the `name -> parse`
+  mapping that response decoding already reads.
+- `unique()`, which marks a field value that must differ on every call, every
+  xdist worker and every run. The `"email"` kind uses the reserved domain
+  `example.com`. Its state is one counter, so it does not grow with the number of
+  tests.
+- `ScalarNotRegisteredError` is exported from `pytest_graphql`. Its message shows
+  where the factory needed the scalar and a `ScalarSpec` snippet that registers it.
+- `gql.fake`: seeded input payloads for any input object type, with
+  `_required_only`, `_depth` and overrides. The seed is `ClientConfig.seed` and the
+  node id of the test. The pytest `gql` fixture supplies the node id, the run id and
+  the xdist worker id. A client built with `build_client()` makes the same data on
+  every run and unique values that differ on every run.
+- `GraphQLClient` and `build_client()` take `fake_context=`, which holds the node id
+  and the source of `unique()` values. Clones of a client share it, so their
+  `unique()` values never repeat. `client.scalars` is the client's registry.
+- Variable serialization. `ScalarSpec.serialize` now runs on every variable sent by
+  `query()`, `mutation()` and `execute()`, for custom scalars at any depth: in
+  lists, in input objects and in lists of input objects. The value on the wire must
+  be JSON. A value that is not JSON, such as a `Decimal` with no registered spec,
+  raises `ArgumentError` before anything is sent. The error names the variable path
+  and the type of the value, never repeats the value, and carries no chained
+  exception, so a message raised by `serialize` is in no traceback.
+- Golden vectors in `tests/factory/golden.json`, format 1. They are the first
+  recorded values of the seed formula, the sampler, every built-in scalar,
+  `unique()` and nested input objects. A later change to any of them is a
+  versioned change and is listed here.
+
+### Changed
+
+- `GraphQLClient(parsers=...)` and `build_client(parsers=...)` are replaced by
+  `scalars=`, a `ScalarRegistry`. One registry serves response decoding, variable
+  serialization and `gql.fake`, and a scalar registered after the client is built is
+  used on the next call. Migration: a mapping `{"Money": Decimal}` becomes
+  `ScalarRegistry([ScalarSpec(name="Money", serialize=str, fake=..., parse=Decimal)])`.
+- A variable is sent as it was serialized. Before, the value that the schema's
+  coercion returned was sent, which put a custom scalar's parser output (for
+  example a `Decimal`), an enum's internal value and a stored input field default
+  on the wire. Now an input field the caller leaves out is not sent, so the server
+  applies its default. `ID`, `Int` and `Float` values are still sent in their JSON
+  form, and a single value for a list is still sent as a list of one.
+- Field arguments of an explicit selection that hold a value with no GraphQL literal,
+  such as a `Decimal` for a custom scalar, no longer raise a `TypeError` while the
+  selection is normalized.
+
 ## [0.1.0a1] - 2026-10-03
 
 First alpha. It contains a working client, transport, response model and one

@@ -2852,3 +2852,19 @@ def test_a_one_of_default_that_breaks_its_own_rule_has_no_canonical_form() -> No
             "Query",
             schema=schema,
         )
+
+
+def test_a_non_literal_custom_scalar_value_falls_back_to_its_repr() -> None:
+    # A custom scalar accepts any Python value, and a Decimal has no GraphQL
+    # literal until its ScalarSpec.serialize runs on the variable. Rendering the
+    # argument signature must fall back to the value's repr, not raise.
+    from decimal import Decimal
+
+    from graphql import build_schema
+
+    from pytest_graphql._core.selection.normalize import _python_literal
+
+    schema = build_schema("scalar Money type Query { a(x: Money): String }")
+    type_ = schema.query_type.fields["a"].args["x"].type  # type: ignore[union-attr]
+
+    assert _python_literal(Decimal("1.5"), type_) == "<python value> Decimal('1.5')"

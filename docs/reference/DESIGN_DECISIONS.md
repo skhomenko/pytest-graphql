@@ -65,9 +65,33 @@ one table keeps the two from drifting.
 - Any keyword in the per-call option table is an option. Every other keyword is a variable.
   A schema argument whose name collides with an option is reachable only through
   `variables=`, and the error says so.
-- Every variable value is coerced against its input type after assembly. A coercion failure
-  becomes `ArgumentError` naming the path. Document validation alone does not check values,
-  so this closes the gap where a wrongly typed variable reached the network.
+- Every variable value is checked against its input type after assembly. A failure becomes
+  `ArgumentError` naming the path. Document validation alone does not check values, so this
+  closes the gap where a wrongly typed variable reached the network.
+- Variables are serialized before they are checked, on every path that sends one: `query()`,
+  `mutation()` and `execute()`, whether the value came from a keyword, from `variables=`, from
+  a generated payload or from a field argument of an explicit selection. Each custom scalar
+  with a registered `ScalarSpec` goes through its `serialize`, wherever it sits: at the top,
+  in a list or a list of lists, in an input object, or in a list of input objects. `None` is
+  left as `None`. A custom scalar with no spec keeps its value. `validate=False` does not skip
+  serialization.
+- The serialized value is the wire value. The check runs on it and never replaces it, because
+  what the schema's coercion returns is Python-side: a custom scalar's parser output, an
+  enum's internal value, a stored input field default. A built-in scalar is the one exception
+  to leaving a value alone: it goes through its own parser when that accepts the value, so
+  `5` for an `ID` is sent as `"5"`. A value it refuses stays as given, and the check reports
+  it. An enum value is its member name. A list slot takes any iterable that is not a string
+  or a mapping, and a single value becomes a list of one, as graphql-core does. An input
+  field the caller left out stays out, so the server applies its default.
+- The value put on the wire for a custom scalar must be JSON: `None`, a bool, an int, a finite
+  float, a str, a list or tuple, or a dict with str keys. The check cannot verify this,
+  because a custom scalar accepts any value, so serialization does. A value that is not JSON
+  raises `ArgumentError` before anything is sent. The message names the place
+  (`$input.lines[0].price`) and the type of the offending value, and for a scalar with no spec
+  it gives the snippet that registers one. It never repeats the value, or the message of an
+  exception raised by `serialize`, because either can hold data a test keeps out of its
+  output. The error is raised with no exception chained to it, so that message is in no
+  traceback either. The caller's value is never changed.
 
 ### Naming resolution
 
@@ -222,23 +246,45 @@ always wins. A keyword matching neither set raises `ArgumentError` listing both 
 The top-level `__all__` holds only what a user constructs, catches, annotates or calls:
 `GraphQLClient`, `ClientConfig`, `build_client`, `GraphQLTestCase`, the exception hierarchy,
 `Selection`, `Field`, `AUTO`, `SelectionPolicy`, `CyclePolicy`, `ScalarSpec`,
-`ScalarRegistry`, the matcher helpers, `unique`, the `Transport`, `SchemaSource`, `Auth` and
+`ScalarRegistry`, `DeterministicRandom`, the matcher helpers, `unique`, the `Transport`,
+`SchemaSource`, `Auth` and
 `Middleware` protocols, `BaseMiddleware`, `BearerAuth`, `HeaderAuth`, `RequestInfo`,
 `DiagnosticSnapshot`, `GraphQLResponse`, `Node`, `NodeList`, and `__version__`.
 
 Importable from their own modules, and carrying a compatibility promise only at that path:
 `OperationNamespace`, `FakeNamespace`, `ExpectNamespace`, `HttpxTransport`,
-`IntrospectionSource`, `SDLFileSource`, `RawResponse`, `CapturedErrors`, `SelectionInput`.
+`IntrospectionSource`, `SDLFileSource`, `RawResponse`, `CapturedErrors`, `SelectionInput`,
+`FakeContext`.
 
 ### Constructor and configuration split
 
-`ClientConfig` holds data. The constructor holds objects: `transport`, `schema`, `scalars`
-and `middleware`. `seed` is configuration and lives on `ClientConfig` only, never on the
-client constructor.
+`ClientConfig` holds data. The constructor holds objects: `transport`, `schema`, `scalars`,
+`fake_context` and `middleware`. `seed` is configuration and lives on `ClientConfig` only,
+never on the client constructor.
+
+`scalars` is a `ScalarRegistry`. A client without one gets an empty registry of its own, and
+reaches it through `client.scalars`. The one registry serves response decoding, variable
+serialization and `gql.fake`, and decoding reads `registry.parsers()` on every response, so a
+scalar registered at any time is seen by all three on the next call. A clone shares the
+parent's registry. There is no separate `parsers` argument.
+
+`fake_context` is a `FakeContext`: the `node_id` of the test the data is for, and the
+`UniqueSource` that holds the run id, the worker id and the one counter behind `unique()`.
+`gql.fake` is built from it and from `ClientConfig.seed`. A clone shares the same context,
+and so the same `UniqueSource`, because two sources with one run id and worker id would each
+count from zero and repeat values. A client built without one gets `FakeContext.standalone()`:
+the fixed node id `"standalone"`, so seeded data repeats between runs, and a fresh random run
+id, so `unique()` values do not. The pytest plugin gives each test's client its pytest node
+id and one `UniqueSource` per session in each process. The worker id is the xdist worker id,
+or `"main"`. The run id is the xdist run id, which every worker shares, or a new one for each
+session. The plugin reads it from `workerinput["testrunuid"]`, the key behind the `testrun_uid`
+fixture of pytest-xdist 3.8.0. That key is checked against the xdist source only. Tests
+cover it with a fake `workerinput`, and a run under a real xdist and under a rerun plugin is
+not part of the suite.
 
 `build_client()` is the standalone spelling of the same split, so the same rule decides
 where each of its keywords goes. `url`, `transport`, `cleanup`, `config`, `schema`,
-`schema_source`, `parsers`, `middleware` and `auth` are its own; every other keyword is a
+`schema_source`, `scalars`, `fake_context`, `middleware` and `auth` are its own; every other keyword is a
 `ClientConfig` field and is applied to the configuration the whole build uses, overriding
 the same field on a supplied `config`. An unknown name raises `ArgumentError` rather than
 being ignored, so a misspelled option cannot leave a client on a default the caller
@@ -562,12 +608,75 @@ setting, and not one of the numbers the calibration gate measures.
   appears in a public callback signature, `ScalarSpec.fake` included. No public signature
   accepts `random.Random`, because a caller given one could produce output that is not
   reproducible.
-- Golden vectors store the output of every built-in scalar at a fixed seed. A changed value
-  fails the suite, so any change is deliberate, versioned and recorded in the changelog.
-- `unique()` derives from run id, xdist worker id or `"main"`, node id, field path, and a
-  monotonic per-process counter kept per node id and field path. Repeated calls in one test
-  differ, and values differ across workers. Reproducibility and uniqueness are mutually
-  exclusive by design.
+- Golden vectors store the output of every built-in scalar, of the seed formula, of the
+  sampler, of `unique()` and of nested input objects, at fixed inputs, in
+  `tests/factory/golden.json`. The test compares text byte for byte on every supported
+  Python. A changed value fails the suite, so any change is deliberate, versioned and recorded
+  in the changelog. The file is never regenerated to make a failing test pass.
+- Every hashed input has one documented byte format, stated in the module that hashes it
+  (`seed.py`, `rng.py`, `unique.py`). Nothing that reaches output uses `random`, the builtin
+  `hash()`, iteration over a set, a default byte order, or the printed form of a float.
+- The seed text is encoded as UTF-8 with `surrogatepass`. This gives the same bytes as
+  `.encode()` for every text that `.encode()` accepts, and gives a lone surrogate from an
+  undecodable file name a seed instead of an exception.
+- `DeterministicRandom(seed, *path)` takes a seed in `[0, 2**64)` and a path. Its stream is
+  `sha256(domain + seed + encoded path)` as a key, then `sha256(key + counter)` for
+  counter 0, 1, 2 and so on. `below(n)` is rejection sampling on `(n - 1).bit_length()` bits,
+  never a remainder. `float_unit()` is exactly 53 bits divided by `2**53`. `sample_string`
+  draws one character per index from its alphabet, which defaults to lowercase letters and
+  digits.
+- `unique(kind=None)` returns a marker. The factory replaces it with a value derived from run
+  id, xdist worker id or `"main"`, node id, field path and one monotonic per-process counter.
+  `kind` is `None`, `"string"` or `"email"`. The email domain is `example.com`, which RFC
+  2606 reserves, so a value never reaches a real mailbox. Repeated calls in one test differ,
+  and values differ across workers and across runs. Reproducibility and uniqueness are
+  mutually exclusive by design.
+- The `unique()` counter is one integer for the whole process. It is not kept per node id and
+  field path, because such a table gains a row for every test and field and never releases
+  one, which breaks the bounded-state rule. A rerun of one node id in one process, such as a
+  rerun plugin makes, still gets new values, which a counter reset for each test would not
+  give. A test holds the bound by showing that the state is only scalars and that memory does
+  not grow with the number of node ids and paths.
+- The factory core takes the global seed, the node id and a `UniqueSource` (run id and worker
+  id) as explicit arguments, and reads no environment, clock or global state. A client supplies
+  them from `ClientConfig.seed` and its `FakeContext` (section 3, "Constructor and
+  configuration split").
+
+### Input factory rules
+
+- `gql.fake.<Name>` reaches every input object type of the schema, and a name that GraphQL
+  allows is never shadowed. The namespace has no attribute of its own besides one under a
+  reserved `__` name, because GraphQL reserves that prefix and no type can use it.
+- A payload is a plain `dict` with the exact schema field names, in schema order. The exact
+  names are the one spelling that both `**payload` and `input=payload` accept, and two
+  snake_case forms can collide where exact names cannot.
+- An override key may be the exact name or its snake_case form, under the naming rules of
+  section 2. An unknown key raises `SelectionError`, and two spellings of one field raise
+  `SelectionError`. An override replaces the whole field value, a nested one included, and a
+  `unique()` marker inside it is resolved at its own path.
+- Every value draws from its own `DeterministicRandom`, keyed by the seed and the full field
+  path, and the path starts with the input type name. A field keeps its value when another
+  field is skipped, added or overridden. Two calls with the same inputs return equal
+  payloads, so a value that must differ between calls uses `unique()`.
+- A non-null field is always filled. A nullable field is filled unless `_required_only` is
+  set. A nullable field that is filled holds a value, never `null`. Deprecation is ignored.
+- An enum value is picked by the sampler from the member names sorted by code point, so the
+  pick does not depend on declaration order or on a server that reorders its enum.
+- The root input object is level 0, a nested input object is one level deeper than its
+  parent, and a list adds no level. Objects at levels 0 to `_depth` (default 2) are filled in
+  full. Objects at deeper levels are filled with required fields only, which cuts a recursive
+  type at the cap and still builds a required nested object. A recursive type therefore nests
+  `_depth + 2` objects at most.
+- A list gets one to three elements.
+- A custom scalar resolves through the `ScalarRegistry`. The lookup happens only for a field
+  that would be filled and not overridden, so `_required_only` and an override never raise
+  for an unregistered scalar. The factory returns the value `fake` produced, without calling
+  `serialize`. Serialization belongs to the variable send path (section 2, "Variables and
+  options"), which also covers values a user supplies, so a payload may be edited and asserted
+  on as Python values.
+- Built-in scalar values: `String` is 8 characters of lowercase letters and digits, `ID` is 12
+  lowercase hexadecimal characters, `Int` is an integer from 1 to 1000, `Float` is a whole
+  count from 0 to 99999 divided by 100, and `Boolean` is one draw of two.
 
 ### Scalars
 
@@ -582,6 +691,22 @@ class ScalarSpec:
     fake: Callable[[DeterministicRandom], Any]      # factory value
     parse: Callable[[Any], Any] | None = None       # JSON to Python, for responses
 ```
+
+- `ScalarRegistry` is the one place specs are kept. It offers `register(spec, *, replace=False)`,
+  `get(name)`, `parsers()`, membership, iteration in sorted name order, and `len`. A second
+  registration of one name raises `ValueError` unless `replace=True`, because two
+  registrations of one name are usually two plugins that disagree.
+- `parsers()` returns a snapshot of `name -> parse` for the specs that decode. It is the
+  mapping the response materializer reads, and the client takes a new snapshot for each
+  response, so decoding, serialization and the factory share one registry and the package has
+  no second scalar spec type.
+- The five scalars the GraphQL specification defines are never registered. A spec cannot take
+  one of their names, because the package generates them.
+- A spec checks itself when it is built: the name is a GraphQL name that does not start with
+  `__`, and `serialize`, `fake` and a given `parse` are callable.
+- `ScalarNotRegisteredError` names the scalar, the place the factory needed it (type, field
+  names and list indices), the `ScalarSpec` snippet that registers it, and the field to
+  override instead.
 
 ---
 

@@ -1,0 +1,233 @@
+{
+  "format": 1,
+  "inputs": {
+    "CreateUserInput": {
+      "active": false,
+      "age": 491,
+      "height": {
+        "float": "0x1.32f70a3d70a3dp+9"
+      },
+      "name": "2a6f41u7",
+      "nickname": "5de7ro9b",
+      "profile": {
+        "address": {
+          "city": "1kmktwxf",
+          "country": "GUEST",
+          "street": "45z94ng7",
+          "zip": "jlwsyjrw"
+        },
+        "bio": "wz6jb9dl",
+        "matrix": [
+          [
+            774,
+            993
+          ],
+          [
+            42
+          ]
+        ],
+        "maybes": [
+          "sidn5cy1",
+          "jaj1mdqj",
+          "ysafuqxt"
+        ],
+        "previous": {
+          "city": "5dqjep9d",
+          "country": "VIEWER",
+          "street": "hf099ipl",
+          "zip": "2h1c9zbs"
+        },
+        "scores": [
+          416,
+          677
+        ],
+        "tags": [
+          "nn1cy7se",
+          "5b7m0qek"
+        ]
+      },
+      "ref": "4c26f0a0a3e6",
+      "role": "VIEWER",
+      "secondaryRole": "GUEST"
+    },
+    "CreateUserInput_required_only": {
+      "active": false,
+      "age": 491,
+      "name": "2a6f41u7",
+      "ref": "4c26f0a0a3e6",
+      "role": "VIEWER"
+    },
+    "PricedInput": {
+      "name": "3mm0r8de",
+      "price": "613077"
+    },
+    "StampedInput": {
+      "at": 2404743995,
+      "items": [
+        4197208905
+      ]
+    },
+    "TreeInput_depth_1": {
+      "children": [
+        {
+          "children": [
+            {
+              "label": "67j41kvl"
+            },
+            {
+              "label": "o3xqnqq4"
+            },
+            {
+              "label": "lhab413y"
+            }
+          ],
+          "label": "33u20qhn",
+          "parent": {
+            "label": "zb23uec1"
+          },
+          "tags": [
+            "x2h84tcr"
+          ]
+        }
+      ],
+      "label": "2co2bvty",
+      "parent": {
+        "children": [
+          {
+            "label": "wyji9dmj"
+          },
+          {
+            "label": "mq4dj203"
+          }
+        ],
+        "label": "3vdsfyey",
+        "parent": {
+          "label": "e4n40alx"
+        },
+        "tags": [
+          "ip51arbs",
+          "s6vr7n6f"
+        ]
+      },
+      "tags": [
+        "vapp775y",
+        "0rf8iao7"
+      ]
+    }
+  },
+  "sampler": {
+    "below_1": [
+      0,
+      0,
+      0
+    ],
+    "below_1000": [
+      227,
+      620,
+      293,
+      257,
+      18,
+      462
+    ],
+    "below_256": [
+      196,
+      148,
+      205,
+      141,
+      214,
+      115
+    ],
+    "below_2_70": [
+      963306325398361359014,
+      459137886041503193822,
+      979160020259985021660
+    ],
+    "below_3": [
+      2,
+      0,
+      2,
+      1,
+      0,
+      0,
+      0,
+      1,
+      1,
+      1,
+      0,
+      0
+    ],
+    "below_5": [
+      0,
+      0,
+      4,
+      3,
+      1,
+      1,
+      3,
+      3,
+      3,
+      3,
+      1,
+      0
+    ],
+    "bits_200": 971956604420251128420953917217800350979657520498420272661211,
+    "bits_64": 6691614477104455025,
+    "bits_7": 75,
+    "choice": "d",
+    "float_unit": [
+      {
+        "float": "0x1.cc7ae7a20872cp-3"
+      },
+      {
+        "float": "0x1.be15ce51bc190p-5"
+      },
+      {
+        "float": "0x1.b4ebc9428df8ap-1"
+      }
+    ],
+    "sample_string_8": "c4zv7cgj",
+    "sample_string_ab": "aaabbabaaaba"
+  },
+  "scalars": {
+    "Boolean": true,
+    "Float": {
+      "float": "0x1.fea8f5c28f5c3p+7"
+    },
+    "ID": "226f5461897e",
+    "Int": 498,
+    "String": "qfv9fxs4"
+  },
+  "seeds": [
+    {
+      "derived": 10921954168542581337,
+      "global_seed": 0,
+      "node_id": "tests/test_a.py::test_one"
+    },
+    {
+      "derived": 12469997269336330434,
+      "global_seed": 42,
+      "node_id": "tests/test_a.py::test_one"
+    },
+    {
+      "derived": 16498388624318395347,
+      "global_seed": 0,
+      "node_id": ""
+    },
+    {
+      "derived": 16404053735927228982,
+      "global_seed": -1,
+      "node_id": "x"
+    },
+    {
+      "derived": 2580685048498743698,
+      "global_seed": 7,
+      "node_id": "tests/\u00fcn\u00ef.py::t[\u00e4-1]"
+    }
+  ],
+  "unique": {
+    "email": "u231db23a7d571675@example.com",
+    "next": "u59bccb4b51ce1fea",
+    "string": "u5368514c52d07621",
+    "via_factory": "u5368514c52d07621"
+  }
+}

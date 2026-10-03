@@ -1340,7 +1340,14 @@ def _canonical_python(value: Any, type_: GraphQLInputType) -> str | None:
     """The canonical form of a Python argument value, or ``None`` if it has none."""
     if not _declares_every_key(value, type_):
         return None
-    node = ast_from_value(value, type_)
+    try:
+        node = ast_from_value(value, type_)
+    except (TypeError, ValueError, GraphQLError):
+        # A custom scalar accepts any Python value, so a value such as a
+        # `Decimal` has no literal until its `serialize` runs, which happens
+        # later, on the variable. It has no canonical form here, and the
+        # caller falls back to the value's own repr.
+        return None
     if node is None:
         return None
     return _canonical_literal(node, type_)

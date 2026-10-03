@@ -72,6 +72,7 @@ from pytest_graphql._core.errors import (
     OperationNotFoundError,
     SelectionError,
 )
+from pytest_graphql._core.factory.scalars import ScalarRegistry
 from pytest_graphql._core.naming import NameMap, field_signature
 from pytest_graphql._core.schema.info import OperationKind, operation_names, root_type
 from pytest_graphql._core.selection.builder import GeneratedVariable, SelectionBuilder
@@ -326,6 +327,7 @@ def assemble_operation(
     builder: SelectionBuilder,
     operation_name: str | None = None,
     validate: bool = True,
+    scalars: ScalarRegistry | None = None,
 ) -> AssembledOperation:
     """Build, and by default validate, one operation document.
 
@@ -454,6 +456,7 @@ def assemble_operation(
         ((variable.name, variable.type_, variable.value) for variable in all_variables),
         kind=kind,
         operation_name=resolved_field_name,
+        scalars=scalars,
     )
     return AssembledOperation(
         document=document,

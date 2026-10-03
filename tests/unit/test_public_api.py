@@ -17,10 +17,11 @@ import pytest
 import pytest_graphql
 
 #: Every documented top-level name the implemented milestones now owe. The
-#: rest of the documented surface (`GraphQLTestCase`, `ScalarRegistry`,
-#: `ScalarSpec`, `unique`, and the full exception hierarchy) lands with the
-#: milestones that implement it. The matcher helpers arrived with M6, minus
-#: `approx`, which D4 dropped.
+#: rest of the documented surface (`GraphQLTestCase` and the full exception
+#: hierarchy) lands with the milestones that implement it. The matcher helpers
+#: arrived with M6, minus `approx`, which D4 dropped. The factory surface
+#: (`DeterministicRandom`, `ScalarRegistry`, `ScalarSpec`, `unique` and the
+#: `ScalarNotRegisteredError` it raises) arrived with M7.
 IMPLEMENTED_SURFACE = (
     "AUTO",
     "Auth",
@@ -28,6 +29,7 @@ IMPLEMENTED_SURFACE = (
     "BearerAuth",
     "ClientConfig",
     "CyclePolicy",
+    "DeterministicRandom",
     "DiagnosticSnapshot",
     "Field",
     "GraphQLClient",
@@ -38,6 +40,9 @@ IMPLEMENTED_SURFACE = (
     "Node",
     "NodeList",
     "RequestInfo",
+    "ScalarNotRegisteredError",
+    "ScalarRegistry",
+    "ScalarSpec",
     "SchemaSource",
     "Selection",
     "SelectionPolicy",
@@ -55,6 +60,7 @@ IMPLEMENTED_SURFACE = (
     "lte",
     "matches",
     "one_of",
+    "unique",
     "unordered",
 )
 

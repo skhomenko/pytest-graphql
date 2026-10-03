@@ -34,7 +34,9 @@ from graphql import (
 from graphql.utilities import coerce_input_value
 
 from pytest_graphql._core.errors import ArgumentError, SelectionError
+from pytest_graphql._core.factory.scalars import ScalarRegistry
 from pytest_graphql._core.naming import field_signature, to_snake
+from pytest_graphql._core.serialization import SerializationError, serialize_variable
 
 #: SPEC 3.2's per-call option table. A keyword here is an option, however
 #: ``query``/``mutation``/``execute`` receive it; every other keyword is a
@@ -124,19 +126,37 @@ def coerce_variables(
     *,
     kind: str,
     operation_name: str,
+    scalars: ScalarRegistry | None = None,
 ) -> dict[str, Any]:
-    """B14: coerce every variable's value against its declared type.
+    """B14: serialize every variable, then check it against its declared type.
 
     ``graphql-core``'s ``validate`` checks the document only, so a value
     like ``id: {"x": 1}`` for an ``ID!`` variable passes it untouched. This
     is the gap B14 closes: every value is coerced here, and any violation
     becomes an ``ArgumentError`` naming the path graphql-core's own message
     already describes.
+
+    Serialization comes first, so validation checks the value that will be
+    sent. Each custom scalar with a registered ``ScalarSpec`` goes through its
+    ``serialize``, and a value a custom scalar would put on the wire that is
+    not JSON is refused here (``serialization.py``). Coercion is only the
+    check. Its result is a Python-side value (a scalar's parser output, an
+    enum's internal value, a stored default), so it is dropped, and the
+    serialized value is what is returned and sent.
     """
-    coerced: dict[str, Any] = {}
+    wire: dict[str, Any] = {}
     for name, type_, value in variables:
         try:
-            coerced[name] = coerce_input_value(value, type_)
+            serialized = serialize_variable(value, type_, scalars, name)
+        except SerializationError as error:
+            raise ArgumentError.invalid_value(
+                kind=kind,
+                operation_name=operation_name,
+                arg_name=name,
+                detail=str(error),
+            ) from None
+        try:
+            coerce_input_value(serialized, type_)
         except GraphQLError as error:
             raise ArgumentError.invalid_value(
                 kind=kind,
@@ -144,4 +164,5 @@ def coerce_variables(
                 arg_name=name,
                 detail=error.message,
             ) from error
-    return coerced
+        wire[name] = serialized
+    return wire
