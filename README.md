@@ -4,21 +4,59 @@ Schema-aware GraphQL API testing for pytest.
 
 ## Status
 
-Early development. The package is being built milestone by milestone, and this
-release contains the packaging skeleton only. There is no client, no transport
-and no fixture yet. Install it today only if you want to track the work.
+Alpha. This release contains a working client, an `httpx` transport, a response
+model and one pytest fixture. The API may still change before `0.1.0`.
 
-What is planned for `0.1.0`, in the order it lands:
+What `0.1.0a1` contains:
 
-- A GraphQL client that reads your schema and builds selection sets for you.
-- An `httpx` transport with explicit timeout, retry and limit settings.
-- A response model with clear failure output, including a redacted request
-  summary and a reproducible `curl` command.
-- One pytest fixture, then the full plugin: ini options, CLI flags and hooks.
-- Response matching, deterministic fake data, error assertions and polling.
+- `GraphQLClient` and `build_client()`. The client reads your schema and builds
+  the selection set for an operation. By default it checks the operation
+  against the schema before it sends anything, and `validate=False` turns that
+  check off. Arguments and fields are snake_case in Python and use the schema's
+  own names on the wire.
+- An `httpx` transport with explicit timeout, retry and response size limits.
+  With this transport, tests share one connection pool and each client keeps
+  its own cookie jar. A transport you supply manages its own connections and
+  cookies.
+- A response model. Failures carry a redacted summary of the request.
+  `RequestInfo.as_curl()`, available to middleware, renders a `curl` command
+  that reproduces a request, with credentials replaced by placeholders.
+- Bearer and header auth, and request middleware.
+- The pytest fixtures `gql`, `gql_url` and `gql_transport`, and the
+  `--gql-url` flag. The schema loads once per session, and each test gets its
+  own client.
 
-The changelog records what each release actually contains:
+Not in this release yet: ini options, environment variables and hooks, response
+matching, fake data, error assertions and polling.
+
+The changelog records what each release contains:
 https://github.com/skhomenko/pytest-graphql/blob/main/CHANGELOG.md
+
+## Usage
+
+With pytest, pass the endpoint on the command line:
+
+```
+pytest --gql-url=http://localhost:8000/graphql
+```
+
+```python
+def test_user_has_a_name(gql):
+    user = gql.query("user", id="123")
+    assert user.name
+```
+
+For a URL known only at run time, override the `gql_url` fixture in your
+`conftest.py`. The `--gql-url` flag still wins when both are given.
+
+Without pytest, use `build_client()`, and close the client when you are done:
+
+```python
+from pytest_graphql import build_client
+
+with build_client(url="http://localhost:8000/graphql") as gql:
+    user = gql.query("user", id="123")
+```
 
 ## Install
 
