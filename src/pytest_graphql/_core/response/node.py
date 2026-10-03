@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from graphql import GraphQLNamedType, SelectionSetNode
 
-from pytest_graphql._core.errors import GraphQLFieldError
+from pytest_graphql._core.errors import GraphQLFieldError, GraphQLTestError
 from pytest_graphql._core.naming import NameMap
 
 if TYPE_CHECKING:
@@ -162,6 +162,40 @@ class Node(Mapping[str, Any]):
 class NodeList(list[Any]):
     """A list whose elements are ``Node`` values (or nested lists of them)."""
 
+    def where(self, *, strict: bool = False, **filters: Any) -> NodeList:
+        """The elements that match every filter, as a new ``NodeList``.
+
+        A filter is a plain value or a matcher. It is partial by default: an
+        element matches when each named field matches, and its other fields
+        are ignored. ``strict=True`` also requires the element to carry
+        exactly the named fields. An element that is not a ``Node`` never
+        matches. Counting happens after filtering, so ``len(users.where(...))``
+        is the number of matches.
+        """
+        from pytest_graphql._core.matching.objects import field_filter
+
+        wanted = field_filter(filters, strict=strict)
+        return NodeList(
+            element
+            for element in self
+            if isinstance(element, Node) and wanted.accepts(element)
+        )
+
+    def one(self, *, strict: bool = False, **filters: Any) -> Any:
+        """The only element that matches the filters.
+
+        Raises ``GraphQLTestError`` unless exactly one element matches, and
+        names how many did. It never prints a response value.
+        """
+        found = self.where(strict=strict, **filters)
+        if len(found) != 1:
+            named = f" Filters: {', '.join(filters)}." if filters else ""
+            raise GraphQLTestError(
+                f"one() needs exactly 1 matching element, found {len(found)} "
+                f"of {len(self)}.{named}"
+            )
+        return found[0]
+
     def pluck(self, path: str, default: Any = MISSING) -> list[Any]:
         """``path`` read from every element; ``default`` fills a missing one."""
         return [at_path(element, path, default) for element in self]
@@ -171,6 +205,26 @@ class NodeList(list[Any]):
 
     def at(self, path: str, default: Any = MISSING) -> Any:
         return at_path(self, path, default)
+
+
+def resolve_key(node: Node, name: object) -> str | None:
+    """The response key ``name`` names on ``node``, or ``None`` when it has none.
+
+    Exact and snake_case spellings both resolve, like ``Node.__getitem__``. A
+    snake spelling that two keys share raises ``GraphQLFieldError``, as
+    reading it would.
+    """
+    if not isinstance(name, str):
+        return None
+    names = node._name_map()
+    exact = names.get(name)
+    if exact is not None:
+        return exact
+    if names.is_ambiguous(name):
+        raise GraphQLFieldError.ambiguous(
+            node.__typename__ or node._named.name, name, names.ambiguous_names(name)
+        )
+    return None
 
 
 def at_path(root: Any, path: str, default: Any = MISSING) -> Any:

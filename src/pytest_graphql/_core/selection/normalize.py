@@ -529,10 +529,8 @@ class _Collector:
         if resolved is None:
             name_map = NameMap.build(available)
             if name_map.is_ambiguous(written):
-                raise SelectionError(
-                    f"{written!r} is ambiguous on {parent_type.name}: it "
-                    f"matches {', '.join(name_map.ambiguous_names(written))}.\n"
-                    "  Use the exact field name."
+                raise SelectionError.ambiguous_field(
+                    parent_type.name, written, name_map.ambiguous_names(written)
                 )
             raise SelectionError.unknown_field(parent_type.name, written, available)
         return resolved, parent_type.fields[resolved]

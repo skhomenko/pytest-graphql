@@ -113,6 +113,11 @@ known-first-party = ["pytest_graphql"]
 # checker. Their test runs mypy over them, so a real undefined name there is
 # still reported, as a `name-defined` error with no marker.
 "tests/typing/*.py" = ["F821"]
+# Every matcher overrides one `describe(show, depth)` and one `_check`/`_test`
+# signature, and most leaf matchers need only some of those arguments. The
+# detail callables of a failure take the `show` they are handed for the same
+# reason.
+"src/pytest_graphql/_core/matching/*.py" = ["ARG002", "ARG005"]
 
 [tool.mypy]
 python_version = "3.10"

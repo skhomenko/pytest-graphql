@@ -286,6 +286,17 @@ class SelectionError(GraphQLClientError):
         return cls("\n".join(lines))
 
     @classmethod
+    def ambiguous_field(
+        cls, type_name: str, bad_name: str, spellings: Sequence[str]
+    ) -> SelectionError:
+        """A snake spelling that two or more schema fields share."""
+        return cls(
+            f"{bad_name!r} is ambiguous on {type_name}: it matches "
+            f"{', '.join(spellings)}.\n"
+            "  Use the exact field name."
+        )
+
+    @classmethod
     def from_validation(cls, message: str) -> SelectionError:
         """Wrap a graphql-core document-validation message, verbatim."""
         return cls(message)

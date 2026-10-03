@@ -951,6 +951,16 @@ def _path_matches_any(patterns: Sequence[str], path: tuple[str, ...]) -> bool:
     return False
 
 
+def path_is_redacted(patterns: Sequence[str], path: Sequence[str]) -> bool:
+    """Whether a response path matches one of ``patterns`` (section 7).
+
+    The same rule ``redact_variables`` applies to variables: names are
+    compared in snake_case, and a pattern matches a tail of the path. Callers
+    that must hide a whole subtree test every prefix of the path.
+    """
+    return _path_matches_any(patterns, tuple(to_snake(segment) for segment in path))
+
+
 def _normalize_header_name(name: str) -> str:
     return name.strip().lower()
 
