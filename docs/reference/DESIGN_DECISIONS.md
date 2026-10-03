@@ -1496,6 +1496,16 @@ A no-pytest job installs without the `pytest` extra, imports the package, builds
 a fake transport, and asserts `pytest` is absent from `sys.modules`. The client half of that
 check applies from the point where a client exists.
 
+### Runtime dependency bounds
+
+`graphql-core` is declared as `>=3.2,<3.3`. `docs/reference/SPEC.md` section 9 allows
+`<4`, but graphql-core 3.3.0 changed the types the selection and validation layers rely
+on: field `arguments` may be `None`, and variable coercion behaves differently. The suite
+fails on 3.3. An upper bound the suite does not pass would let an installer choose a
+version this project knows to be broken, so the bound stays at `<3.3` until the code and
+the suite support 3.3. Raising it is one change that edits this section, the metadata and
+the lock file together.
+
 ### Operating systems
 
 Linux, macOS and Windows are supported, which is what `docs/reference/SPEC.md` section 9
