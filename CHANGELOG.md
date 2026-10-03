@@ -15,6 +15,9 @@ cycle is promised.
 First alpha. It contains a working client, transport, response model and one
 pytest fixture.
 
+It requires `graphql-core` 3.2. graphql-core 3.3 is not supported yet, and the
+dependency is declared as `>=3.2,<3.3` so that an install never selects it.
+
 ### Added
 
 - `GraphQLClient`, `ClientConfig` and `build_client()`. `query()` and
