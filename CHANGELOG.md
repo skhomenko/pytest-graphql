@@ -10,7 +10,7 @@ cycle is promised.
 
 ## [Unreleased]
 
-## [0.1.0a1] - 2026-10-02
+## [0.1.0a1] - 2026-10-03
 
 First alpha. It contains a working client, transport, response model and one
 pytest fixture.
