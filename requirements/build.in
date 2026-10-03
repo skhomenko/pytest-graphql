@@ -1,3 +1,7 @@
-# The direct build dependency. requirements/build.txt is the compiled, pinned
+# The direct build dependencies. requirements/build.txt is the compiled, pinned
 # form of this file and is what the workflows use.
 hatchling==1.32.4
+# hatchling needs tomli on Python 3.10. It is listed here, not left only as a
+# transitive pin, because a Dependabot recompile dropped that transitive pin
+# once (PR 17), and a direct entry keeps it in the compiled file.
+tomli; python_version < "3.11"
