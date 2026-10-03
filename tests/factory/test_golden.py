@@ -53,12 +53,14 @@ def test_a_fresh_process_with_another_hash_seed_gives_the_same_text(
 ) -> None:
     # Python salts `hash()` and set order per process. A different
     # PYTHONHASHSEED therefore changes any output that leans on either, which
-    # the same-process comparison above cannot see.
+    # the same-process comparison above cannot see. The text goes out as bytes,
+    # because a text stream on Windows turns each LF into CRLF.
     result = subprocess.run(
         [
             sys.executable,
             "-c",
-            "from tests.factory.golden_support import render; print(render(), end='')",
+            "import sys; from tests.factory.golden_support import render; "
+            "sys.stdout.buffer.write(render().encode('utf-8'))",
         ],
         capture_output=True,
         check=True,
