@@ -672,6 +672,61 @@ compares raw dicts. `node == Matcher` returns `NotImplemented`.
 - `count` applies after filters. `NodeList.where()` returns a filtered `NodeList`, and a
   `count=` assertion counts that filtered result.
 
+Matcher comparison rules the list above leaves open:
+
+- A boolean never equals a number. `contains(1)` does not match `[True]`, and `one_of(1)`
+  does not match `true`, although Python says `True == 1`.
+- A plain `dict` inside a matcher is a nested partial match and a plain `list` is positional
+  with equal length. Neither is schema-validated.
+- The type name of an `expect` matcher is checked against the response object's runtime type
+  name. An interface or union matcher accepts every possible type. `__typename` is always a
+  valid field name to match, including on a union, which has no other fields.
+- `matches` is a regular-expression search, so anchors are the author's to write. It matches
+  strings only.
+- `gt`, `gte`, `lt` and `lte` compare numbers, dates and strings, so ISO date strings order
+  correctly. A boolean is not a number. A value that cannot be ordered against the bound
+  does not match and does not raise.
+- `NodeList.where` ignores an element that is not a `Node`. A filter name resolves like a
+  `Node` key, exact or snake case. `where` and `one` take no `count` argument. Counting is
+  `len()` of the filtered list, and any `count=` assertion counts that same list. `strict`
+  is a keyword of `where` and `one`, so a field of that name is filtered through a nested
+  matcher on the element instead.
+- `contains` and `unordered` build one table of item and element pair results before they
+  match. The table is capped at `MAX_MATCH_PAIRS` (one million pairs), and a larger call
+  raises `GraphQLTestError` and names `where()` as the way to narrow the list first.
+- A matcher's `repr` names its type and its field names only, never an expected value,
+  like `Node`. `one()` names filter fields and counts, never a response value.
+- `gql.expect` is reachable as `client.expect`. A type with no selectable fields (an enum,
+  an input object or a scalar) raises `SchemaError` when `gql.expect.<Name>` is read.
+
+### Matcher diff
+
+`Matcher.explain(actual)` returns the lines of the SPEC 7.5 matcher diff, or an empty list
+when the value matches. The lines keep the SPEC's own indent, so the `pytest_assertrepr_compare`
+hook adds only the `assert` line above them.
+
+- A compared field is one leaf comparison: a scalar, a helper, or a list-level matcher such
+  as `contains`. A nested object contributes its own fields, not itself. The title counts
+  compared fields and the compared fields that differ.
+- An ignored field is a field of a compared object that the matcher did not name. Fields
+  below an ignored field are not counted. A field whose type name check fails stops the
+  comparison of that object.
+- Differing leaves print as `path  actual  !=  expected`, in comparison order. The path
+  column is padded to the longest path plus three spaces, and the actual column to the
+  widest actual value. A missing field prints as `<missing>`. An object or a list prints as
+  a summary (`User(id, name)`, `[2 items]`, `{3 fields}`), never as its content.
+- The matched leaves print on one `matched:` line.
+- The listing is bounded: `max_lines` differences (default 50), each value cut at
+  `max_value_bytes` (default 200) with a visible byte count, and `max_matched` names
+  (default 50). The counts in the title stay exact, and each cut says how many entries it
+  left out.
+- Every printed value follows section 7: scrub, then escape control characters, then
+  truncate. A string is scrubbed before `repr` quotes it, because `repr` doubles backslashes
+  and escapes quotes, and the quoted form is scrubbed again. A field whose path matches
+  `redact_variables`, or sits below a path that does, prints `[redacted]` on both sides and
+  no detail lines. When the options carry a diagnostic snapshot, the finished text is checked
+  against it and the renderer raises `DiagnosticRenderError` if a secret is still in it.
+
 ### Polling
 
 `wait_until` computes its deadline once from `time.monotonic()`. An attempt is counted when

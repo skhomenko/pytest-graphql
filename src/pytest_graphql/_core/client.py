@@ -55,6 +55,7 @@ from pytest_graphql._core.errors import (
 )
 from pytest_graphql._core.headers import merge_headers
 from pytest_graphql._core.lifecycle import Closable, _close_all, _Owned, _report
+from pytest_graphql._core.matching.expect import ExpectNamespace
 from pytest_graphql._core.middleware import (
     Middleware,
     apply_after_response,
@@ -303,6 +304,7 @@ class GraphQLClient:
             else DiagnosticsRecorder(self._config.max_recorded_calls)
         )
         self._builder = builder if builder is not None else SelectionBuilder(schema)
+        self._expect: ExpectNamespace | None = None
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -325,6 +327,13 @@ class GraphQLClient:
     @property
     def schema(self) -> GraphQLSchema:
         return self._schema
+
+    @property
+    def expect(self) -> ExpectNamespace:
+        """``gql.expect.Type(**fields)``: matchers checked against the schema."""
+        if self._expect is None:
+            self._expect = ExpectNamespace(self._schema)
+        return self._expect
 
     @property
     def config(self) -> ClientConfig:

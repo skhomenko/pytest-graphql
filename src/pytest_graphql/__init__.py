@@ -25,6 +25,21 @@ from pytest_graphql._core.errors import (
     GraphQLFieldError,
     ResponseShapeError,
 )
+from pytest_graphql._core.matching import (
+    Matcher,
+    absent,
+    any_length,
+    any_value,
+    contains,
+    gt,
+    gte,
+    length,
+    lt,
+    lte,
+    matches,
+    one_of,
+    unordered,
+)
 from pytest_graphql._core.middleware import BaseMiddleware, Middleware
 from pytest_graphql._core.response import GraphQLResponse, Node, NodeList
 from pytest_graphql._core.schema.source import SchemaSource
@@ -46,6 +61,7 @@ __all__ = [
     "GraphQLFieldError",
     "GraphQLResponse",
     "HeaderAuth",
+    "Matcher",
     "Middleware",
     "Node",
     "NodeList",
@@ -56,7 +72,19 @@ __all__ = [
     "SelectionPolicy",
     "Transport",
     "__version__",
+    "absent",
+    "any_length",
+    "any_value",
     "build_client",
+    "contains",
+    "gt",
+    "gte",
+    "length",
+    "lt",
+    "lte",
+    "matches",
+    "one_of",
+    "unordered",
 ]
 
 __version__ = "0.1.0a1"
