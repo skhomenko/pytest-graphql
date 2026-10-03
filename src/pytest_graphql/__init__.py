@@ -59,4 +59,4 @@ __all__ = [
     "build_client",
 ]
 
-__version__ = "0.1.0a1.dev0"
+__version__ = "0.1.0a1"

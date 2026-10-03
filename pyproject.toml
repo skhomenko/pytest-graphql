@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "pytest-graphql"
 dynamic = ["version"]
-description = "Schema-aware GraphQL API testing for pytest: fixtures, assertions and clear failure diagnostics."
+description = "Schema-aware GraphQL API testing for pytest: a GraphQL client, an httpx transport and a pytest fixture."
 readme = "README.md"
 # The upper bound is the compatibility promise in the compatibility section of
 # docs/reference/DESIGN_DECISIONS.md, which is Python 3.10 through 3.14. An
