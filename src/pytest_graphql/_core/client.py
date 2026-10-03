@@ -100,6 +100,34 @@ def _derivation_of(transport: Transport) -> Callable[[], Transport] | None:
     return None
 
 
+def _client_over(
+    transport: Transport, build: Callable[[Transport, bool], GraphQLClient]
+) -> GraphQLClient:
+    """A client over ``transport``, or over a transport derived from it.
+
+    ``build`` receives the transport the client holds and whether the client
+    owns it. Over a derivable transport that is a fresh derived transport the
+    client owns; over any other it is ``transport`` itself, owned by nobody
+    here. A derived transport is adopted by a cleanup list before it is
+    derived (9.2), and the list is swept through the one sweep and report
+    (9.3) if anything raises before the client exists, so a failing
+    ``build`` cannot strand it. Once the client exists it is the transport's
+    only owner, and the list is dropped unswept.
+    """
+    derive = _derivation_of(transport)
+    if derive is None:
+        return build(transport, False)
+    cleanup: list[Closable] = []
+    try:
+        derived = _Owned(cleanup, derive)
+        return build(derived.value, True)
+    except BaseException as failure:
+        errors = _close_all(cleanup)
+        if errors:
+            _report(errors, failure)
+        raise
+
+
 # -- configuration (SPEC 3.10) ------------------------------------------------
 
 
@@ -325,22 +353,20 @@ class GraphQLClient:
         other transport shares the parent's and owns nothing, which is B2's
         original behaviour as C19 corrected it.
         """
-        derive = _derivation_of(self._transport)
-        if derive is None:
-            transport, owns = self._transport, False
-        else:
-            transport, owns = derive(), True
-        return GraphQLClient(
-            transport=transport,
-            schema=self._schema,
-            config=self._config,
-            parsers=self._parsers,
-            middleware=self._middleware,
-            auth=auth,
-            headers=headers,
-            owns_transport=owns,
-            recorder=self._recorder,
-            builder=self._builder,
+        return _client_over(
+            self._transport,
+            lambda transport, owns: GraphQLClient(
+                transport=transport,
+                schema=self._schema,
+                config=self._config,
+                parsers=self._parsers,
+                middleware=self._middleware,
+                auth=auth,
+                headers=headers,
+                owns_transport=owns,
+                recorder=self._recorder,
+                builder=self._builder,
+            ),
         )
 
     def with_headers(

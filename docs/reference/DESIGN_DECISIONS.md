@@ -1223,9 +1223,12 @@ not its own and is never closed by its failure.
 
 ### 9.3 One sweep, one close authority
 
-There are four releasing call sites: the client, the factory unwinding path, the transport
-constructor unwinding path, and the proxy router closing its pools. They share one sweep and
-one report implementation, so a later correction cannot reach one and miss another.
+There are six releasing call sites: the client, the factory unwinding path, the unwinding
+path that builds a client over a derived transport (a clone or a per-test client), the
+transport constructor unwinding path, the proxy router closing its pools, and the session
+transport fixture's teardown. They share one sweep and one report implementation, so a later
+correction cannot reach one and miss another. A transport derived for a new client is
+adopted before it is derived, so a failure while that client is built closes it.
 
 - Every item is attempted exactly once, in reverse order, whatever the earlier ones did. A
   failing transport teardown cannot strand the root pool.
@@ -1234,9 +1237,10 @@ one report implementation, so a later correction cannot reach one and miss anoth
   rather than chained behind a transport error, so an `except Exception` around the call
   cannot swallow it.
 - Among ordinary exceptions the caller's preferred exception wins. The client prefers the
-  last failure in sweep order, which is the earliest-acquired resource, and so does the proxy
-  router, whose direct pool is built first. The factory and the transport constructor prefer
-  the construction failure, because that is why the caller's call failed.
+  last failure in sweep order, which is the earliest-acquired resource, and so do the proxy
+  router, whose direct pool is built first, and the session fixture's teardown. The factory,
+  the derived-client path and the transport constructor prefer the construction failure,
+  because that is why the caller's call failed.
 - `close()` is idempotent, and so is leaving the context manager twice. The closed flag is
   set before the sweep, so a second close adds no calls even when the first raised.
 - `BaseExceptionGroup` is not used, because it arrives in Python 3.11 and the floor is 3.10.

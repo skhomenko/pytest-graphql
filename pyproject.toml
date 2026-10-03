@@ -123,7 +123,7 @@ files = ["src"]
 [tool.pytest.ini_options]
 minversion = "7.4"
 testpaths = ["tests"]
-addopts = "-ra --strict-markers --strict-config"
+addopts = "-ra --strict-markers --strict-config -p pytester"
 xfail_strict = true
 
 [tool.coverage.run]
