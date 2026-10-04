@@ -17,7 +17,7 @@ license-files = ["LICENSE"]
 authors = [{ name = "Sergii Khomenko" }]
 keywords = ["pytest", "graphql", "testing", "api", "integration"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Framework :: Pytest",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",

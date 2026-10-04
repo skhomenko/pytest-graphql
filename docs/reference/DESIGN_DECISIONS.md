@@ -2197,6 +2197,11 @@ by operating system.
   post-release or a local label alone is not a prerelease. `scripts/check_artifacts.py`
   makes the decision, and the release job passes it to `gh release create` as an explicit
   true or false.
+- The built metadata carries exactly one `Development Status` classifier, and a prerelease
+  carries the one its phase names: `3 - Alpha` for an alpha, `4 - Beta` for a beta or a
+  release candidate. A final or a development-only version is not mapped, because its
+  classifier is the maintainer's statement at that gate. The artifact checks refuse a
+  mismatch, so the maturity PyPI shows always agrees with the version.
 
 ### Publication path
 

@@ -150,6 +150,8 @@ the dependency stays declared as `>=3.2,<3.3`.
 - `GraphQLExecutionError` and `GraphQLPartialDataError` raised by the client carry
   the `response` that failed and its `errors`. Building one from a message alone
   still works, and then `response` is `None`. Migration: none.
+- The package classifier is `Development Status :: 4 - Beta`. The release checks
+  now refuse a prerelease whose classifier does not match its phase.
 
 ### Fixed
 
