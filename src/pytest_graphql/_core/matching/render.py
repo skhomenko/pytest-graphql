@@ -86,6 +86,11 @@ class RenderOptions:
         return cls(**values)
 
 
+def show_value(value: Any, options: RenderOptions | None = None) -> str:
+    """One value as bounded, scrubbed, single-line text, as the diff shows it."""
+    return _Printer(options if options is not None else RenderOptions()).show(value)
+
+
 def render_diff(result: MatchResult, options: RenderOptions | None = None) -> list[str]:
     """The diff lines for ``result``. Empty when it matched."""
     if result.ok:

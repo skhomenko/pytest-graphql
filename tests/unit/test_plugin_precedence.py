@@ -603,7 +603,7 @@ def test_the_ini_and_environment_value_of_a_list_replace_one_another(
 # -- the three settings that exist only as flags ------------------------------
 
 
-def test_the_log_flags_are_registered_and_stored_and_do_nothing_else(
+def test_the_log_flags_are_registered_and_stored_in_the_settings(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     result = run_inner(

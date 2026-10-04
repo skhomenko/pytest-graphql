@@ -35,7 +35,7 @@ from pytest_graphql._core.errors import (
 )
 from pytest_graphql._core.middleware import BaseMiddleware
 from pytest_graphql._core.response import GraphQLResponse
-from tests.unit.m8_support import (
+from tests.unit.scripted_steps import (
     URL,
     FakeClock,
     ScriptedTransport,

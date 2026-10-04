@@ -49,6 +49,10 @@ from pytest_graphql._core.transport.httpx_transport import checked_seconds
 
 ENV_PREFIX: Final = "PYTEST_GQL_"
 
+#: The ``workerinput`` key the xdist controller files its chosen random seed
+#: under. The reporting module writes it, and this module reads it.
+SEED_KEY: Final = "pytest_graphql_seed"
+
 #: The ini value that names the built-in source. SPEC 7.2 gives it as the
 #: default of ``gql_schema_source``. The top-level package does not export
 #: ``IntrospectionSource``, so the name is a label and is never imported.
@@ -418,7 +422,7 @@ OPTIONS: Final[tuple[Option, ...]] = (
     ),
 )
 
-#: Flags with no setting behind them. M9b gives them their output.
+#: Flags with no setting behind them. They only choose what the reporting module prints.
 LOG_FLAG: Final = "--gql-log"
 LOG_LEVEL_FLAG: Final = "--gql-log-level"
 SCHEMA_STATS_FLAG: Final = "--gql-show-schema-stats"
@@ -552,6 +556,22 @@ class Settings:
         return self.where.get(field, "the built-in default")
 
 
+def _shared_seed(config: pytest.Config) -> int | None:
+    """The seed the xdist controller chose, which a worker reads from its input.
+
+    A worker that parsed ``--gql-seed=random`` for itself would choose its own
+    seed, and every worker would generate different data. The controller chooses
+    once and hands the number to each worker in ``workerinput`` (DESIGN section
+    2, "The pytest plugin's sources").
+    """
+    workerinput = getattr(config, "workerinput", None)
+    if isinstance(workerinput, Mapping):
+        seed = workerinput.get(SEED_KEY)
+        if isinstance(seed, int) and not isinstance(seed, bool):
+            return seed
+    return None
+
+
 def _copied(values: Mapping[str, Any]) -> dict[str, Any]:
     """The values, with each mapping copied so a caller cannot change a source."""
     return {
@@ -622,7 +642,9 @@ def resolve(config: pytest.Config, environ: Mapping[str, str]) -> Settings:
         source = Source("cli", flag.name)
         value = _parse(option, source, flag.parse or option.parse, given, env_base)
         if isinstance(value, _RandomSeed):
-            value = secrets.randbits(32)
+            value = _shared_seed(config)
+            if value is None:
+                value = secrets.randbits(32)
             seed_is_random = True
         cli_values[option.field] = value
         where[option.field] = source.describe()

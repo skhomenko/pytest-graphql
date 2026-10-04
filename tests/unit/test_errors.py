@@ -236,7 +236,7 @@ def test_hierarchy_matches_spec_8_1(
 def _execution_error_for(
     *steps: Any, **config: Any
 ) -> tuple[GraphQLExecutionError, Any]:
-    from tests.unit.m8_support import build_test_schema, make_client
+    from tests.unit.scripted_steps import build_test_schema, make_client
 
     client, _ = make_client(build_test_schema(), *steps, **config)
     with pytest.raises(GraphQLExecutionError) as caught:
@@ -245,7 +245,7 @@ def _execution_error_for(
 
 
 def test_an_execution_error_carries_the_response_and_its_errors() -> None:
-    from tests.unit.m8_support import failure, rejected
+    from tests.unit.scripted_steps import failure, rejected
 
     error, _ = _execution_error_for(rejected(failure("a"), failure("b")))
 
@@ -255,7 +255,7 @@ def test_an_execution_error_carries_the_response_and_its_errors() -> None:
 
 
 def test_an_execution_error_message_structure() -> None:
-    from tests.unit.m8_support import failure, rejected
+    from tests.unit.scripted_steps import failure, rejected
 
     error, _ = _execution_error_for(rejected(failure("a"), failure("b")))
 
@@ -263,7 +263,7 @@ def test_an_execution_error_message_structure() -> None:
 
 
 def test_a_partial_data_error_message_structure() -> None:
-    from tests.unit.m8_support import envelope, failure
+    from tests.unit.scripted_steps import envelope, failure
 
     error, _ = _execution_error_for(
         envelope({"user": {"id": "u1"}}, (failure("half"),))
@@ -276,7 +276,7 @@ def test_a_partial_data_error_message_structure() -> None:
 
 
 def test_a_protocol_violation_message_structure() -> None:
-    from tests.unit.m8_support import envelope
+    from tests.unit.scripted_steps import envelope
 
     error, _ = _execution_error_for(envelope(None))
 
