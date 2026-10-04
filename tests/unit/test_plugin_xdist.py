@@ -37,10 +37,13 @@ from tests.schema.fake_transport import FakeGraphQLTransport
 from tests.schema.resolvers import build_schema
 
 OUT = os.environ["M9B_OUT"]
+WORKER = os.environ.get("PYTEST_XDIST_WORKER", "main")
 
 
 def note(line):
-    with open(OUT, "a") as handle:
+    # One file for each process: two workers appending to one file at the same
+    # moment lose a line on Windows, where an append is not atomic.
+    with open(OUT + "." + WORKER, "a") as handle:
         handle.write(line + "\\n")
 
 
@@ -84,7 +87,7 @@ def run_distributed(
     *args: str,
     tests: str = TESTS,
 ) -> tuple[pytest.RunResult, list[list[str]]]:
-    out = tmp_path / "workers.txt"
+    out = tmp_path / "workers"
     monkeypatch.setenv("M9B_OUT", str(out))
     monkeypatch.setenv(
         "PYTHONPATH",
@@ -93,7 +96,11 @@ def run_distributed(
     pytester.makeconftest(CONFTEST)
     pytester.makepyfile(test_inner=tests)
     result = pytester.runpytest_subprocess("-p", "no:hypothesispytest", *args)
-    lines = out.read_text().splitlines() if out.exists() else []
+    lines = [
+        line
+        for part in sorted(tmp_path.glob("workers.*"))
+        for line in part.read_text().splitlines()
+    ]
     return result, [line.split() for line in lines]
 
 
