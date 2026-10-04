@@ -1,4 +1,4 @@
-"""Helpers for the M9b reporting tests: a scripted transport and two documents.
+"""Helpers for the plugin reporting tests: a scripted transport and two documents.
 
 ``ScriptedTransport`` returns the outcomes a test queued, one per call, and
 repeats the last one when the queue runs out. An outcome is a ``RawResponse`` or
@@ -93,7 +93,7 @@ import pytest
 from pytest_graphql import HeaderAuth
 from tests.schema.resolvers import build_schema
 from tests.unit import plugin_probe
-from tests.unit.m9b_support import (
+from tests.unit.scripted_transport import (
     UPDATE_MUTATION,
     USER_QUERY,
     ScriptedTransport,
@@ -134,7 +134,7 @@ def pytest_runtest_logreport(report):
 
 #: The documents an inner test file uses, so each test can name them.
 INNER_IMPORTS = """
-from tests.unit.m9b_support import UPDATE_MUTATION, USER_QUERY
+from tests.unit.scripted_transport import UPDATE_MUTATION, USER_QUERY
 """
 
 #: Two calls, the second of which the server refuses, as in SPEC 7.5.

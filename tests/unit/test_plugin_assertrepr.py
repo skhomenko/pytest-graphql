@@ -17,8 +17,8 @@ from pytest_graphql._core.diagnostics import WITHHELD_TEXT
 from pytest_graphql._core.errors import DiagnosticRenderError
 from pytest_graphql._core.matching import ExpectNamespace, Matcher, contains
 from pytest_graphql.plugin import pytest_assertrepr_compare
-from tests.unit.m9b_support import reports, run_scripted
 from tests.unit.matching_support import SCHEMA, user_node
+from tests.unit.scripted_transport import reports, run_scripted
 from tests.unit.test_matching_render import wide_user_node
 
 SPEC_7_5_BLOCK = [

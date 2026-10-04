@@ -14,7 +14,7 @@ import pytest
 
 from pytest_graphql.plugin import reporting
 from tests.unit import plugin_probe
-from tests.unit.m9b_support import reports, run_scripted, sections_of
+from tests.unit.scripted_transport import reports, run_scripted, sections_of
 
 TWO_CALLS = """
 def test_fails(gql):

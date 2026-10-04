@@ -15,7 +15,7 @@ import pytest
 
 from pytest_graphql.plugin import reporting
 from tests.unit import plugin_probe
-from tests.unit.m9b_support import SPEC_ROUTES, run_scripted
+from tests.unit.scripted_transport import SPEC_ROUTES, run_scripted
 
 CALLS = """
 import logging

@@ -22,7 +22,7 @@ from pytest_graphql._core.errors import (
     GraphQLTestError,
 )
 from pytest_graphql._core.expect_error import CapturedErrors
-from tests.unit.m8_support import (
+from tests.unit.scripted_steps import (
     build_test_schema,
     envelope,
     failure,

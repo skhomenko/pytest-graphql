@@ -25,7 +25,7 @@ from graphql import (
 from pytest_graphql.plugin.reporting import SchemaFacts, schema_line, stats_lines
 from tests.schema.resolvers import build_schema as hostile_schema
 from tests.unit import plugin_probe
-from tests.unit.m9b_support import run_scripted
+from tests.unit.scripted_transport import run_scripted
 
 USES_SCHEMA = "def test_uses_it(gql):\n    pass\n"
 URL = "http://127.0.0.1:9/graphql"

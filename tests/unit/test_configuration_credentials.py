@@ -19,7 +19,7 @@ from pytest_graphql._core.diagnostics import (
     RequestInfo,
     header_credentials,
 )
-from tests.unit.m8_support import build_test_schema, envelope, failure, make_client
+from tests.unit.scripted_steps import build_test_schema, envelope, failure, make_client
 
 HEADER = "header-secret-value-0123456789"
 SCHEMA = "schema-only-secret-value-0123456789"

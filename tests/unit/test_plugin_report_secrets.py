@@ -15,7 +15,7 @@ from collections.abc import Mapping
 import pytest
 
 from tests.unit import plugin_probe
-from tests.unit.m9b_support import reports, run_scripted, sections_of
+from tests.unit.scripted_transport import reports, run_scripted, sections_of
 
 INI = "ini-header-secret-0123456789"
 AUTH = "auth-secret-value-0123456789"

@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from tests.unit import plugin_probe
-from tests.unit.m9b_support import run_scripted, sections_of
+from tests.unit.scripted_transport import run_scripted, sections_of
 
 FAILS_AFTER_ONE_CALL = """
 def test_fails(gql):

@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 from graphql import GraphQLSchema
 
-from tests.unit.m8_support import (
+from tests.unit.scripted_steps import (
     build_test_schema,
     envelope,
     failure,

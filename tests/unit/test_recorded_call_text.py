@@ -19,7 +19,7 @@ from pytest_graphql._core.client import ClientConfig, GraphQLClient
 from pytest_graphql._core.diagnostics import WITHHELD_TEXT, RecordedCall, RequestInfo
 from pytest_graphql._core.errors import DiagnosticRenderError, GraphQLExecutionError
 from tests.schema.resolvers import build_schema
-from tests.unit.m9b_support import (
+from tests.unit.scripted_transport import (
     UPDATE_MUTATION,
     USER_QUERY,
     ScriptedTransport,

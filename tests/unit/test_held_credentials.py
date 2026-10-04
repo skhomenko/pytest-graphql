@@ -38,7 +38,7 @@ from pytest_graphql._core.excerpt import render_data_excerpt
 from pytest_graphql._core.middleware import BaseMiddleware
 from pytest_graphql._core.transport.httpx_transport import HttpxTransport
 from tests.unit.local_http_server import PlannedResponse, local_server
-from tests.unit.m8_support import build_test_schema, envelope, failure, make_client
+from tests.unit.scripted_steps import build_test_schema, envelope, failure, make_client
 
 SECRET = "past-call-secret-value-0123456789"
 ECHO = f"the server said: {SECRET}"
