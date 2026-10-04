@@ -60,9 +60,37 @@ cycle is promised.
   `ArgumentError`.
 - `GraphQLExecutionError`, `GraphQLPartialDataError`, `ExpectedErrorNotRaised` and
   `WaitTimeoutError` are exported from `pytest_graphql`.
+- pytest configuration. Every ini option of the specification except the schema cache
+  options has an environment variable, `PYTEST_GQL_` followed by the option name
+  without `gql_`, so `gql_max_depth` is `PYTEST_GQL_MAX_DEPTH`. The flags are
+  `--gql-url`, `--gql-seed=N|random`, `--gql-no-validate`, `--gql-max-depth` and
+  `--gql-timeout`. `--gql-log`, `--gql-log-level` and `--gql-show-schema-stats` are
+  registered and stored, and print nothing yet. Per setting, the order is: per-call
+  argument, flag, fixture, environment variable, ini option, built-in default. A
+  value that a source refuses stops the run at the start, and the message names the
+  setting and the source and never shows the value. `gql_redact_headers` adds names to
+  the default list, so `authorization`, `cookie`, `x-api-key` and `proxy-authorization`
+  stay redacted whatever a project lists.
+- The fixtures `gql_config`, `gql_schema_source`, `gql_schema`, `gql_scalars`,
+  `gql_headers`, `gql_auth` and `gql_seed`, next to `gql`, `gql_url` and
+  `gql_transport`. Each can be overridden. `gql_headers` is per test and sits above
+  the ini and environment headers and below `gql_auth` and `with_headers()`. It never
+  reaches schema loading. Overriding `gql_schema` sends no introspection request.
+- `gql_schema_source` as a dotted path in the ini file or the environment. It names a
+  `SchemaSource` instance. A missing module, a missing attribute and an object that is
+  not a source each fail with a message that says which.
+- Six hooks: `pytest_graphql_configure`, `pytest_graphql_schema_loaded`,
+  `pytest_graphql_before_request`, `pytest_graphql_after_response`,
+  `pytest_graphql_register_scalars` and `pytest_graphql_report_section`. The request
+  and response hooks fold: each implementation receives the result of the one before.
+  A scalar registered twice by hooks replaces the first and warns. The report section
+  hook is declared and is called once the failure report exists.
 
 ### Changed
 
+- `gql_url` and the `--gql-url` flag keep their behaviour. The URL can now also come
+  from `PYTEST_GQL_URL` or the `gql_url` ini option, below the fixture and the flag.
+  Migration: none.
 - `GraphQLClient(parsers=...)` and `build_client(parsers=...)` are replaced by
   `scalars=`, a `ScalarRegistry`. One registry serves response decoding, variable
   serialization and `gql.fake`, and a scalar registered after the client is built is
