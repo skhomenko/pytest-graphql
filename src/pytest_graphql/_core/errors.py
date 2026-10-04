@@ -363,15 +363,53 @@ class SchemaError(GraphQLClientError):
 
 
 class ScalarNotRegisteredError(GraphQLClientError):
-    """A custom scalar has no fake generator registered for it."""
+    """A custom scalar has no fake generator registered for it.
 
-    def __init__(self, scalar_name: str) -> None:
+    ``path`` is where the factory needed it: the input type, then the field
+    names, with a list index as an integer. It is optional so the error can be
+    built from the scalar's name alone.
+    """
+
+    def __init__(self, scalar_name: str, *, path: Sequence[str | int] = ()) -> None:
         self.scalar_name = scalar_name
-        super().__init__(
-            f"no fake generator registered for scalar {scalar_name!r}.\n"
-            f"  Register one with ScalarRegistry.register({scalar_name!r}, "
-            "fake=...) or exclude the field."
+        self.path = tuple(path)
+        self.location = _render_path(self.path) if self.path else None
+        spec = (
+            f'    registry.register(ScalarSpec(name="{scalar_name}", '
+            "serialize=str, fake=lambda rng: ...))"
         )
+        if self.location is None:
+            lines = [
+                "no fake generator is registered for the custom scalar "
+                f"{scalar_name!r}.",
+                "  A ScalarSpec for it must provide a fake generator. Register one:",
+                spec,
+                "  Or give the field a value in the call, which skips generation.",
+            ]
+        else:
+            lines = [
+                "no fake generator is registered for the custom scalar "
+                f"{scalar_name!r}, needed at {self.location}.",
+                "  A ScalarSpec for it must provide a fake generator. Register one:",
+                spec,
+                "  Or give the field a value, which skips generation:",
+                f"    gql.fake.{self.path[0]}({self.path[1]}=...)"
+                if len(self.path) > 1
+                else f"    gql.fake.{self.path[0]}(...)",
+            ]
+        super().__init__("\n".join(lines))
+
+
+def _render_path(path: Sequence[str | int]) -> str:
+    """``Type.field[0].sub``: names joined by dots, an index in brackets."""
+    text = ""
+    for segment in path:
+        text += (
+            f"[{segment}]"
+            if isinstance(segment, int)
+            else (f".{segment}" if text else segment)
+        )
+    return text
 
 
 class DiagnosticRenderError(GraphQLClientError):

@@ -16,12 +16,20 @@ transport from that pool when the transport supports derivation, owns that
 derived transport only, and closes it at test teardown, whatever the test did.
 An overridden ``gql_transport`` that does not support derivation is shared, and
 the per-test client closes nothing it holds.
+
+The ``gql`` client also gets what ``gql.fake`` needs. The node id is the pytest
+node id of the test, so each test has its own seeded data. The run id and the
+worker id belong to the session, so one ``UniqueSource`` serves every test of
+the session in a process, and every clone of a test's client shares it.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import os
+import uuid
+from collections.abc import Iterator, Mapping
 from functools import partial
+from typing import Any
 
 import pytest
 from graphql import GraphQLSchema
@@ -32,6 +40,7 @@ from pytest_graphql._core.client import (
     _client_over,
     build_client,
 )
+from pytest_graphql._core.factory import FakeContext, UniqueSource
 from pytest_graphql._core.lifecycle import Closable, _close_all, _report
 from pytest_graphql._core.transport.base import Transport
 
@@ -55,6 +64,34 @@ def _endpoint(config: pytest.Config, fixture_url: str) -> str:
     """The effective URL: the CLI flag above the fixture, per settings precedence."""
     flag: str | None = config.getoption("gql_url")
     return flag if flag else fixture_url
+
+
+def _worker_input(config: Any, key: str) -> str | None:
+    """A non-empty string from the xdist worker input, or ``None``."""
+    workerinput = getattr(config, "workerinput", None)
+    if isinstance(workerinput, Mapping):
+        value = workerinput.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _worker_id(config: Any) -> str:
+    """The xdist worker id, or ``"main"`` when the run is not distributed."""
+    return (
+        _worker_input(config, "workerid")
+        or os.environ.get("PYTEST_XDIST_WORKER")
+        or "main"
+    )
+
+
+def _run_id(config: Any) -> str:
+    """The id of this run. xdist gives every worker the same one.
+
+    Outside xdist it is new for each session, so ``unique()`` values differ
+    between runs and still trace back to the run that made them.
+    """
+    return _worker_input(config, "testrunuid") or uuid.uuid4().hex
 
 
 def _sweep(cleanup: list[Closable]) -> None:
@@ -112,12 +149,20 @@ def _gql_schema(
     return build_client(url=url, transport=gql_transport).schema
 
 
+@pytest.fixture(scope="session")
+def _gql_unique_source(pytestconfig: pytest.Config) -> UniqueSource:
+    """The one source of ``unique()`` values for this session in this process."""
+    return UniqueSource(_run_id(pytestconfig), _worker_id(pytestconfig))
+
+
 @pytest.fixture
 def gql(
+    request: pytest.FixtureRequest,
     pytestconfig: pytest.Config,
     gql_url: str,
     gql_transport: Transport,
     _gql_schema: GraphQLSchema,
+    _gql_unique_source: UniqueSource,
 ) -> Iterator[GraphQLClient]:
     """A client for this test, closed at teardown whether the test passed or not.
 
@@ -130,12 +175,14 @@ def gql(
     raised before its ``yield``.
     """
     config = ClientConfig(url=_endpoint(pytestconfig, gql_url))
+    fake_context = FakeContext(request.node.nodeid, _gql_unique_source)
     client = _client_over(
         gql_transport,
         lambda transport, owns: GraphQLClient(
             transport=transport,
             schema=_gql_schema,
             config=config,
+            fake_context=fake_context,
             owns_transport=owns,
         ),
     )

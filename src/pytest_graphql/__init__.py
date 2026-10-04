@@ -24,6 +24,13 @@ from pytest_graphql._core.errors import (
     DiagnosticRenderError,
     GraphQLFieldError,
     ResponseShapeError,
+    ScalarNotRegisteredError,
+)
+from pytest_graphql._core.factory import (
+    DeterministicRandom,
+    ScalarRegistry,
+    ScalarSpec,
+    unique,
 )
 from pytest_graphql._core.matching import (
     Matcher,
@@ -54,6 +61,7 @@ __all__ = [
     "BearerAuth",
     "ClientConfig",
     "CyclePolicy",
+    "DeterministicRandom",
     "DiagnosticRenderError",
     "DiagnosticSnapshot",
     "Field",
@@ -67,6 +75,9 @@ __all__ = [
     "NodeList",
     "RequestInfo",
     "ResponseShapeError",
+    "ScalarNotRegisteredError",
+    "ScalarRegistry",
+    "ScalarSpec",
     "SchemaSource",
     "Selection",
     "SelectionPolicy",
@@ -84,6 +95,7 @@ __all__ = [
     "lte",
     "matches",
     "one_of",
+    "unique",
     "unordered",
 ]
 

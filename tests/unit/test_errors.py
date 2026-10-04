@@ -144,11 +144,44 @@ def test_schema_error_not_a_possible_type() -> None:
     assert str(error) == "'Team' is not a possible type of 'SearchResult'."
 
 
-def test_scalar_not_registered_names_the_scalar_and_a_fix() -> None:
+def test_scalar_not_registered_message_is_exact_without_a_location() -> None:
     error = ScalarNotRegisteredError("Money")
-    text = str(error)
-    assert "Money" in text
-    assert "ScalarRegistry.register" in text
+    assert error.scalar_name == "Money"
+    assert error.location is None
+    assert str(error) == (
+        "no fake generator is registered for the custom scalar 'Money'.\n"
+        "  A ScalarSpec for it must provide a fake generator. Register one:\n"
+        '    registry.register(ScalarSpec(name="Money", serialize=str, '
+        "fake=lambda rng: ...))\n"
+        "  Or give the field a value in the call, which skips generation."
+    )
+
+
+def test_scalar_not_registered_message_is_exact_with_a_location() -> None:
+    error = ScalarNotRegisteredError("Money", path=("OrderInput", "lines", 0, "amount"))
+    assert error.location == "OrderInput.lines[0].amount"
+    assert str(error) == (
+        "no fake generator is registered for the custom scalar 'Money', "
+        "needed at OrderInput.lines[0].amount.\n"
+        "  A ScalarSpec for it must provide a fake generator. Register one:\n"
+        '    registry.register(ScalarSpec(name="Money", serialize=str, '
+        "fake=lambda rng: ...))\n"
+        "  Or give the field a value, which skips generation:\n"
+        "    gql.fake.OrderInput(lines=...)"
+    )
+
+
+def test_scalar_not_registered_names_the_top_level_field_to_override() -> None:
+    error = ScalarNotRegisteredError("Money", path=("PricedInput", "price"))
+    assert str(error).endswith("    gql.fake.PricedInput(price=...)")
+
+
+def test_scalar_not_registered_states_what_was_wrong_expected_and_to_do() -> None:
+    # SPEC 8.3: what was wrong, what was expected, and what to do about it.
+    lines = str(ScalarNotRegisteredError("Money", path=("T", "f"))).splitlines()
+    assert lines[0].startswith("no fake generator is registered")
+    assert "must provide a fake generator" in lines[1]
+    assert lines[-2].startswith("  Or give the field a value")
 
 
 def test_graphql_field_error_ambiguous_names_both_spellings() -> None:
