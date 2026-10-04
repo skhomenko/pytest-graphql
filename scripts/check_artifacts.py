@@ -3,7 +3,8 @@
 
 The "Release integrity" section of ``docs/reference/DESIGN_DECISIONS.md``
 requires these checks on every build: PEP 621 metadata completeness, wheel and
-sdist contents, and ``__version__`` agreeing with the tag. It also tells the
+sdist contents, ``__version__`` agreeing with the tag, and the Development
+Status classifier agreeing with a prerelease's phase. It also tells the
 release job whether the tag is a PEP 440 prerelease. Long-description
 rendering and the rest of the packaging surface are checked by ``twine check``,
 which runs beside this script rather than inside it.
@@ -70,6 +71,29 @@ REQUIRED_SDIST_PATHS = (
 
 ENTRY_POINT_LINE = "graphql = pytest_graphql.plugin"
 
+DEVELOPMENT_STATUS = "Development Status :: "
+
+# The classifier a prerelease phase must carry, so the maturity PyPI shows
+# agrees with the version. A final or a development-only version is not
+# mapped: its classifier is the maintainer's statement at that gate.
+PHASE_CLASSIFIERS = {
+    "a": "Development Status :: 3 - Alpha",
+    "b": "Development Status :: 4 - Beta",
+    "rc": "Development Status :: 4 - Beta",
+}
+
+# PEP 440 spellings of each pre-release label, by normalized phase.
+_PHASE_OF_LABEL = {
+    "a": "a",
+    "alpha": "a",
+    "b": "b",
+    "beta": "b",
+    "c": "rc",
+    "rc": "rc",
+    "pre": "rc",
+    "preview": "rc",
+}
+
 
 # The version grammar of PEP 440, Appendix B. PEP 440 is in the public domain.
 # Adapted: the optional leading "v" and surrounding whitespace are dropped,
@@ -107,6 +131,18 @@ _PEP440_VERSION = re.compile(
 def version_from_tag(tag: str) -> str:
     """Return the version a release tag names."""
     return tag[1:] if tag.startswith("v") else tag
+
+
+def prerelease_phase(version: str) -> str | None:
+    """The normalized pre-release phase, ``a``, ``b`` or ``rc``, or ``None``.
+
+    A string that is not a PEP 440 version raises ``ValueError``.
+    """
+    match = _PEP440_VERSION.match(version)
+    if match is None:
+        raise ValueError(f"not a PEP 440 version: {version!r}")
+    label = match.group("pre_l")
+    return None if label is None else _PHASE_OF_LABEL[label.lower()]
 
 
 def is_prerelease(version: str) -> bool:
@@ -148,6 +184,28 @@ def check_metadata(text: bytes, expected_version: str, source: str) -> list[str]
         problems.append(
             f"{source}: metadata version is {version}, expected {expected_version}"
         )
+
+    statuses = [
+        value
+        for value in message.get_all("Classifier") or []
+        if value.startswith(DEVELOPMENT_STATUS)
+    ]
+    if len(statuses) != 1:
+        problems.append(
+            f"{source}: expected one Development Status classifier, "
+            f"found {len(statuses)}"
+        )
+    else:
+        try:
+            phase = prerelease_phase(expected_version)
+        except ValueError:
+            phase = None
+        wanted = PHASE_CLASSIFIERS.get(phase) if phase else None
+        if wanted is not None and statuses[0] != wanted:
+            problems.append(
+                f"{source}: classifier is {statuses[0]!r}, "
+                f"but version {expected_version} needs {wanted!r}"
+            )
 
     body = message.get_payload(decode=True)
     if not body or not body.strip():
@@ -270,6 +328,7 @@ Summary: Schema-aware GraphQL API testing for pytest.
 Requires-Python: >=3.10
 Description-Content-Type: text/markdown
 License-Expression: MIT
+Classifier: Development Status :: 3 - Alpha
 Classifier: Framework :: Pytest
 Project-URL: Source, https://example.invalid/repo
 Requires-Dist: httpx>=0.27,<1
@@ -302,7 +361,45 @@ def self_test() -> int:
         ),
         (
             "no classifier fails",
-            _GOOD_METADATA.replace(b"Classifier: Framework :: Pytest\n", b""),
+            _GOOD_METADATA.replace(b"Classifier: Framework :: Pytest\n", b"").replace(
+                b"Classifier: Development Status :: 3 - Alpha\n", b""
+            ),
+            "0.1.0a1",
+            2,
+        ),
+        (
+            "a beta with the alpha classifier fails",
+            _GOOD_METADATA.replace(b"Version: 0.1.0a1", b"Version: 0.1.0b1"),
+            "0.1.0b1",
+            1,
+        ),
+        (
+            "a beta with the beta classifier passes",
+            _GOOD_METADATA.replace(b"Version: 0.1.0a1", b"Version: 0.1.0b1").replace(
+                b"3 - Alpha", b"4 - Beta"
+            ),
+            "0.1.0b1",
+            0,
+        ),
+        (
+            "a release candidate needs the beta classifier",
+            _GOOD_METADATA.replace(b"Version: 0.1.0a1", b"Version: 0.1.0rc1"),
+            "0.1.0rc1",
+            1,
+        ),
+        (
+            "a final version is not mapped",
+            _GOOD_METADATA.replace(b"Version: 0.1.0a1", b"Version: 0.1.0"),
+            "0.1.0",
+            0,
+        ),
+        (
+            "two development status classifiers fail",
+            _GOOD_METADATA.replace(
+                b"Classifier: Framework :: Pytest\n",
+                b"Classifier: Development Status :: 4 - Beta\n"
+                b"Classifier: Framework :: Pytest\n",
+            ),
             "0.1.0a1",
             1,
         ),

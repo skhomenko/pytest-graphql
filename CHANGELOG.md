@@ -10,8 +10,27 @@ cycle is promised.
 
 ## [Unreleased]
 
+## [0.1.0b1] - 2026-10-04
+
+First beta. It adds response matching, seeded fake data, error assertions,
+polling, and the full pytest plugin: configuration, fixtures, hooks, failure
+reports and xdist support. The API may still change before `0.1.0`.
+
+It still requires `graphql-core` 3.2. graphql-core 3.3 is not supported yet, and
+the dependency stays declared as `>=3.2,<3.3`.
+
 ### Added
 
+- Response matching. `gql.expect.User(name="Ann")` builds a matcher for a schema
+  type, and an unknown field name fails when the matcher is built. Helpers:
+  `contains`, `unordered`, `absent`, `any_value`, `any_length`, `length`,
+  `matches`, `one_of`, `gt`, `gte`, `lt` and `lte`. `contains` and `unordered`
+  pair items with elements by maximum bipartite matching, so duplicates on
+  either side are handled and an item never takes the element another item
+  needs. `NodeList.where(**filters)` and `NodeList.one(**filters)` match the
+  named fields only, or exactly those fields with `strict=True`.
+  `Matcher.explain()` renders the difference field by field, with every value
+  scrubbed and redacted.
 - `DeterministicRandom`, a sampler built on SHA-256 in counter mode, with `bits`,
   `below`, `choice`, `float_unit` and `sample_string`. It does not use `random`,
   so a seed gives the same values on every supported Python.
@@ -131,6 +150,8 @@ cycle is promised.
 - `GraphQLExecutionError` and `GraphQLPartialDataError` raised by the client carry
   the `response` that failed and its `errors`. Building one from a message alone
   still works, and then `response` is `None`. Migration: none.
+- The package classifier is `Development Status :: 4 - Beta`. The release checks
+  now refuse a prerelease whose classifier does not match its phase.
 
 ### Fixed
 
@@ -205,5 +226,6 @@ dependency is declared as `>=3.2,<3.3` so that an install never selects it.
   build backend and its dependencies, used both as build constraints for the
   release build and as the environment for the sdist install-back.
 
-[Unreleased]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.0a1...HEAD
+[Unreleased]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.0b1...HEAD
+[0.1.0b1]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.0a1...v0.1.0b1
 [0.1.0a1]: https://github.com/skhomenko/pytest-graphql/releases/tag/v0.1.0a1
