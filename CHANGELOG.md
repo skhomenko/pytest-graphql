@@ -43,6 +43,23 @@ cycle is promised.
   recorded values of the seed formula, the sampler, every built-in scalar,
   `unique()` and nested input objects. A later change to any of them is a
   versioned change and is listed here.
+- `gql.expect_error(code=, path=, message_matches=, count=)`, a context manager that
+  asserts a block ends in a `GraphQLExecutionError`. It yields `CapturedErrors`
+  with `.errors`, `.response` and `.first`. Every filter must match at least one
+  error, and `count` is the exact number of errors returned. A block that does not raise, or a filter that matches nothing, raises
+  `ExpectedErrorNotRaised`, which lists every error the server returned. Any
+  other exception leaves the block unchanged.
+- `gql.wait_until(name, until=, timeout=, interval=, backoff=, ignore=)`, for
+  queries only. It has one deadline, always makes one attempt, and sleeps
+  `min(interval * backoff ** (attempt - 1), remaining)`. `ignore` takes
+  `Exception` subclasses only, so `KeyboardInterrupt` is never swallowed. It
+  raises `WaitTimeoutError` with the attempts, the elapsed time, the last response
+  and the last ignored exception. The exception text is shown, and the
+  exception chained as the cause, only after it was checked against the
+  request of the attempt that raised it. A mutation name raises
+  `ArgumentError`.
+- `GraphQLExecutionError`, `GraphQLPartialDataError`, `ExpectedErrorNotRaised` and
+  `WaitTimeoutError` are exported from `pytest_graphql`.
 
 ### Changed
 
@@ -60,6 +77,9 @@ cycle is promised.
 - Field arguments of an explicit selection that hold a value with no GraphQL literal,
   such as a `Decimal` for a custom scalar, no longer raise a `TypeError` while the
   selection is normalized.
+- `GraphQLExecutionError` and `GraphQLPartialDataError` raised by the client carry
+  the `response` that failed and its `errors`. Building one from a message alone
+  still works, and then `response` is `None`. Migration: none.
 
 ## [0.1.0a1] - 2026-10-03
 

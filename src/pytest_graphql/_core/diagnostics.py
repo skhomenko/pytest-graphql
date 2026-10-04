@@ -687,6 +687,57 @@ def _check_exception_text(
         error._shown_repr = type(error).__name__
 
 
+#: The most exceptions one chain check visits. A longer chain is not vouched for.
+_MAX_CHAIN_NODES = 64
+
+
+def exception_chain_is_clean(
+    error: BaseException, snapshots: Sequence[DiagnosticSnapshot]
+) -> bool:
+    """Whether ``error`` and all it drags into a traceback show no secret.
+
+    A traceback prints ``error``, its notes, and then everything linked to it
+    through ``__cause__``, ``__context__`` and the members of an exception
+    group, each with its own message. An exception that did not pass through
+    :func:`_check_exception_text` was never checked, whatever its class is, so
+    attaching it as a cause is only safe after this check. The answer is
+    ``False`` when ``snapshots`` is empty, because with no request to check
+    against nothing can be vouched for, when the chain holds more than
+    ``_MAX_CHAIN_NODES`` exceptions, and when any message cannot be read. A
+    cycle is walked once. Nothing is changed on any exception.
+    """
+    if not snapshots:
+        return False
+    seen: set[int] = set()
+    pending: list[BaseException] = [error]
+    while pending:
+        node = pending.pop()
+        if id(node) in seen:
+            continue
+        if len(seen) >= _MAX_CHAIN_NODES:
+            return False
+        seen.add(id(node))
+        try:
+            texts = (
+                *_exception_renderings(type(node), (str(node),)),
+                *(str(note) for note in getattr(node, "__notes__", ())),
+            )
+            members = getattr(node, "exceptions", ())
+            linked = [
+                node.__cause__,
+                node.__context__,
+                *(members if isinstance(members, tuple | list) else ()),
+            ]
+        except Exception:
+            return False
+        if any(
+            snapshot._guard.contains(text) for snapshot in snapshots for text in texts
+        ):
+            return False
+        pending += [each for each in linked if isinstance(each, BaseException)]
+    return True
+
+
 #: Keys the guard's digests. Drawn once per process and never stored with a
 #: guard, so a guard copied out of the process cannot be checked offline.
 _GUARD_KEY = _random_secret_token_bytes(16)
@@ -2211,10 +2262,44 @@ def sanitize_text(request: RequestInfo, text: str) -> str:
     ran, exactly as the module docstring describes for a secret's source
     label.
     """
+    return text_tools(request)[0](text)
+
+
+def text_tools(
+    request: RequestInfo,
+) -> tuple[Callable[[str], str], Callable[[str], str]]:
+    """``(sanitize, excerpt)`` for ``request``, over one computed secret set.
+
+    Computing the secret set is the expensive step, so a caller with many
+    texts to render, such as every error of one response, takes both
+    functions once instead of calling :func:`sanitize_text` and
+    :func:`safe_excerpt` per text. Those two are these functions applied to
+    a single text, so the stages cannot drift apart.
+    """
     if not request.redact_values:
-        return escape_control_characters(text)
+
+        def sanitize_plain(text: str) -> str:
+            return escape_control_characters(text)
+
+        def excerpt_plain(text: str) -> str:
+            return _cut_visibly(sanitize_plain(text), request.max_diagnostic_bytes)
+
+        return sanitize_plain, excerpt_plain
+
     secrets, _ = request._redaction_context()
-    return _scrub_and_escape(text, secrets)
+    qualifying = tuple(secrets)
+
+    def sanitize(text: str) -> str:
+        return _scrub_and_escape(text, secrets)
+
+    def excerpt(text: str) -> str:
+        cut = _cut_visibly(sanitize(text), request.max_diagnostic_bytes)
+        # Cutting can drop the one quote character that decided how ``repr``
+        # quotes the text, which changes how every other quote is escaped, so
+        # the finished excerpt is checked again rather than inherited as safe.
+        return _repr_safe(cut, qualifying)
+
+    return sanitize, excerpt
 
 
 def truncate_text(text: str, limit: int) -> tuple[str, int]:
@@ -2240,6 +2325,12 @@ def truncate_text(text: str, limit: int) -> tuple[str, int]:
     return truncated, len(encoded) - len(truncated.encode("utf-8"))
 
 
+def _cut_visibly(text: str, limit: int) -> str:
+    """``text`` cut to ``limit`` bytes, with the cut stated, never silent (C2)."""
+    truncated, cut = truncate_text(text, limit)
+    return f"{truncated}... (truncated, {cut} byte(s) cut)" if cut else truncated
+
+
 def safe_excerpt(request: RequestInfo, text: str) -> str:
     """A scrubbed, escaped, length-capped excerpt of free-form text (C3, C16).
 
@@ -2247,16 +2338,7 @@ def safe_excerpt(request: RequestInfo, text: str) -> str:
     so a cut can never leave part of a secret behind. The cut is stated
     rather than silent (C2 "Truncation is visible, never silent").
     """
-    safe = sanitize_text(request, text)
-    truncated, cut = truncate_text(safe, request.max_diagnostic_bytes)
-    excerpt = f"{truncated}... (truncated, {cut} byte(s) cut)" if cut else truncated
-    if not request.redact_values:
-        return excerpt
-    # Cutting can drop the one quote character that decided how ``repr``
-    # quotes the text, which changes how every other quote is escaped, so
-    # the finished excerpt is checked again rather than inherited as safe.
-    secrets, _ = request._redaction_context()
-    return _repr_safe(excerpt, tuple(secrets))
+    return text_tools(request)[1](text)
 
 
 # -- the recorder (B3) --------------------------------------------------------

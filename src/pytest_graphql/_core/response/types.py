@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
@@ -30,6 +31,13 @@ class GraphQLErrorInfo:
     #: The complete ``repr``, already through the scrub. ``None`` means no
     #: scrub was supplied, and ``repr`` is built from the fields.
     _rendered: str | None = field(default=None, repr=False, compare=False, kw_only=True)
+    #: The one line a failure report shows for this error: its code, path and
+    #: message, scrubbed, escaped and cut once, where the live request was
+    #: still in hand. A response keeps only a digest-only snapshot of its
+    #: request, so no later code can scrub this text. ``None`` means none was
+    #: built, either because no scrub was supplied or because the error lies
+    #: past ``max_recorded_errors``.
+    _summary: str | None = field(default=None, repr=False, compare=False, kw_only=True)
 
     def __repr__(self) -> str:
         if self._rendered is not None:
@@ -48,12 +56,15 @@ class GraphQLErrorInfo:
         item: Mapping[str, Any],
         *,
         scrub: Callable[[str], str] | None = None,
+        excerpt: Callable[[str], str] | None = None,
     ) -> GraphQLErrorInfo:
         """Build from one error object. The transport has validated its shape;
         anything unexpected here degrades to ``None`` rather than raising.
 
         ``scrub`` is the free-form text scrub of the request that produced
         the error. When given, the ``repr`` is rendered once, through it.
+        ``excerpt`` is that request's bounded excerpt. When both are given,
+        the one-line summary a failure report shows is built as well.
         """
         message = item.get("message")
         raw_path = item.get("path")
@@ -91,7 +102,35 @@ class GraphQLErrorInfo:
                 for segment in path
             )
         )
-        return replace(info, _rendered=scrub(_repr_of(safe_path, info.locations)))
+        rendered = scrub(_repr_of(safe_path, info.locations))
+        if excerpt is None:
+            return replace(info, _rendered=rendered)
+        return replace(
+            info,
+            _rendered=rendered,
+            _summary=_summary_of(info, safe_path, scrub=scrub, excerpt=excerpt),
+        )
+
+
+def _summary_of(
+    info: GraphQLErrorInfo,
+    safe_path: tuple[str | int, ...] | None,
+    *,
+    scrub: Callable[[str], str],
+    excerpt: Callable[[str], str],
+) -> str:
+    """``CODE at ["path"]: message``, every piece through the request's scrub.
+
+    Each piece is cut on its own, so a long message cannot push the code or
+    the path out of the line, and the finished line is scrubbed again as a
+    whole, because the text joined between the pieces can complete a
+    credential across them (DESIGN_DECISIONS.md section 7).
+    """
+    code = info.code
+    line = "(no code)" if code is None else excerpt(code)
+    if safe_path is not None:
+        line += " at " + excerpt(json.dumps(list(safe_path), ensure_ascii=False))
+    return scrub(f"{line}: {excerpt(info.message)}")
 
 
 def _repr_of(

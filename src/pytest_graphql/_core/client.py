@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import re
 import ssl
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import (
     Any,
@@ -39,7 +41,6 @@ from pytest_graphql._core.diagnostics import (
     DEFAULT_MIN_REDACTED_VALUE_LENGTH,
     DEFAULT_REDACT_HEADERS,
     DEFAULT_REDACT_VARIABLES,
-    WITHHELD_TEXT,
     DiagnosticsRecorder,
     OmissionRecord,
     RecordedCall,
@@ -48,10 +49,14 @@ from pytest_graphql._core.diagnostics import (
 )
 from pytest_graphql._core.errors import (
     ArgumentError,
-    DiagnosticRenderError,
     GraphQLExecutionError,
     GraphQLPartialDataError,
     SelectionError,
+)
+from pytest_graphql._core.expect_error import (
+    CapturedErrors,
+    ExpectedError,
+    observe_response,
 )
 from pytest_graphql._core.factory import FakeContext, FakeNamespace, ScalarRegistry
 from pytest_graphql._core.headers import merge_headers
@@ -63,6 +68,8 @@ from pytest_graphql._core.middleware import (
     apply_before_request,
 )
 from pytest_graphql._core.operation import assemble_operation
+from pytest_graphql._core.polling import RequestTrace
+from pytest_graphql._core.polling import wait_until as _wait_until
 from pytest_graphql._core.response import GraphQLResponse, build_response
 from pytest_graphql._core.schema.info import OperationKind
 from pytest_graphql._core.schema.source import IntrospectionSource, SchemaSource
@@ -483,10 +490,76 @@ class GraphQLClient:
             omissions_total=0,
         )
 
+    # -- assertions and polling (SPEC 3.8, 3.9) -------------------------------
+
+    def expect_error(
+        self,
+        *,
+        code: str | None = None,
+        path: Sequence[str | int] | None = None,
+        message_matches: str | re.Pattern[str] | None = None,
+        count: int | None = None,
+    ) -> AbstractContextManager[CapturedErrors]:
+        """Assert that the block raises a ``GraphQLExecutionError``.
+
+        Every supplied filter must match at least one of the response's
+        errors, and ``count`` is the exact number of errors it returned.
+        See :mod:`pytest_graphql._core.expect_error`.
+        """
+        return ExpectedError(
+            code=code, path=path, message_matches=message_matches, count=count
+        )
+
+    def wait_until(
+        self,
+        name: str,
+        /,
+        *,
+        until: Callable[[Any], Any],
+        timeout: float = 30.0,
+        interval: float = 1.0,
+        backoff: float = 1.0,
+        ignore: type[Exception] | tuple[type[Exception], ...] = (),
+        **variables: Any,
+    ) -> Any:
+        """Run the query ``name`` until ``until`` holds, or raise ``WaitTimeoutError``.
+
+        Queries only. See :mod:`pytest_graphql._core.polling`.
+        """
+        return _wait_until(
+            self,
+            name,
+            until=until,
+            timeout=timeout,
+            interval=interval,
+            backoff=backoff,
+            ignore=ignore,
+            **variables,
+        )
+
     # -- the call flow --------------------------------------------------------
 
     def _call(self, kind: OperationKind, name: str, kwargs: Mapping[str, Any]) -> Any:
         """Steps 1 to 14 of SPEC 5.2 for a schema-resolved operation."""
+        response = self._run_operation(kind, name, kwargs)
+        if bool(kwargs.get("raw", False)):
+            return response
+        return response.unwrap()
+
+    def _run_operation(
+        self,
+        kind: OperationKind,
+        name: str,
+        kwargs: Mapping[str, Any],
+        *,
+        trace: RequestTrace | None = None,
+    ) -> GraphQLResponse[Any]:
+        """Steps 1 to 13 of SPEC 5.2: the response, before any unwrapping.
+
+        ``wait_until`` calls this directly, because it needs the response of
+        an attempt whether or not ``until`` accepts its value. It passes a
+        ``trace`` so that a failure before any response still names its request.
+        """
         options = {
             key: value for key, value in kwargs.items() if key in RESERVED_OPTIONS
         }
@@ -502,7 +575,7 @@ class GraphQLClient:
             validate=bool(options.get("validate", self._config.validate)),
             scalars=self._scalars,
         )
-        response = self._send(
+        return self._send(
             kind=kind,
             operation_name=options.get("operation_name") or name,
             document=assembled.document,
@@ -510,10 +583,8 @@ class GraphQLClient:
             options=options,
             omissions=assembled.omissions,
             omissions_total=assembled.omissions_total,
+            trace=trace,
         )
-        if bool(options.get("raw", False)):
-            return response
-        return response.unwrap()
 
     def _policy_for(self, options: Mapping[str, Any]) -> SelectionPolicy:
         """The configured policy, with this call's own overrides applied."""
@@ -589,8 +660,14 @@ class GraphQLClient:
         options: Mapping[str, Any],
         omissions: Sequence[OmissionRecord],
         omissions_total: int,
+        trace: RequestTrace | None = None,
     ) -> GraphQLResponse[Any]:
-        """SPEC 5.2 steps 7 to 13: middleware, transport, response, record."""
+        """SPEC 5.2 steps 7 to 13: middleware, transport, response, record.
+
+        A ``trace`` receives the redacted request when the call fails after
+        the request was built, so the caller can check the failure's text
+        against it.
+        """
         request = self._build_request(
             kind=kind,
             operation_name=operation_name,
@@ -600,15 +677,20 @@ class GraphQLClient:
             omissions=omissions,
             omissions_total=omissions_total,
         )
-        request = apply_before_request(self._middleware, request)
-        # Presence, not the value, decides whether the caller set the option:
-        # an explicit ``timeout=None`` is outside the domain and is refused,
-        # never read as "use the configured timeout".
-        timeout = (
-            checked_seconds(options["timeout"], source="the timeout option")
-            if "timeout" in options
-            else self._config.call_timeout()
-        )
+        try:
+            request = apply_before_request(self._middleware, request)
+            # Presence, not the value, decides whether the caller set the
+            # option: an explicit ``timeout=None`` is outside the domain and
+            # is refused, never read as "use the configured timeout".
+            timeout = (
+                checked_seconds(options["timeout"], source="the timeout option")
+                if "timeout" in options
+                else self._config.call_timeout()
+            )
+        except BaseException:
+            if trace is not None:
+                trace.snapshot = request.redacted()
+            raise
 
         started = time.perf_counter()
         status_code: int | None = None
@@ -639,9 +721,12 @@ class GraphQLClient:
             # the one a report most needs. A call fails here when the
             # transport raises, and also after it returned: a response that
             # contradicts the schema, or a raising `after_response`.
+            snapshot = request.redacted()
+            if trace is not None:
+                trace.snapshot = snapshot
             self._recorder.record(
                 RecordedCall(
-                    request=request.redacted(),
+                    request=snapshot,
                     outcome="failed",
                     status_code=status_code,
                     duration_ms=(time.perf_counter() - started) * 1000.0,
@@ -659,6 +744,10 @@ class GraphQLClient:
                 error_count=len(response.errors),
             )
         )
+        # Every response is seen by an open `expect_error` block before the
+        # client decides whether to raise it, so the block can name the
+        # response it received even when nothing raised.
+        observe_response(response)
         self._raise_for_state(response, options)
         return response
 
@@ -677,49 +766,26 @@ class GraphQLClient:
         )
         if not response.errors:
             if response.data_state != "present":
-                raise _execution_error(
-                    GraphQLExecutionError,
+                raise GraphQLExecutionError(
                     "the server returned no errors and no data "
                     f"({response.data_state}), which is a protocol violation.",
-                    response,
+                    response=response,
                 )
             return
         if not raise_on_error:
             return
         if response.has_data:
             if raise_on_partial:
-                raise _execution_error(
-                    GraphQLPartialDataError,
+                raise GraphQLPartialDataError(
                     f"the server returned {len(response.errors)} error(s) "
                     "alongside data.",
-                    response,
+                    response=response,
                 )
             return
-        raise _execution_error(
-            GraphQLExecutionError,
+        raise GraphQLExecutionError(
             f"the server returned {len(response.errors)} error(s).",
-            response,
+            response=response,
         )
-
-
-def _execution_error(
-    error_type: type[GraphQLExecutionError],
-    summary: str,
-    response: GraphQLResponse[Any],
-) -> GraphQLExecutionError:
-    """An execution error whose complete message was checked against the request.
-
-    The response's ``repr`` refuses to render when it would show a secret.
-    The error is still raised then, with the response withheld, because the
-    refusal must not replace the error the caller is waiting for.
-    """
-    try:
-        shown = repr(response)
-    except DiagnosticRenderError:
-        shown = WITHHELD_TEXT
-    error = error_type(f"{summary}\n  {shown}")
-    response.request._guard.check_exception(error)
-    return error
 
 
 def _failure_text(failure: BaseException) -> str:
