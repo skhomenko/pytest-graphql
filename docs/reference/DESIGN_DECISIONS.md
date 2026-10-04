@@ -57,6 +57,69 @@ Environment variables are generated from the ini option table, upper-cased with 
 `PYTEST_GQL_` prefix. `gql_max_depth` becomes `PYTEST_GQL_MAX_DEPTH`. Generating them from
 one table keeps the two from drifting.
 
+### The pytest plugin's sources
+
+One table holds every option. The ini registration, the environment variable names, the
+flags, the parsers and the error messages are generated from it. The ini options are those
+of `docs/reference/SPEC.md` section 7.2 without the schema cache options, and the flags are
+those of section 7.3 without `--gql-refresh-schema`.
+
+- Each setting has one winning source among the flag, the environment variable, the ini
+  option and the built-in default. A list is not merged across sources: the environment
+  value replaces the ini value as a whole. The built-in default is whatever `ClientConfig()`
+  holds, so a default is written once. That is why `gql_include_deprecated` defaults to
+  `False`, as `ClientConfig` and C1 say, and not to the `True` of SPEC 7.2.
+- An empty or whitespace-only value counts as not set, in every source.
+- A list option is one entry per line, in the ini file and in the environment variable
+  alike. `gql_headers` entries are `Name: value`. `gql_redact_headers` entries may also be
+  separated by commas, because a header name cannot hold one.
+- Every source is checked when pytest configures, whether or not a higher source hides it.
+  A refusal is a usage error that names the setting and the source, such as the ini option,
+  the environment variable or the flag. It never shows the value, because a header line, a
+  URL or a path can hold a credential.
+- `gql_verify` is `true`, `false` or the path of an existing CA bundle file. A relative path
+  in the ini file resolves against the directory of that file. A relative path in the
+  environment resolves against the directory pytest was started in.
+- `gql_redact_headers` extends the default list instead of replacing it. A project that adds
+  one header keeps `authorization`, `cookie`, `x-api-key` and `proxy-authorization` redacted,
+  because dropping one by accident would expose a credential. A name already in the list under
+  any capitalization is not added twice. No spelling of the option removes a default. A project
+  that needs a smaller list builds the `ClientConfig` itself, which holds exactly the names it is
+  given. This is separate from the rule above that one source replaces another: the environment
+  list replaces the ini list as a whole, and each of them extends the default.
+- `--gql-seed=random` chooses a 32-bit seed once, when pytest configures, and records that it
+  did. The seed is read back from the settings. Under xdist each process configures on its
+  own, so sharing one chosen seed between workers is a reporting concern of the xdist work.
+- `--gql-log`, `--gql-log-level` and `--gql-show-schema-stats` are registered and stored and
+  have no setting behind them. Their output belongs to the reporting work.
+
+Where the fixtures sit in the order:
+
+- `gql_config` returns the built-in defaults, then the ini options, then the environment
+  variables. A flag is applied on top of whatever `gql_config` returns, so a flag outranks
+  an overridden `gql_config` as well. A project that changes a few fields asks for the
+  original `gql_config` and replaces those fields.
+- `gql_url` returns the flag, else the URL of `gql_config`. An overridden `gql_url` replaces
+  that, and the flag still outranks it. `gql_seed` follows the same shape: by default it is
+  the effective seed, an override replaces it for one test, and the flag outranks it.
+- The configuration every client starts from is a copy. The flags are applied to it, then
+  `pytest_graphql_configure` runs on it, and a hook's change is final. A hook is code the
+  project installed, so it sits above the flags and sees them already applied.
+- `gql_schema_source` is outside the ordering. By default it is the instance that the ini
+  option or the environment variable names, and the environment wins. A fixture override
+  replaces it, and then the named path is never imported. The source is an instance of a
+  class with a `load()` method and a `fingerprint` string. A class is refused with a hint to
+  point at an instance. The path is imported when a test first needs the schema, because
+  importing runs user code. A missing module, a missing attribute and an object that is not a
+  source each fail with their own message. An exception that the module itself raises, and a
+  missing module that the module itself imports, propagate unchanged. The value
+  `pytest_graphql.IntrospectionSource` is the label of the built-in source. It means
+  introspection of the endpoint and is never imported, because the top-level package does
+  not export that class.
+- With no path set, the default `gql_schema_source` returns a marker that means "introspect
+  over the session transport". An `IntrospectionSource` needs a transport, and the session
+  transport is built after the source is read, so the default cannot be a ready one.
+
 ### Variables and options
 
 - Keyword arguments are the documented way to pass variables. `variables=` is the
@@ -353,6 +416,31 @@ Each hook is classified, and the classification is part of the contract.
   `firstresult`.
 - `pytest_graphql_report_section` runs every implementation and concatenates the results in
   hook order, each under its own heading.
+
+Delivery rules:
+
+- pluggy calls every implementation of a hook with the same arguments, so it cannot fold.
+  The two fold hooks are therefore walked by the plugin, in the order pluggy would call the
+  implementations, including `tryfirst` and `trylast`. An implementation may declare fewer
+  arguments than the hook. An exception from an implementation propagates unchanged. A hook
+  wrapper has no place in a fold, so a wrapper on either fold hook is refused with a message
+  that names the plugin.
+- The hook-delivering middleware belongs to each per-test client, and clones share it, so
+  `with_headers()`, `as_()` and `anonymous()` deliver the hooks too.
+- `pytest_graphql_configure`, `pytest_graphql_schema_loaded` and
+  `pytest_graphql_register_scalars` each run once per session. They run after the fixture a
+  project may override, so overriding `gql_config`, `gql_schema` or `gql_scalars` does not
+  skip them.
+- An overridable fixture does the work of its own default and no other fixture does it
+  early. The default `gql_transport` opens the pool and derives the session transport, and
+  asks the endpoint for nothing. The default `gql_schema` loads the schema over a probe
+  derived from the session transport, and closes the probe. A project that overrides
+  `gql_schema` therefore sends no introspection request, so an endpoint that refuses
+  introspection still works.
+- `pytest_graphql_register_scalars` receives a view of the session registry that replaces a
+  name registered twice and warns. A call that passes `replace=True` says it means to
+  replace and gets no warning. A client's own registry keeps the stricter rule of `ScalarRegistry`,
+  which refuses a duplicate, so the leniency belongs to the hook alone.
 
 ---
 
@@ -1439,6 +1527,12 @@ case-insensitively after stripping, and a later source replaces an earlier one f
 name instead of adding a second line. A genuinely repeated header uses an explicit list
 value.
 
+The plugin builds the `gql_headers` layer into the per-test client's `ClientConfig.headers`,
+merged over the session value, which puts it below `Auth.apply` and above the ini and
+environment headers. It first pins `schema_headers` to the session value, so a per-test header
+can never become the identity the session schema was loaded with. The `gql_auth` fixture may
+return a string, which is a bearer token, as `as_()` does.
+
 Schema identity is explicit. `ClientConfig.schema_headers` defaults to
 `ClientConfig.headers`. Schema loading uses it alone, and the function-scoped `gql_auth`
 fixture does not affect it, because the schema is session-scoped. A schema that varies by
@@ -1766,6 +1860,11 @@ edits this table and the CI workflow together, in the same commit, and records t
 in the changelog. A CI matrix that does not match these rows is a defect in CI. The
 documentation states the supported range and, separately, which pairs CI actually tests.
 
+Plugin code that reads an attribute only some pluggy versions have is covered twice. A test
+fakes the older shape, so every row checks that code path. The oldest-pytest row then runs it
+against the pluggy that pytest 7.4 resolves, which is the only place the real combination is
+checked.
+
 A no-pytest job installs without the `pytest` extra, imports the package, builds a client on
 a fake transport, and asserts `pytest` is absent from `sys.modules`. The client half of that
 check applies from the point where a client exists.
@@ -1929,6 +2028,10 @@ Excluded from v0.1 and tracked for a later release:
   therefore not blocking v0.1.
 - The `faker` extra.
 - The `approx` matcher helper and `NodeList.first`.
+- The `gql_selection_policy` fixture and an ini option for the connection page size. The
+  fixture set and the option table of the pytest plugin are those of `docs/reference/SPEC.md`
+  sections 7.2 and 7.4. `SelectionPolicy.connection_page_size` and the other policy fields
+  still apply to every client, and the existing options set the fields that have one.
 
 Async support is a later major version. Every module except the transport package and the
 client is pure and free of I/O, so adding an async client means adding an async transport
