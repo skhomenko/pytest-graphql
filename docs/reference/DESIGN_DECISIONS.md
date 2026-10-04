@@ -2191,6 +2191,12 @@ by operating system.
 - Artifact checks run on every build: `twine check`, PEP 621 metadata completeness,
   long-description rendering, wheel and sdist contents, and `__version__` agreeing with the
   tag.
+- The tag must be a PEP 440 version, or the build job stops. A version with a pre-release or
+  a development segment is a prerelease, as in PEP 440, and its GitHub release is marked as a
+  prerelease, so an alpha, beta or release candidate never becomes the latest release. A
+  post-release or a local label alone is not a prerelease. `scripts/check_artifacts.py`
+  makes the decision, and the release job passes it to `gh release create` as an explicit
+  true or false.
 
 ### Publication path
 

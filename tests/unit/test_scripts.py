@@ -66,3 +66,51 @@ def test_the_no_pytest_check_builds_and_calls_a_client(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "built a client on a fake transport" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("tag", "expected"),
+    [
+        ("v0.1.0a1", "true"),
+        ("v0.1.0b1", "true"),
+        ("v0.1.0rc1", "true"),
+        ("v0.1.0.dev0", "true"),
+        ("v0.1.0", "false"),
+        ("v0.1.0.post1", "false"),
+    ],
+)
+def test_the_release_job_reads_the_prerelease_flag(tag: str, expected: str) -> None:
+    """The release workflow passes exactly this output to gh release create."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "check_artifacts.py"),
+            "--tag",
+            tag,
+            "--print-prerelease",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"{expected}\n"
+
+
+def test_a_tag_that_is_not_a_version_stops_the_release_job() -> None:
+    """The step fails, so no release is created under a guessed flag."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPTS / "check_artifacts.py"),
+            "--tag",
+            "vlatest",
+            "--print-prerelease",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "not a PEP 440 version" in result.stderr
