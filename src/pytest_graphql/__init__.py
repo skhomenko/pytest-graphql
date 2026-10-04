@@ -22,9 +22,13 @@ from pytest_graphql._core.client import (
 from pytest_graphql._core.diagnostics import DiagnosticSnapshot, RequestInfo
 from pytest_graphql._core.errors import (
     DiagnosticRenderError,
+    ExpectedErrorNotRaised,
+    GraphQLExecutionError,
     GraphQLFieldError,
+    GraphQLPartialDataError,
     ResponseShapeError,
     ScalarNotRegisteredError,
+    WaitTimeoutError,
 )
 from pytest_graphql._core.factory import (
     DeterministicRandom,
@@ -64,9 +68,12 @@ __all__ = [
     "DeterministicRandom",
     "DiagnosticRenderError",
     "DiagnosticSnapshot",
+    "ExpectedErrorNotRaised",
     "Field",
     "GraphQLClient",
+    "GraphQLExecutionError",
     "GraphQLFieldError",
+    "GraphQLPartialDataError",
     "GraphQLResponse",
     "HeaderAuth",
     "Matcher",
@@ -82,6 +89,7 @@ __all__ = [
     "Selection",
     "SelectionPolicy",
     "Transport",
+    "WaitTimeoutError",
     "__version__",
     "absent",
     "any_length",

@@ -98,6 +98,7 @@ def test_there_are_fixtures_to_check() -> None:
         "derivable_transport.py",
         "factory_callbacks.py",
         "owned_acquisition.py",
+        "polling_ignore.py",
     }
 
 

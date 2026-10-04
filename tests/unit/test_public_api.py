@@ -21,7 +21,8 @@ import pytest_graphql
 #: hierarchy) lands with the milestones that implement it. The matcher helpers
 #: arrived with M6, minus `approx`, which D4 dropped. The factory surface
 #: (`DeterministicRandom`, `ScalarRegistry`, `ScalarSpec`, `unique` and the
-#: `ScalarNotRegisteredError` it raises) arrived with M7.
+#: `ScalarNotRegisteredError` it raises) arrived with M7. The execution
+#: errors, `WaitTimeoutError` and `ExpectedErrorNotRaised` arrived with M8.
 IMPLEMENTED_SURFACE = (
     "AUTO",
     "Auth",
@@ -31,8 +32,11 @@ IMPLEMENTED_SURFACE = (
     "CyclePolicy",
     "DeterministicRandom",
     "DiagnosticSnapshot",
+    "ExpectedErrorNotRaised",
     "Field",
     "GraphQLClient",
+    "GraphQLExecutionError",
+    "GraphQLPartialDataError",
     "GraphQLResponse",
     "HeaderAuth",
     "Matcher",
@@ -47,6 +51,7 @@ IMPLEMENTED_SURFACE = (
     "Selection",
     "SelectionPolicy",
     "Transport",
+    "WaitTimeoutError",
     "__version__",
     "absent",
     "any_length",

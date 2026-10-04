@@ -768,6 +768,11 @@ only when `raise_on_error=True`. Absent `data` with no errors is a protocol viol
 `data: null` with errors is `GraphQLExecutionError`, and `data: null` with no errors is a
 protocol violation.
 
+`GraphQLExecutionError(message)` stays valid for a caller that builds one, as in the published
+alpha. Every instance the library raises also carries `response`, the response that failed,
+and `errors`, its error list. An instance built without a response has `response` set to
+`None` and an empty `errors`, and `expect_error` does not capture it.
+
 `execute()` always returns `GraphQLResponse`. Convenience unwrapping stays on `query()` and
 `mutation()`, which have exactly one known top-level field. `GraphQLResponse.unwrap()` is
 the explicit opt-in for a raw document. It counts the fields the document selects at the top
@@ -852,19 +857,92 @@ hook adds only the `assert` line above them.
   no detail lines. When the options carry a diagnostic snapshot, the finished text is checked
   against it and the renderer raises `DiagnosticRenderError` if a secret is still in it.
 
+### Error assertions
+
+`GraphQLClient.expect_error(code=None, path=None, message_matches=None, count=None)` returns a context
+manager that yields `CapturedErrors`. The filter values are checked when `expect_error()` is
+called, so a bad one fails at the call and not after the block has run.
+
+- The block must end in a `GraphQLExecutionError` whose response carries at least one error.
+  `GraphQLPartialDataError` is one. A protocol violation is a `GraphQLExecutionError` with no
+  errors, so it propagates unchanged: a broken server cannot satisfy the block. Every other
+  exception, `BaseException` included, propagates unchanged and is never chained.
+- A block that ends without raising fails with `ExpectedErrorNotRaised`, which names the last
+  response the block received and how many it received. A client that does not raise, through
+  `raise_on_error=False` or `raise_on_partial=False`, never satisfies the block, and the
+  message says so.
+- Each filter is checked on its own, and each must match at least one error. They need not
+  match the same error, which is the rule SPEC 3.8 states. A filter that matches none fails
+  with the same class, `ExpectedErrorNotRaised`, because SPEC 8.1 names no other. Its
+  `unmatched` names the filters, its `errors` holds every error the server returned, and its
+  message lists them, bounded by `max_recorded_errors` with the count left out stated.
+- `code` equals `extensions["code"]` exactly. `path` equals the whole error path, segment by
+  segment: it is not a prefix, a name never equals an index, and a boolean is no index.
+  `message_matches` is `re.search`, like `matches()`, so anchors are the author's to write.
+  It takes a `str` or a compiled pattern, whose flags apply.
+- `count` is an exact assertion on the total number of errors the server returned. It is
+  not a matching filter: it counts every error, whatever `code`, `path` and `message_matches`
+  matched, and it is checked beside them. A mismatch fails like an unmatched filter, with
+  `count` in `unmatched` and the full error list in the message. It takes an integer of at
+  least 1, because a block that raises has at least one error. A `bool`, a non-integer or a
+  value below 1 is refused when `expect_error()` is called.
+- `CapturedErrors.errors` is every error the server returned, never only the matching ones.
+  `.first` is the first of them and `.response` is the response. They are readable once the
+  block has ended, and reading one earlier raises `GraphQLTestError`. A failed filter still
+  fills them before it raises. Its `repr()` shows a count and no server text.
+- A block sees the responses of every client in its context, so a call made through
+  `gql.as_(...)` counts, and nested blocks each count the calls made inside them. Each block
+  keeps its last response and a call count, nothing else.
+- A failed filter chains the error it judged as the cause only when that error's chain shows
+  no secret of its response's request, by the cause rule under "Polling".
+
 ### Polling
 
-`wait_until` computes its deadline once from `time.monotonic()`. An attempt is counted when
+`wait_until(name, *, until, timeout=30.0, interval=1.0, backoff=1.0, ignore=(), **variables)`
+computes its deadline once from `time.monotonic()`. An attempt is counted when
 the call is made, and at least one attempt always runs, `timeout=0` included. The sleep after
 a failed attempt is `min(interval * backoff ** (attempt - 1), remaining)`, and the loop
 raises once `remaining` reaches zero.
 
-`ignore` accepts only `Exception` subclasses. Passing anything else raises `TypeError` at
-call time, so a `BaseException` such as `KeyboardInterrupt` is never swallowed by a poll
-loop. An exception outside `ignore` propagates. `WaitTimeoutError` carries attempts, elapsed
-monotonic time, the last response and the last swallowed exception.
+That formula is the whole rule. SPEC 3.9 also capped a delay at `interval * 10`, and that cap
+no longer applies: the deadline is the only bound on a sleep, so an exact sleep sequence is
+fixed by the three numbers alone. A float overflow in `backoff ** (attempt - 1)` means a
+delay larger than any deadline, so it is clamped to `remaining`, and a zero interval stays
+zero. The clock and the sleep are read through the private names `_monotonic` and `_sleep` of
+`pytest_graphql._core.polling`, which a test replaces.
 
-Polling covers queries only.
+`timeout` and `interval` are finite numbers of at least zero and `backoff` is a finite number
+of at least one. A boolean or a non-number raises `TypeError` and a number outside that
+range raises `ValueError`, both before the first call. An infinite timeout is refused,
+because a poll that cannot end is not a bounded wait.
+
+`ignore` accepts a class or a tuple of classes, and only `Exception` subclasses. Passing
+anything else raises `TypeError` at call time, so a `BaseException` such as `KeyboardInterrupt`
+is never swallowed by a poll loop, during an attempt or during the sleep. An exception
+outside `ignore` propagates unchanged. `ignore` covers the whole attempt: the call, the
+unwrapping of its response and `until` itself.
+
+`until` receives what `query()` returns for the same arguments, or the whole response when
+`raw=True`, and `wait_until` returns that same value. Every other keyword is read as
+`query()` reads it, so `timeout` here is the deadline of the whole poll and the HTTP timeout
+of one attempt is `ClientConfig.timeout`.
+
+`WaitTimeoutError` carries attempts, elapsed monotonic time, the limit, the operation name,
+the last response and the last swallowed exception. The last response is the most recent
+response any attempt received, including the one a swallowed `GraphQLExecutionError` carries.
+These two values and the redacted request of the attempt that raised the exception
+(`last_exception_request`) are the only per-attempt state a poll keeps. That request is the
+attempt's own, never an earlier one, and it is empty when the attempt failed before any
+request existed. The exception text is shown only after it was checked against that request.
+With no request to check against, the text is withheld and the exception stays on
+`last_exception`. The exception is chained as the cause only when it is a `GraphQLTestError`
+and neither it nor anything a traceback prints with it (its notes, its cause, its context,
+the members of an exception group) shows a secret of those requests. The class alone proves
+nothing, because a caller can build a `GraphQLTestError` that no request ever checked.
+
+Polling covers queries only. The schema decides: a name that resolves to a mutation or a
+subscription raises `ArgumentError` before any call, whatever the name looks like, and a name
+that is both a query and a mutation is polled as the query.
 
 ---
 
@@ -1002,6 +1080,22 @@ values to do their work. Nothing else should.
   error, and then the finished text is scrubbed again as a whole, because a server can
   echo a credential into a path as easily as into a message, and the tuple's own
   quoting can complete one across two segments.
+- A `GraphQLErrorInfo` also keeps one summary line, `CODE at ["path"]: message`, built when the
+  response is built, because a response holds only a digest-only snapshot and cannot scrub
+  server text afterward. Each piece goes through the request's scrub, escape and cut, and the
+  joined line is scrubbed again. Only the first `max_recorded_errors` errors get one. Every
+  failure text that shows server errors, which is the unmatched-filter message of
+  `expect_error`, is made of these lines and never of a raw message. A failure text is also
+  checked line by line against the snapshot of each request it names, and a failing line is
+  replaced with the withheld notice on its own, so one hostile entry cannot hide the rest. The
+  finished message then follows the exception rule below. A server message with a newline
+  continues under its own entry's indent, so it cannot pass for another entry.
+  `WaitTimeoutError` shows the last swallowed exception as its class name and message,
+  escaped and cut at `max_diagnostic_bytes`, and checks that line against the snapshot of the
+  attempt that raised it and of any request or response the exception carries. An exception
+  from an attempt with no snapshot is shown as its class name and the withheld notice. The
+  same rule governs every exception a failure attaches as its cause: it is attached only after
+  its whole chain was checked against a snapshot, and never when none is known.
 - `repr()` is a further transform: it doubles every backslash and escapes quotes after the
   last scrub ran, so text with no secret in it can render one. Every value field the
   library builds, in a snapshot, an excerpt, a scrubbed error object or a recorded call,

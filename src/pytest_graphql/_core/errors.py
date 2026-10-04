@@ -11,12 +11,12 @@ Suggestions come from ``difflib.get_close_matches``, the standard library
 fuzzy matcher, per SPEC 8.3: no third-party fuzzy matching dependency.
 
 ``GraphQLTransportError`` and its leaves, plus ``GraphQLRequestError``, carry
-the real shape M5a's transport layer raises (C3, C13). The leaves below
-``GraphQLExecutionError`` are still left as plain markers: their constructors
-belong to M5c, some of it transcribed verbatim from published text, so this
-module must not guess at a shape that text will also define. ``WaitTimeoutError``
-and ``ExpectedErrorNotRaised`` are M8's. Defining every leaf here only fixes
-its place in the hierarchy ahead of the milestone that gives it a body.
+the real shape M5a's transport layer raises (C3, C13).
+``GraphQLExecutionError`` and its leaf carry the response that failed,
+``ExpectedErrorNotRaised`` and ``WaitTimeoutError`` carry what M8's error
+assertions and polling found. Every one of them is built from a response, so
+each checks its complete message against that response's request before it is
+raised (DESIGN_DECISIONS.md section 7, "Boundary").
 """
 
 from __future__ import annotations
@@ -29,8 +29,11 @@ if TYPE_CHECKING:
     # Deferred to break the import cycle: diagnostics.py imports
     # DiagnosticRenderError from this module, so this module cannot import
     # diagnostics.py back at runtime. Every transport and request exception
-    # below only needs the name for its ``request`` parameter's type.
+    # below only needs the name for its ``request`` parameter's type. The
+    # response types import this module in turn.
     from pytest_graphql._core.diagnostics import DiagnosticSnapshot
+    from pytest_graphql._core.response.envelope import GraphQLResponse
+    from pytest_graphql._core.response.types import GraphQLErrorInfo
 
 
 def _best_match(name: str, candidates: Sequence[str]) -> str | None:
@@ -243,6 +246,20 @@ class ArgumentError(GraphQLClientError):
         return cls._from_message(
             message, kind=kind, operation_name=operation_name, bad_name=arg_name
         )
+
+    @classmethod
+    def not_a_query(cls, *, kind: str, name: str) -> ArgumentError:
+        """``wait_until`` was given an operation that is not a query.
+
+        A poll repeats its call, so a mutation would repeat its side effect
+        on every attempt. The schema decided ``kind``, never the name.
+        """
+        message = (
+            f"wait_until polls queries only, and {name!r} is a {kind}.\n"
+            "  Polling would repeat its side effect on every attempt.\n"
+            f"  Poll a query that reads the result, or call {kind}({name!r}) once."
+        )
+        return cls._from_message(message, kind=kind, operation_name=name, bad_name=name)
 
     @classmethod
     def unknown_option(
@@ -532,11 +549,35 @@ class GraphQLRequestError(GraphQLTestError):
 
 
 class GraphQLExecutionError(GraphQLTestError):
-    """The server returned an ``errors`` array. Its leaves belong to M5c."""
+    """The server returned an ``errors`` array, or broke the protocol.
+
+    ``GraphQLExecutionError(message)`` works as it did in the published
+    alpha. The library always passes ``response=``, the response that failed:
+    the message is then ``summary`` and the response's ``repr``, which shows
+    the status, counts and the redacted request, never a server value. When
+    that ``repr`` refuses to render, the error is still raised with the
+    withheld notice in its place, because a refusal must not replace the
+    error the caller is waiting for. ``response`` is ``None`` and ``errors``
+    is empty only for an instance a caller built without one.
+    """
+
+    def __init__(
+        self, summary: str, *, response: GraphQLResponse[Any] | None = None
+    ) -> None:
+        self.response = response
+        if response is None:
+            super().__init__(summary)
+            return
+        super().__init__(f"{summary}\n  {_shown(response)}")
+        response.request._guard.check_exception(self)
+
+    @property
+    def errors(self) -> tuple[GraphQLErrorInfo, ...]:
+        return () if self.response is None else self.response.errors
 
 
 class GraphQLPartialDataError(GraphQLExecutionError):
-    pass
+    """Errors and data both present, with ``raise_on_partial`` on."""
 
 
 class GraphQLFieldError(GraphQLTestError, AttributeError, KeyError):
@@ -592,9 +633,297 @@ class ResponseShapeError(GraphQLTestError):
         super().__init__(message)
 
 
-class WaitTimeoutError(GraphQLTestError):
-    """A ``wait_until`` poll exhausted its deadline. Its shape belongs to M8."""
+def _shown(value: object) -> str:
+    """``repr(value)``, or the withheld notice when the renderer refused.
+
+    The error that carries the text must still exist, so a refusal never
+    replaces it (``GraphQLExecutionError``).
+    """
+    from pytest_graphql._core.diagnostics import WITHHELD_TEXT
+
+    try:
+        return repr(value)
+    except DiagnosticRenderError:
+        return WITHHELD_TEXT
+
+
+def _guarded_line(
+    snapshots: Sequence[DiagnosticSnapshot], line: str, fallback: str
+) -> str:
+    """``line``, or ``fallback`` when it or its ``repr`` shows a secret.
+
+    One line is replaced rather than the whole message, so a single hostile
+    entry cannot hide the rest of a failure report. The finished message is
+    still checked as a whole by ``check_exception``, which stays the backstop.
+    """
+    for snapshot in snapshots:
+        if snapshot._guard.contains(line) or snapshot._guard.contains(repr(line)):
+            return fallback
+    return line
+
+
+def _indented(text: str, prefix: str) -> str:
+    """``text`` with every continuation line pushed under ``prefix``.
+
+    A server can put a newline in a message, and a continuation that starts
+    at the list margin would read as another entry of the report.
+    """
+    return text.replace("\n", "\n" + " " * len(prefix))
+
+
+def _check_against(
+    error: GraphQLTestError, snapshots: Sequence[DiagnosticSnapshot]
+) -> None:
+    for snapshot in snapshots:
+        snapshot._guard.check_exception(error)
 
 
 class ExpectedErrorNotRaised(GraphQLTestError):  # noqa: N818 -- name fixed by SPEC 8.1
-    """An ``expect_error`` block completed without raising. Its shape belongs to M8."""
+    """An ``expect_error`` block did not end in the error it expected.
+
+    Two cases share this class. The block returned without a
+    ``GraphQLExecutionError`` (``errors`` and ``unmatched`` are empty), or it
+    raised one and a filter matched none of its errors (``unmatched`` names
+    the filters and ``errors`` is everything the server returned). ``response``
+    is the last response the block received, or the failed one, and is
+    ``None`` when the block made no GraphQL call. ``calls`` counts the
+    responses the block received.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        response: GraphQLResponse[Any] | None,
+        errors: Sequence[GraphQLErrorInfo] = (),
+        unmatched: Sequence[str] = (),
+        calls: int = 0,
+    ) -> None:
+        self.response = response
+        self.errors = tuple(errors)
+        self.unmatched = tuple(unmatched)
+        self.calls = calls
+        super().__init__(message)
+        if response is not None:
+            response.request._guard.check_exception(self)
+
+    @classmethod
+    def no_error(
+        cls, *, response: GraphQLResponse[Any] | None, calls: int
+    ) -> ExpectedErrorNotRaised:
+        """The block ended without a ``GraphQLExecutionError``."""
+        lines = [
+            "expect_error: the block did not raise GraphQLExecutionError.",
+            "  Expected: a response with errors that the client raises.",
+        ]
+        if response is None:
+            lines.append("  The block made no GraphQL call.")
+        else:
+            lines.append(
+                f"  Last response (of {calls} call(s) in the block): {_shown(response)}"
+            )
+            if response.errors:
+                lines.append(
+                    f"  The last response carried {len(response.errors)} error(s) "
+                    "and the client did not raise: raise_on_error or "
+                    "raise_on_partial let it through."
+                )
+        lines += [
+            "  Fix: make the call fail the way the test expects, or remove "
+            "expect_error.",
+            "  A call with raise_on_error=False never raises, so read "
+            "response.errors instead.",
+        ]
+        return cls("\n".join(lines), response=response, calls=calls)
+
+    @classmethod
+    def unmatched_filters(
+        cls,
+        *,
+        response: GraphQLResponse[Any],
+        filters: Sequence[tuple[str, str]],
+        calls: int,
+    ) -> ExpectedErrorNotRaised:
+        """A raised error that no filter set matched.
+
+        ``filters`` is each unmatched filter as its name and the text of the
+        value the author wrote. That text is the author's, not the server's,
+        yet the author can have written a credential into it, so it is
+        checked like every other line.
+        """
+        from pytest_graphql._core.diagnostics import WITHHELD_TEXT
+
+        snapshots = (response.request,)
+        errors = response.errors
+        shown = [(i, e._summary) for i, e in enumerate(errors, start=1) if e._summary]
+        listed = ", ".join(f"{name}={text}" for name, text in filters)
+        lines = [
+            "expect_error: a filter matched none of the errors the server returned.",
+            _guarded_line(
+                snapshots,
+                f"  Unmatched filters: {listed}",
+                f"  Unmatched filters: {WITHHELD_TEXT}",
+            ),
+            f"  The server returned {len(errors)} error(s):",
+        ]
+        for index, summary in shown:
+            prefix = f"    [{index}] "
+            lines.append(
+                _guarded_line(
+                    snapshots,
+                    prefix + _indented(summary, prefix),
+                    prefix + WITHHELD_TEXT,
+                )
+            )
+        if len(shown) < len(errors):
+            lines.append(
+                f"    ... and {len(errors) - len(shown)} more not shown "
+                f"(max_recorded_errors={len(shown)})."
+            )
+        lines.append(
+            "  Fix: change the filters to match one of these errors, or fix the "
+            "operation that returned them."
+        )
+        return cls(
+            "\n".join(lines),
+            response=response,
+            errors=errors,
+            unmatched=[name for name, _ in filters],
+            calls=calls,
+        )
+
+
+class WaitTimeoutError(GraphQLTestError):
+    """A ``wait_until`` poll reached its deadline without ``until`` turning true.
+
+    ``attempts`` counts every call that was made, ``elapsed`` is monotonic
+    seconds from the first attempt, and ``timeout`` is the limit the poll was
+    given. ``last_response`` is the most recent response an attempt received,
+    including the response a swallowed execution error carried, and
+    ``last_exception`` is the most recent exception ``ignore`` swallowed. They
+    are the only per-attempt state a poll keeps, with ``last_exception_request``:
+    the redacted request of the attempt that raised ``last_exception``, or
+    ``None`` when that attempt failed before a request existed.
+
+    The message shows the text of ``last_exception`` only when a request
+    context of its own attempt is known to check it against. Without one the
+    text is withheld, and the exception stays on ``last_exception``.
+    """
+
+    def __init__(
+        self,
+        *,
+        operation: str,
+        attempts: int,
+        elapsed: float,
+        timeout: float,
+        last_response: GraphQLResponse[Any] | None,
+        last_exception: Exception | None,
+        last_exception_request: DiagnosticSnapshot | None = None,
+    ) -> None:
+        self.operation = operation
+        self.attempts = attempts
+        self.elapsed = elapsed
+        self.timeout = timeout
+        self.last_response = last_response
+        self.last_exception = last_exception
+        self.last_exception_request = last_exception_request
+        snapshots = self._snapshots()
+        super().__init__(self._render(snapshots))
+        _check_against(self, snapshots)
+
+    def _exception_snapshots(self) -> tuple[DiagnosticSnapshot, ...]:
+        """The request contexts of the attempt that raised the last exception.
+
+        Its own attempt's, and the ones the exception carries. The last
+        response is not among them: it can belong to a later attempt, whose
+        request can hold a secret the failed attempt's did not.
+        """
+        found: list[DiagnosticSnapshot] = []
+        if self.last_exception_request is not None:
+            found.append(self.last_exception_request)
+        exception = self.last_exception
+        carried = getattr(exception, "request", None)
+        if carried is not None:
+            found.append(carried)
+        response = getattr(exception, "response", None)
+        if response is not None:
+            found.append(response.request)
+        return tuple(found)
+
+    def _snapshots(self) -> tuple[DiagnosticSnapshot, ...]:
+        """Every request whose secrets this message must not show."""
+        found = list(self._exception_snapshots())
+        if self.last_response is not None:
+            found.append(self.last_response.request)
+        return tuple(found)
+
+    def safe_cause(self) -> Exception | None:
+        """``last_exception`` when a traceback may print it, else ``None``.
+
+        Only a ``GraphQLTestError`` is a candidate, so a foreign exception is
+        named once, in the message, and not printed a second time as a cause.
+        A candidate qualifies when its attempt's request context is known and
+        neither it nor anything linked to it shows a secret of any request this
+        error knows. The class alone does not decide: a caller can build a
+        ``GraphQLTestError`` by hand, and no request ever checked it.
+        """
+        from pytest_graphql._core.diagnostics import exception_chain_is_clean
+
+        exception = self.last_exception
+        if not isinstance(exception, GraphQLTestError):
+            return None
+        if not self._exception_snapshots():
+            return None
+        if exception_chain_is_clean(exception, self._snapshots()):
+            return exception
+        return None
+
+    def _render(self, snapshots: Sequence[DiagnosticSnapshot]) -> str:
+        from pytest_graphql._core.diagnostics import (
+            DEFAULT_MAX_DIAGNOSTIC_BYTES,
+            WITHHELD_TEXT,
+            escape_control_characters,
+            truncate_text,
+        )
+
+        if self.last_response is None:
+            response = "  Last response: none, no attempt returned one."
+        else:
+            response = f"  Last response: {_shown(self.last_response)}"
+        prefix = "  Last ignored exception: "
+        if self.last_exception is None:
+            exception = f"{prefix}none."
+        elif not self._exception_snapshots():
+            exception = (
+                f"{prefix}{type(self.last_exception).__name__}: [withheld: no "
+                "request context to check this text against, read "
+                "WaitTimeoutError.last_exception]"
+            )
+        else:
+            try:
+                text = str(self.last_exception)
+            except Exception:
+                text = "<message unavailable>"
+            text, cut = truncate_text(
+                escape_control_characters(text), DEFAULT_MAX_DIAGNOSTIC_BYTES
+            )
+            if cut:
+                text += f"... (truncated, {cut} byte(s) cut)"
+            exception = _guarded_line(
+                snapshots,
+                prefix
+                + _indented(f"{type(self.last_exception).__name__}: {text}", "    "),
+                prefix + WITHHELD_TEXT,
+            )
+        return "\n".join(
+            [
+                f"wait_until({self.operation!r}) timed out: {self.attempts} "
+                f"attempt(s) in {self.elapsed:.2f} s (limit {self.timeout:g} s).",
+                "  Expected: until() to return true before the deadline.",
+                response,
+                exception,
+                "  Fix: raise timeout, check that until() can become true, or "
+                "list the exception that hides the real failure in ignore.",
+            ]
+        )

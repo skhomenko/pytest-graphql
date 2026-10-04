@@ -11,6 +11,8 @@ do, and every leaf class SPEC 8.1 names exists and is reachable from
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from pytest_graphql._core.errors import (
@@ -226,3 +228,72 @@ def test_hierarchy_matches_spec_8_1(
 ) -> None:
     assert issubclass(leaf, parent)
     assert issubclass(leaf, GraphQLTestError)
+
+
+# -- the execution error and its leaf (M8 gives them a real shape) ------------
+
+
+def _execution_error_for(
+    *steps: Any, **config: Any
+) -> tuple[GraphQLExecutionError, Any]:
+    from tests.unit.m8_support import build_test_schema, make_client
+
+    client, _ = make_client(build_test_schema(), *steps, **config)
+    with pytest.raises(GraphQLExecutionError) as caught:
+        client.query("user", id="u1", fields=["id"])
+    return caught.value, client
+
+
+def test_an_execution_error_carries_the_response_and_its_errors() -> None:
+    from tests.unit.m8_support import failure, rejected
+
+    error, _ = _execution_error_for(rejected(failure("a"), failure("b")))
+
+    assert [each.message for each in error.errors] == ["a", "b"]
+    assert error.errors is error.response.errors
+    assert not error.response.has_data
+
+
+def test_an_execution_error_message_structure() -> None:
+    from tests.unit.m8_support import failure, rejected
+
+    error, _ = _execution_error_for(rejected(failure("a"), failure("b")))
+
+    assert str(error) == (f"the server returned 2 error(s).\n  {error.response!r}")
+
+
+def test_a_partial_data_error_message_structure() -> None:
+    from tests.unit.m8_support import envelope, failure
+
+    error, _ = _execution_error_for(
+        envelope({"user": {"id": "u1"}}, (failure("half"),))
+    )
+
+    assert type(error) is GraphQLPartialDataError
+    assert str(error) == (
+        f"the server returned 1 error(s) alongside data.\n  {error.response!r}"
+    )
+
+
+def test_a_protocol_violation_message_structure() -> None:
+    from tests.unit.m8_support import envelope
+
+    error, _ = _execution_error_for(envelope(None))
+
+    assert error.errors == ()
+    assert str(error) == (
+        "the server returned no errors and no data (null), which is a "
+        f"protocol violation.\n  {error.response!r}"
+    )
+
+
+def test_an_execution_error_can_still_be_built_from_a_message_alone() -> None:
+    error = GraphQLExecutionError("the server said no")
+    partial = GraphQLPartialDataError("half")
+
+    assert str(error) == "the server said no"
+    assert repr(error) == "GraphQLExecutionError(the server said no)"
+    assert error.response is None
+    assert error.errors == ()
+    assert str(partial) == "half"
+    assert isinstance(partial, GraphQLExecutionError)
