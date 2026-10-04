@@ -10,7 +10,7 @@ cycle is promised.
 
 ## [Unreleased]
 
-## [0.1.0b1] - 2026-10-04
+## [0.1.0b1] - 2026-10-05
 
 First beta. It adds response matching, seeded fake data, error assertions,
 polling, and the full pytest plugin: configuration, fixtures, hooks, failure
