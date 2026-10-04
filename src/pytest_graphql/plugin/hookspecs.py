@@ -17,14 +17,15 @@ it cannot fold. :func:`fold` therefore walks the implementations itself, in the
 order pluggy would call them, and a hook wrapper has no place in that walk and
 is refused.
 
-``pytest_graphql_report_section`` is declared here. Its implementations run at
-M9b, when the failure section is written.
+``pytest_graphql_report_section`` is delivered by the reporting module when the
+report of a failed test is made. Every implementation runs in hook order, and each
+non-``None`` result is added under a heading of its own.
 """
 
 from __future__ import annotations
 
 import warnings
-from typing import Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import pytest
 from graphql import GraphQLSchema
@@ -35,6 +36,9 @@ from pytest_graphql._core.diagnostics import RequestInfo
 from pytest_graphql._core.factory import ScalarRegistry, ScalarSpec
 from pytest_graphql._core.response import GraphQLResponse
 from pytest_graphql._core.schema.source import SchemaSource
+
+if TYPE_CHECKING:
+    from pytest_graphql.plugin.reporting import CallTrace
 
 T = TypeVar("T")
 
@@ -91,7 +95,15 @@ def pytest_graphql_register_scalars(registry: ScalarRegistry) -> None:
 def pytest_graphql_report_section(
     response: GraphQLResponse[Any], item: pytest.Item, config: pytest.Config
 ) -> str | None:
-    """Each implementation adds a section to the failure report of a test."""
+    """Each implementation adds a section to the failure report of a test.
+
+    It runs once for each failed test that made a GraphQL call and received a
+    response, at the first phase that failed, with the last response the test
+    received. Return the text of a
+    section, or ``None`` for no section. Every implementation runs and each
+    result is added under its own heading, in hook order. Text that shows a
+    value the request redacted is withheld.
+    """
 
 
 def fold(caller: HookCaller, name: str, value: T) -> T:
@@ -123,18 +135,30 @@ class HookMiddleware:
     The plugin appends it to the client's chain after any middleware, so
     user middleware runs before the pytest hooks on the way out and after them
     on the way back.
+
+    Given a trace, it also tells the trace which request was sent and which
+    response came back, once the hooks have run, so a failure report can read the
+    last response and a failed assertion can scrub with the secrets of the
+    requests the test sent. The trace is bounded and goes when the test ends.
     """
 
-    def __init__(self, config: pytest.Config) -> None:
+    def __init__(self, config: pytest.Config, trace: CallTrace | None = None) -> None:
         self._hook = config.hook
+        self._trace = trace
 
     def before_request(self, request: RequestInfo) -> RequestInfo | None:
-        return fold(self._hook.pytest_graphql_before_request, "request", request)
+        sent = fold(self._hook.pytest_graphql_before_request, "request", request)
+        if self._trace is not None:
+            self._trace.note_request(sent)
+        return sent
 
     def after_response(
         self, response: GraphQLResponse[Any]
     ) -> GraphQLResponse[Any] | None:
-        return fold(self._hook.pytest_graphql_after_response, "response", response)
+        received = fold(self._hook.pytest_graphql_after_response, "response", response)
+        if self._trace is not None:
+            self._trace.note_response(received)
+        return received
 
 
 class ReplacingRegistry(ScalarRegistry):

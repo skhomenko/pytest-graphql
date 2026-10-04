@@ -8,6 +8,7 @@ share, so a correction to either reaches every releasing call site.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import math
 import re
@@ -41,10 +42,14 @@ from pytest_graphql._core.diagnostics import (
     DEFAULT_MIN_REDACTED_VALUE_LENGTH,
     DEFAULT_REDACT_HEADERS,
     DEFAULT_REDACT_VARIABLES,
+    WITHHELD_TEXT,
     DiagnosticsRecorder,
     OmissionRecord,
     RecordedCall,
     RequestInfo,
+    header_credentials,
+    request_credentials,
+    require_safe_rendering,
     safe_excerpt,
 )
 from pytest_graphql._core.errors import (
@@ -53,6 +58,7 @@ from pytest_graphql._core.errors import (
     GraphQLPartialDataError,
     SelectionError,
 )
+from pytest_graphql._core.excerpt import render_data_excerpt
 from pytest_graphql._core.expect_error import (
     CapturedErrors,
     ExpectedError,
@@ -82,6 +88,8 @@ from pytest_graphql._core.transport.httpx_transport import (
     DEFAULT_TIMEOUT_SECONDS,
     CookieScope,
     HttpxTransport,
+    _parse_proxy,
+    _proxy_credentials,
     checked_seconds,
     checked_timeout,
 )
@@ -259,6 +267,32 @@ class ClientConfig:
 # -- the client (part 6 of 2.14, call flow SPEC 5.2) --------------------------
 
 
+def configuration_credentials(config: ClientConfig) -> tuple[tuple[str, str], ...]:
+    """Every credential ``config`` holds, as ``(label, value)`` pairs.
+
+    A configuration has four fields that carry one: ``headers``,
+    ``schema_headers``, ``cookies`` and ``proxy``. Each call's request lists all
+    of them in its secret set, whichever of them that call sends. Text built
+    from the request is scrubbed before it is cut, so a request that did not
+    know a credential could not remove it, and a cut through it would leave the
+    start of it in the text (DESIGN section 7, "Stage order"). A server can echo
+    any of them, because the schema load and the calls go to one endpoint.
+
+    The header fields go through the header rule. A cookie value and what the
+    proxy makes the pool send are always credentials.
+    """
+    found = list(header_credentials(config.headers, config.redact_headers))
+    if config.schema_headers is not None:
+        found.extend(header_credentials(config.schema_headers, config.redact_headers))
+    found.extend(("cookie", str(value)) for value in config.cookies.values())
+    if config.proxy is not None:
+        # An unusable proxy is refused where it is used, and holds no credential
+        # this function could name.
+        with contextlib.suppress(ValueError):
+            found.extend(_proxy_credentials(_parse_proxy(config.proxy, source="proxy")))
+    return tuple(found)
+
+
 class GraphQLClient:
     """One logical client: a transport, a schema, and one identity.
 
@@ -302,6 +336,7 @@ class GraphQLClient:
 
         self._schema = schema
         self._config = config if config is not None else ClientConfig()
+        self._credentials = configuration_credentials(self._config)
         if scalars is not None and not isinstance(scalars, ScalarRegistry):
             raise TypeError(
                 "scalars must be a ScalarRegistry or None, got "
@@ -640,6 +675,7 @@ class GraphQLClient:
             max_recorded_errors=config.max_recorded_errors,
             omissions=tuple(omissions),
             omissions_total=omissions_total,
+            transport_credentials=self._credentials,
         )
         if self._auth is not None:
             request = self._auth.apply(request)
@@ -647,6 +683,23 @@ class GraphQLClient:
             request,
             headers=merge_headers(
                 request.headers, self._headers, options.get("headers")
+            ),
+        )
+
+    def _with_held(self, request: RequestInfo) -> RequestInfo:
+        """``request`` with what past calls sent added to its secret set.
+
+        Text is cut while a call is recorded, and the request of a later call
+        does not carry a header, variable or cookie that an earlier call sent. A
+        server that repeats one, with a cap that ends inside it, would leave the
+        start of it in the text. The transport builds text from the request it is
+        handed too, so it is handed this one.
+        """
+        return dataclasses.replace(
+            request,
+            transport_credentials=(
+                *request.transport_credentials,
+                *self._recorder._held(),
             ),
         )
 
@@ -689,8 +742,13 @@ class GraphQLClient:
             )
         except BaseException:
             if trace is not None:
-                trace.snapshot = request.redacted()
+                trace.snapshot = self._with_held(request).redacted()
             raise
+
+        # The request as it will be sent: what it carries is what a server can
+        # repeat in a later call's response.
+        self._recorder._hold(request_credentials(request))
+        request = self._with_held(request)
 
         started = time.perf_counter()
         status_code: int | None = None
@@ -699,6 +757,7 @@ class GraphQLClient:
             status_code = raw.status_code
             duration_ms = (time.perf_counter() - started) * 1000.0
             if raw.transport_credentials:
+                self._recorder._hold(raw.transport_credentials)
                 request = dataclasses.replace(
                     request,
                     transport_credentials=(
@@ -731,19 +790,12 @@ class GraphQLClient:
                     status_code=status_code,
                     duration_ms=(time.perf_counter() - started) * 1000.0,
                     failure=safe_excerpt(request, _failure_text(failure)),
+                    curl=_curl_text(request),
                 )
             )
             raise
 
-        self._recorder.record(
-            RecordedCall(
-                request=response.request,
-                outcome="errors" if response.errors else "ok",
-                status_code=response.http.status_code,
-                duration_ms=response.duration_ms,
-                error_count=len(response.errors),
-            )
-        )
+        self._recorder.record(_recorded_response(request, response))
         # Every response is seen by an open `expect_error` block before the
         # client decides whether to raise it, so the block can name the
         # response it received even when nothing raised.
@@ -786,6 +838,49 @@ class GraphQLClient:
             f"the server returned {len(response.errors)} error(s).",
             response=response,
         )
+
+
+def _curl_text(request: RequestInfo) -> str:
+    """``as_curl()`` for a record, or the withheld notice when it refuses.
+
+    Recording must not replace the exception the caller is waiting for, and a
+    refusal is a ``DiagnosticRenderError``, so it cannot propagate from here.
+    """
+    try:
+        return request.as_curl()
+    except Exception:
+        return WITHHELD_TEXT
+
+
+def _recorded_response(
+    request: RequestInfo, response: GraphQLResponse[Any]
+) -> RecordedCall:
+    """The record of a call that returned a response, text built from ``request``.
+
+    The error lines were built when the response was, with the live request in
+    hand. The data excerpt is built here for the same reason, and checked once
+    against the snapshot before it is kept.
+    """
+    try:
+        excerpt = render_data_excerpt(request, response.raw.get("data"))
+        text = require_safe_rendering(response.request, excerpt.text, "data excerpt")
+        fields, cut = excerpt.fields, excerpt.cut
+    except Exception:
+        text, fields, cut = WITHHELD_TEXT, 0, False
+    return RecordedCall(
+        request=response.request,
+        outcome="errors" if response.errors else "ok",
+        status_code=response.http.status_code,
+        duration_ms=response.duration_ms,
+        error_count=len(response.errors),
+        errors=tuple(
+            info._summary for info in response.errors if info._summary is not None
+        ),
+        data=text,
+        data_fields=fields,
+        data_cut=cut,
+        curl=_curl_text(request),
+    )
 
 
 def _failure_text(failure: BaseException) -> str:
@@ -887,6 +982,7 @@ class _IntrospectionExecutor:
             min_redacted_value_length=config.min_redacted_value_length,
             max_diagnostic_bytes=config.max_diagnostic_bytes,
             max_recorded_errors=config.max_recorded_errors,
+            transport_credentials=configuration_credentials(config),
         )
         raw = self._transport.send(request, timeout=config.call_timeout())
         envelope: dict[str, Any] = {"data": raw.data}

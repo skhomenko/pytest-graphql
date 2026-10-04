@@ -187,6 +187,7 @@ import hashlib
 import json
 import re
 import shlex
+import threading
 import unicodedata
 import urllib.parse
 from collections import defaultdict, deque
@@ -851,6 +852,43 @@ def require_safe_rendering(
     return snapshot._guard.require(text, renderer)
 
 
+def distinct_secret_sets(
+    snapshots: Iterable[DiagnosticSnapshot],
+) -> list[DiagnosticSnapshot]:
+    """One snapshot for each distinct secret set among ``snapshots``, in order.
+
+    A check hashes every window of the text, so a caller that checks many lines
+    against many calls takes this once and checks against the short list.
+    """
+    kept: list[DiagnosticSnapshot] = []
+    guards: list[_SecretGuard] = []
+    for snapshot in snapshots:
+        if snapshot._guard not in guards:
+            guards.append(snapshot._guard)
+            kept.append(snapshot)
+    return kept
+
+
+def require_safe_for_all(
+    snapshots: Iterable[DiagnosticSnapshot], text: str, renderer: str
+) -> str:
+    """Validate ``text`` against every distinct secret set among ``snapshots``.
+
+    A report that shows several calls is built from snapshots whose secret sets
+    are usually equal, because one test sends the same headers on every call.
+    Each distinct set checks the text once, since a check hashes every window of
+    it. Raises :class:`~pytest_graphql._core.errors.DiagnosticRenderError` for the
+    first set that finds a secret.
+    """
+    guards: list[_SecretGuard] = []
+    for snapshot in snapshots:
+        if snapshot._guard not in guards:
+            guards.append(snapshot._guard)
+    for guard in guards:
+        guard.require(text, renderer)
+    return text
+
+
 def _checked_dataclass_repr(obj: Any, guard: _SecretGuard) -> str:
     """A dataclass's default ``repr`` text, validated whole by ``guard``."""
     shown = ", ".join(
@@ -1170,6 +1208,28 @@ def basic_credentials(
         (source, pair),
         (header, f"Basic {token}"),
     ]
+
+
+def header_credentials(
+    headers: Mapping[str, str], redact_headers: Iterable[str]
+) -> tuple[tuple[str, str], ...]:
+    """The ``(name, value)`` pairs of ``headers`` that the header rule counts.
+
+    A header is a credential when its name is in ``redact_headers``, and every
+    value of a ``Cookie`` header is one too. This is the one place that rule is
+    written down: :meth:`RequestInfo._redaction_context` applies it to the
+    request's own headers, and a caller with headers that no request carries,
+    such as the schema headers, applies it to those.
+    """
+    names = frozenset(_normalize_header_name(name) for name in redact_headers)
+    found: list[tuple[str, str]] = []
+    for name, value in headers.items():
+        normalized = _normalize_header_name(name)
+        if normalized in names:
+            found.append((name, str(value)))
+        if normalized == "cookie":
+            found.extend((name, each) for each in _parse_cookie_values(str(value)))
+    return tuple(found)
 
 
 def _parse_cookie_values(header_value: str) -> list[str]:
@@ -1896,14 +1956,15 @@ class RequestInfo:
     #: A caller that supplies records and no total gets the count of the
     #: records it supplied, which is the one value that cannot under-report.
     omissions_total: int = 0
-    #: C16. Credentials the transport sends on this request's behalf outside
+    #: C16. Credentials that belong to this request's secret set but are not in
     #: ``headers``, as ``(source label, value)`` pairs: a proxy's userinfo,
     #: the ``Proxy-Authorization`` value built from it, any other proxy
-    #: header, and every cookie value its jar sends or a response sets
-    #: (C17). No header rule can see them, yet a proxy or server can reflect
-    #: them into a body the transport then quotes.
+    #: header, every cookie value its jar sends or a response sets (C17), and
+    #: the rest of what the configuration holds, such as the schema headers.
+    #: No header rule can see them, yet a proxy or server can reflect them
+    #: into a body that is then quoted, and text is scrubbed before it is cut.
     #: Each one joins the secret set unconditionally and none is ever
-    #: rendered. A transport sets this, never the caller.
+    #: rendered. The client and the transport set this, never the caller.
     transport_credentials: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
@@ -1931,34 +1992,17 @@ class RequestInfo:
 
     # -- the secret set (C16) -------------------------------------------------
 
-    def _redaction_context(self) -> tuple[Mapping[str, str], Callable[[str], str]]:
-        """The C16 secret set, mapped to its complete replacement marker, and
-        the same marker builder for a header's own redacted-value placeholder.
+    def _secret_sources(self) -> dict[str, set[str]]:
+        """Every string that is a secret of this request, with the labels it has.
 
-        Private, per C16 ("never returned by a public API"): :meth:`scrub`
-        below is the request-bound operation C59 requires to be exposed, and
-        it never hands the caller this set itself. Collection is name- and
-        path-based redaction, independent of ``redact_values`` (which only
-        gates whether :meth:`scrub` and :meth:`redacted`'s free-text pass
-        uses the resulting map) -- a redacted header still needs a safe
-        placeholder, and the marker builder this returns has to reflect the
-        complete qualifying set regardless of that flag.
-
-        Every marker :func:`_build_safe_marker` returns is already checked
-        as one complete string, never as a label in isolation (module
-        docstring, "A secret's source label"), so both this method's
-        secret-value map and the header pipeline's own placeholder share
-        one validated construction path.
+        The set before the length rule is applied. :meth:`_redaction_context`
+        keeps the values that qualify, and :func:`request_credentials` hands
+        them to a later call.
         """
         sources: dict[str, set[str]] = defaultdict(set)
 
-        for name, value in self.headers.items():
-            normalized = _normalize_header_name(name)
-            if normalized in self.redact_headers:
-                _add_secret(value, name, sources)
-            if normalized == "cookie":
-                for cookie_value in _parse_cookie_values(value):
-                    _add_secret(cookie_value, name, sources)
+        for label, value in header_credentials(self.headers, self.redact_headers):
+            _add_secret(value, label, sources)
 
         _collect_variable_secrets(self.variables, self.redact_variables, sources)
 
@@ -1994,7 +2038,28 @@ class RequestInfo:
             _add_secret(value, "url", sources)
         for label, value in self.transport_credentials:
             _add_secret(value, label, sources)
+        return sources
 
+    def _redaction_context(self) -> tuple[Mapping[str, str], Callable[[str], str]]:
+        """The C16 secret set, mapped to its complete replacement marker, and
+        the same marker builder for a header's own redacted-value placeholder.
+
+        Private, per C16 ("never returned by a public API"): :meth:`scrub`
+        below is the request-bound operation C59 requires to be exposed, and
+        it never hands the caller this set itself. Collection is name- and
+        path-based redaction, independent of ``redact_values`` (which only
+        gates whether :meth:`scrub` and :meth:`redacted`'s free-text pass
+        uses the resulting map) -- a redacted header still needs a safe
+        placeholder, and the marker builder this returns has to reflect the
+        complete qualifying set regardless of that flag.
+
+        Every marker :func:`_build_safe_marker` returns is already checked
+        as one complete string, never as a label in isolation (module
+        docstring, "A secret's source label"), so both this method's
+        secret-value map and the header pipeline's own placeholder share
+        one validated construction path.
+        """
+        sources = self._secret_sources()
         min_length = self.min_redacted_value_length
         qualifying_values = tuple(
             value for value in sources if len(value.strip()) >= min_length
@@ -2025,6 +2090,8 @@ class RequestInfo:
         """
         if not self.redact_values:
             return text
+        if has_history_gap(self):
+            return _withheld(text)
         secrets, _ = self._redaction_context()
         return scrub_text(text, secrets)
 
@@ -2286,6 +2353,18 @@ def text_tools(
 
         return sanitize_plain, excerpt_plain
 
+    if has_history_gap(request):
+        # The secret set is known to be missing a credential, so nothing here can
+        # promise that a cut or a scrub hides it. The text is withheld instead.
+
+        def sanitize_withheld(text: str) -> str:
+            return _withheld(text)
+
+        def excerpt_withheld(text: str) -> str:
+            return _cut_visibly(_withheld(text), request.max_diagnostic_bytes)
+
+        return sanitize_withheld, excerpt_withheld
+
     secrets, _ = request._redaction_context()
     qualifying = tuple(secrets)
 
@@ -2341,6 +2420,133 @@ def safe_excerpt(request: RequestInfo, text: str) -> str:
     return text_tools(request)[1](text)
 
 
+def request_credentials(request: RequestInfo) -> tuple[tuple[str, str], ...]:
+    """The secrets of ``request`` that qualify, as ``(label, value)`` pairs.
+
+    What a later call needs in order to scrub a value that this request sent
+    and a server repeats afterwards. Only what the request itself carries is
+    listed, never what a ledger lent it, so a held list does not feed back into
+    itself. The values are real. They go into a ledger and into
+    ``transport_credentials``, and are never rendered.
+    """
+    minimum = request.min_redacted_value_length
+    return tuple(
+        (min(labels), value)
+        for value, labels in request._secret_sources().items()
+        if len(value.strip()) >= minimum
+    )
+
+
+#: The entry a client puts in ``transport_credentials`` once its ledger has dropped
+#: a credential. It is not a credential and has no value. It says that the secret
+#: set of the request is missing something a server may still repeat, so the text
+#: of the call cannot be vouched for. It survives every copy of the request,
+#: because the field already does.
+HISTORY_GAP: tuple[str, str] = ("credential history incomplete", "")
+
+#: What a free-form text becomes while the secret set has a gap.
+HISTORY_WITHHELD = (
+    "[withheld: the credentials of earlier calls are no longer all known]"
+)
+
+
+def has_history_gap(request: RequestInfo) -> bool:
+    """Whether the free-form text of ``request`` is withheld because of the gap.
+
+    A request that opted out of value redaction is never withheld from. It is not
+    scrubbed either, so the gap changes nothing for it. This is the one place that
+    decides, so a caller cannot forget the opt-out.
+    """
+    return request.redact_values and HISTORY_GAP in request.transport_credentials
+
+
+def _withheld(text: str) -> str:
+    """``text`` replaced by the withheld notice. Nothing stays nothing."""
+    return HISTORY_WITHHELD if text else text
+
+
+def withhold_if_gapped(request: RequestInfo, text: str) -> str:
+    """``text`` as it is, or the withheld notice when ``request`` has the gap.
+
+    For text a callback wrote, such as a report hook's result. It is raw to this
+    module, so it cannot be scrubbed, and once the secret set has a gap nothing
+    can vouch for it.
+    """
+    return _withheld(text) if has_history_gap(request) else text
+
+
+#: How many distinct credentials a ledger holds, and how many characters they may
+#: add up to. Past either bound the oldest value is dropped, so a client that
+#: runs for ever, or sends a new token with each call, holds a bounded amount.
+MAX_HELD_CREDENTIALS = 256
+MAX_HELD_CREDENTIAL_CHARS = 262_144
+
+
+class CredentialLedger:
+    """The credentials that past calls sent, held for the scrub of later calls.
+
+    Text is cut while a call is recorded, and a cut is irreversible. A server can
+    repeat a value from an earlier call, and a cap can end inside it, so the call
+    that records the text must already know that value. Each value is held once,
+    with the first label it was seen under. A value seen again is moved to the
+    newest place. The ledger holds live secrets and has no text form of them:
+    ``repr()`` and ``str()`` give a count.
+
+    A bound can drop a value that a server still repeats, and nothing can scrub a
+    value that is not known. The ledger therefore remembers that it dropped one,
+    for good, and says so as :attr:`incomplete`. A call made after that carries
+    :data:`HISTORY_GAP`, and the text of such a call is withheld.
+    """
+
+    __slots__ = ("_chars", "_dropped", "_held", "_lock", "_max_chars", "_max_count")
+
+    def __init__(
+        self,
+        max_count: int = MAX_HELD_CREDENTIALS,
+        max_chars: int = MAX_HELD_CREDENTIAL_CHARS,
+    ) -> None:
+        self._held: dict[str, str] = {}
+        self._chars = 0
+        self._dropped = False
+        # Calls can run on several threads, and one call reads while another adds.
+        self._lock = threading.Lock()
+        self._max_count = max(max_count, 1)
+        self._max_chars = max(max_chars, 1)
+
+    def add(self, pairs: Iterable[tuple[str, str]]) -> None:
+        with self._lock:
+            for label, value in pairs:
+                if (label, value) == HISTORY_GAP:
+                    continue
+                known = self._held.pop(value, None)
+                if known is None:
+                    self._chars += len(value)
+                self._held[value] = known if known is not None else label
+            # The newest value is always kept, even when it alone is over the size.
+            while len(self._held) > 1 and (
+                len(self._held) > self._max_count or self._chars > self._max_chars
+            ):
+                oldest = next(iter(self._held))
+                del self._held[oldest]
+                self._chars -= len(oldest)
+                self._dropped = True
+
+    @property
+    def incomplete(self) -> bool:
+        """Whether a value was ever dropped, so a server may repeat one not held."""
+        return self._dropped
+
+    def pairs(self) -> tuple[tuple[str, str], ...]:
+        with self._lock:
+            return tuple((label, value) for value, label in self._held.items())
+
+    def __len__(self) -> int:
+        return len(self._held)
+
+    def __repr__(self) -> str:
+        return f"CredentialLedger(<{len(self._held)} held>)"
+
+
 # -- the recorder (B3) --------------------------------------------------------
 
 
@@ -2351,8 +2557,12 @@ class RecordedCall:
     Every field here is already redacted, scrubbed, escaped and bounded.
     ``request`` is a ``DiagnosticSnapshot``, never a live ``RequestInfo``,
     and ``failure`` is free-form text that went through :func:`safe_excerpt`.
-    Nothing on this object carries a live header value, a variable value or
-    a response value, so a dump of it cannot leak one.
+    The response is kept only as finished text: the error summaries, a cut
+    excerpt of the data (``data``) and the ``curl`` command. Each was built
+    from the live request, which is the one moment its secrets are known, and
+    passed the scrub there. Nothing on this object carries a live header
+    value, a variable value or a response value, so a dump of it cannot leak
+    one.
     """
 
     request: DiagnosticSnapshot
@@ -2361,6 +2571,21 @@ class RecordedCall:
     duration_ms: float = 0.0
     error_count: int = 0
     failure: str = ""
+    #: The one-line summaries of the first ``max_recorded_errors`` errors, in
+    #: response order. ``error_count`` stays the total, so a report can say how
+    #: many it left out. Each line went through the request's scrub, escape and
+    #: cut while the live request was in hand.
+    errors: tuple[str, ...] = ()
+    #: The bounded, scrubbed text of the response data, or ``None`` for a call
+    #: that returned no response. ``data_fields`` counts every object member of
+    #: the whole value, and ``data_cut`` says the text leaves some out.
+    data: str | None = None
+    data_fields: int = 0
+    data_cut: bool = False
+    #: ``RequestInfo.as_curl()`` for the request that was sent. It needs the live
+    #: request, which the recorder never holds, so the finished text is kept.
+    #: ``""`` means none was built.
+    curl: str = ""
 
     def __repr__(self) -> str:
         return _checked_dataclass_repr(self, self.request._guard)
@@ -2372,12 +2597,32 @@ class DiagnosticsRecorder:
     A ``deque`` with ``maxlen``, so the oldest call is evicted rather than
     the recorder growing without limit outside pytest, which is the defect
     B3 exists to close. The plugin clears it per test.
+
+    It also carries a :class:`CredentialLedger`, which the client fills and reads,
+    so every client that shares this recorder, a clone included, scrubs the text of
+    a call with what the calls before it sent. ``clear()`` leaves it alone: the
+    calls are gone from the record, and the credentials they sent are not gone from
+    the process that may still echo them.
     """
 
-    __slots__ = ("_calls",)
+    __slots__ = ("_calls", "_ledger")
 
     def __init__(self, max_calls: int = DEFAULT_MAX_RECORDED_CALLS) -> None:
         self._calls: deque[RecordedCall] = deque(maxlen=max(max_calls, 0))
+        self._ledger = CredentialLedger()
+
+    def _hold(self, pairs: Iterable[tuple[str, str]]) -> None:
+        """Package-internal: the client notes what a call sent."""
+        self._ledger.add(pairs)
+
+    def _held(self) -> tuple[tuple[str, str], ...]:
+        """Package-internal: what the calls so far sent, for the next request.
+
+        The gap comes last when the ledger dropped a value, so a request built
+        from this list withholds its free-form text.
+        """
+        pairs = self._ledger.pairs()
+        return (*pairs, HISTORY_GAP) if self._ledger.incomplete else pairs
 
     def record(self, call: RecordedCall) -> None:
         self._calls.append(call)

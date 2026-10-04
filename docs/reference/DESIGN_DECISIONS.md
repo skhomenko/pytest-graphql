@@ -88,10 +88,14 @@ those of section 7.3 without `--gql-refresh-schema`.
   given. This is separate from the rule above that one source replaces another: the environment
   list replaces the ini list as a whole, and each of them extends the default.
 - `--gql-seed=random` chooses a 32-bit seed once, when pytest configures, and records that it
-  did. The seed is read back from the settings. Under xdist each process configures on its
-  own, so sharing one chosen seed between workers is a reporting concern of the xdist work.
-- `--gql-log`, `--gql-log-level` and `--gql-show-schema-stats` are registered and stored and
-  have no setting behind them. Their output belongs to the reporting work.
+  did. The seed is read back from the settings. Under xdist the controller chooses it, once,
+  and hands it to every worker in the worker input under the key `pytest_graphql_seed`, so
+  every worker generates data from one seed. A worker that parses `--gql-seed=random` and finds
+  that key uses the number and records that the seed was random. A worker with no such key
+  chooses its own, which happens only when xdist did not start it.
+- `--gql-log`, `--gql-log-level` and `--gql-show-schema-stats` have no setting behind them.
+  They choose what the reporting section of section 3 prints. `--gql-log-level` has no effect
+  without `--gql-log`.
 
 Where the fixtures sit in the order:
 
@@ -341,9 +345,9 @@ id, so `unique()` values do not. The pytest plugin gives each test's client its 
 id and one `UniqueSource` per session in each process. The worker id is the xdist worker id,
 or `"main"`. The run id is the xdist run id, which every worker shares, or a new one for each
 session. The plugin reads it from `workerinput["testrunuid"]`, the key behind the `testrun_uid`
-fixture of pytest-xdist 3.8.0. That key is checked against the xdist source only. Tests
-cover it with a fake `workerinput`, and a run under a real xdist and under a rerun plugin is
-not part of the suite.
+fixture of pytest-xdist 3.8.0. That key is checked against the xdist source. Tests cover it
+with a fake `workerinput` and with a real `-n 2` run, and a run under a rerun plugin is not
+part of the suite.
 
 `build_client()` is the standalone spelling of the same split, so the same rule decides
 where each of its keywords goes. `url`, `transport`, `cleanup`, `config`, `schema`,
@@ -414,8 +418,19 @@ Each hook is classified, and the classification is part of the contract.
   implementation runs in pytest hook order, and a non-`None` return becomes the input to the
   next, so two plugins cannot discard each other's work. They are deliberately not
   `firstresult`.
-- `pytest_graphql_report_section` runs every implementation and concatenates the results in
-  hook order, each under its own heading.
+- `pytest_graphql_report_section` runs every implementation, in hook order, once for each
+  failed test that made a call and received a response. A test that fails in more than one
+  phase gets it once, at its first failed phase, because pytest makes a report for each phase
+  and the hook has side effects a project chose. Each failed phase still shows its calls. Its `response` is the last response
+  the test received. A test that received none has nothing to report on, so the hook is not
+  called for it. Each result that is not `None` becomes a report section of its own, headed
+  `GraphQL report: <name>`, where the name is the module name of the plugin. The hook is not
+  `firstresult`. A hook wrapper cannot return a section and is ignored. An implementation that
+  raises shows as `the hook raised <ExceptionType>`, never with its message. A result that is
+  not a string shows as `the hook returned <type>, not a string`. A section is escaped, and it
+  is replaced with the withheld notice when it shows a value that any call of the test
+  redacted, because the response a hook receives holds the server's text as the server sent
+  it.
 
 Delivery rules:
 
@@ -441,6 +456,152 @@ Delivery rules:
   name registered twice and warns. A call that passes `replace=True` says it means to
   replace and gets no warning. A client's own registry keeps the stricter rule of `ScalarRegistry`,
   which refuses a duplicate, so the leniency belongs to the hook alone.
+
+### Reporting
+
+Everything the plugin prints about GraphQL is written by `plugin/reporting.py`.
+
+**The session header.** `pytest_report_header` prints before any test runs, and the schema
+loads when the first test needs it. A header cannot hold facts that do not exist yet, so the
+header holds what the sources already say, and the schema facts print at the end of the run.
+This moves the fingerprint, the counts and the load time that SPEC 7.5 lists for the header to
+the GraphQL section below. The header is two lines:
+
+```
+graphql: endpoint <url>, seed <n>[ (chosen by random)], run id <id>
+graphql: schema loads when the first test needs it, and is listed at the end of the run
+```
+
+- The endpoint is the flag, else the environment variable, else the ini option, with the
+  userinfo and the query string removed as they are from a recorded URL. When no source
+  names one it reads `set by the gql_url fixture`, because a fixture is not known at session
+  start. The seed is what the flag, the environment variable or the ini option gives, else the
+  default. A fixture override of `gql_seed` or `gql_config` is not known at session start
+  either. The run id is the one `unique()` values carry. Outside xdist it is made once for the
+  session and kept, so the header and the values agree.
+- Text that no call produced, which is the endpoint and the schema label, passes the scrub of
+  one request that carries every credential the configuration holds, then is escaped and cut
+  at `max_diagnostic_bytes`. One request holds them all, so the cut follows a single scrub and
+  cannot split a secret that a second scrub would have removed. The same request is checked
+  against every line the failure section, the call log, a hook section and the matcher diff
+  show, beside the calls of the test, because a server can echo a credential that no call of
+  the test carried.
+- Under xdist the controller prints the header and the workers load the schema. The first
+  line ends `run id <id>` when `--testrunuid` is given. Otherwise xdist makes the id after the
+  header, so it ends `run id assigned by xdist` and the summary gives the number. The second
+  line reads `graphql: schema loaded once per worker, and each worker's schema is listed at
+  the end of the run`.
+
+**The GraphQL section at the end of the run.** `pytest_terminal_summary` prints a `GraphQL`
+section when this process or any worker loaded a schema, and nothing when none did.
+
+- One line for each process that loaded a schema:
+  `schema <worker>: <fingerprint>, <n> types, <n> queries, <n> mutations, <n> subscriptions,
+  loaded in <s>s`. The worker is `main` outside xdist and the worker id under it. The
+  fingerprint is that of the schema source. The time is how long the `gql_schema` fixture took
+  to set up, whether the default or an override, and the line ends `load time not measured`
+  when no time was taken. Counts leave out the introspection types, whose names start with
+  `__`. A count of one is written in the singular.
+- `--gql-show-schema-stats` adds a block for each of them: the fingerprint, the type count
+  with its kinds (objects, interfaces, unions, enums, input objects, scalars), the field count
+  of objects and interfaces, the operation counts and the load time.
+- Each worker files `{worker, run_id, seed, schema}` in its `workeroutput` when its session
+  ends, and the controller collects them in `pytest_testnodedown`. A report that is not well
+  formed is dropped. After the worker lines the controller prints
+  `schema loaded by <k> of <n> workers, once each`, `run id <id>, shared by <n> workers` and
+  `seed <n>, the same on <n> workers`. When they do not hold, the lines read `more than once on
+  a worker`, `run ids differ between workers` and `seeds differ between workers`. A worker that
+  ran no test needing the schema loaded none, so it counts in `<n>` and has no line of its own.
+- No module imports xdist. The hooks that only xdist declares are `optionalhook`, so they do
+  nothing when it is absent.
+
+**The failure section.** `pytest_runtest_makereport` adds a section titled
+`GraphQL calls (<n>)` to the report of a failed phase (setup, call or teardown) of a test whose
+client recorded a call. pytest prints a section under a rule that carries its title, which is
+the rule line of SPEC 7.5. `--show-capture` other than `all` hides it, as it hides every
+captured section. The section is built from the recorder alone, and the calls are numbered in
+the order the test made them.
+
+```
+[1] query user  200  143ms
+    query user($id: ID!) { user(id: $id) { id name email settings { id theme } } }
+    variables: {"id": "123"}
+    skipped (require arguments): User.orders, User.auditEntries
+    data: {"user": {"id": "123", "name": "John", ...}}   (truncated, 41 fields)
+
+[2] mutation updateUser  200  201ms   <-- FAILED HERE
+    mutation updateUser($id: ID!, $name: String!) { updateUser(id: $id, name: $name) { id name } }
+    variables: {"id": "123", "name": "New"}
+    errors:
+      - CONFLICT at ["updateUser"]: name already taken
+    reproduce:
+      curl -sS -X POST http://localhost:8000/graphql -H 'authorization: '"${PYTEST_GQL_HEADER_AUTHORIZATION}" --data '...'
+```
+
+- The heading is `[<number>] <kind> <operation>  <status>  <duration>ms`, two spaces between
+  the fields. The operation is `<anonymous>` for an unnamed one, the status is `-` for a call
+  that got no response, and the duration is whole milliseconds. Calls are separated by one
+  blank line.
+- `FAILED HERE` marks the last call the test made, with three spaces before the arrow. That
+  call is the nearest to the failure, and the section lists every call, so a test that failed
+  on the result of an earlier one still shows it. Only that call has a `reproduce:` line.
+- Under a heading, indented four spaces and each only when it has content: the document on one
+  line, where each run of whitespace becomes one space (the `curl` line carries the exact
+  text); `variables:` with the snapshot's variables as JSON, so a redacted path shows its
+  marker; `truncated:` with the snapshot's own cut notes; one `skipped (<reason>):` line for
+  each omission reason, in first-seen order, listing `Type.field`; `data:`; `errors:` with
+  one `- <summary>` entry each, indented six spaces; `failure:` for a call that raised before
+  it got a response; and `reproduce:` with the recorded `as_curl()` text on the next line,
+  indented six spaces.
+- `as_curl()` returns one line, which is shown as it is. The multi-line layout SPEC 7.5
+  draws is not reproduced, because breaking the text of a quoted command is not safe.
+- Reasons read `require arguments`, `deprecated`, `connection with no page-size argument`,
+  `connection depth cap`, `depth cap`, `cycle`, `excluded by the selection policy` and
+  `union member cap`. The 50 records a snapshot keeps are listed, and the rest are counted in
+  `skipped: <n> more not listed`.
+- `data:` shows the excerpt the recorder kept. It is omitted when the data is absent or null.
+  A cut excerpt ends `   (truncated, <n> field[s])`, where the count is every object member of
+  the whole value.
+- `errors:` shows the first `max_recorded_errors` errors. SPEC 7.5 says errors are never
+  truncated, and section 7 governs: the entries past the limit are counted in a final
+  `- ... <n> more not shown` entry, and the count is exact. A message with newlines
+  continues under its own entry's indent, so it cannot pass for another entry.
+- The recorder is bounded. When it dropped older calls the numbers continue from the true
+  count, and the title reads `GraphQL calls (last <k> of <n>)`.
+- Each line is checked against the secret set of every call in the section, because a server
+  can echo a credential that one call sent into the response to another. A line that fails is
+  replaced with its label and the withheld notice, and the finished section is checked again,
+  so a secret that spans lines withholds the section. The same holds for a log record.
+- The hook sections follow the calls section of the first failed phase. A fault in building the report adds a section that names
+  the exception class and nothing else, and the failure it reports on is still shown.
+
+**The matcher diff.** `pytest_assertrepr_compare` handles `==` when exactly one side is a
+`Matcher`, and leaves every other comparison to pytest. The diff lines come from
+`Matcher.explain` with the options of the calls the test made: their redaction paths, their
+scrubs, and `max_diagnostic_bytes`. A test that made no call gets the defaults of the
+settings. pytest indents every line after the first by two spaces, and the diff carries
+those two already, so the hook drops them and the block reads as SPEC 7.5 prints it. The first
+line names the two sides: a matcher and a `Node` by their `repr`, which shows no value, and
+any other value as the renderer shows a value. The finished text is checked against every
+call of the test. A render refusal gives the withheld notice, and any other fault falls back to
+pytest's own report.
+
+**The call log.** With `--gql-log` each call is logged to the logger `pytest_graphql.calls`
+at `INFO`, once it is recorded, from the recorded call alone. The plugin sets that logger to
+`INFO` for the session and restores it after, so what pytest shows is decided by its own
+logging options. `summary` is one line, `<kind> <operation> <method> <url> -> <outcome>
+(status <s>, <ms> ms, <n> error(s))`. `full` adds the lines of the failure section for that
+call without the heading, the marker or the `reproduce:` line. A fault in building a record
+never changes the result of the call.
+
+**State.** One slot in the session stash holds the trace of the running test: the recorder,
+at most as many live requests as the recorder holds calls, and the last response. The live
+requests exist only to scrub a failed assertion with the secrets those requests carried, and
+the secrets that the session's ledger holds for the calls the deque dropped, and they are
+never rendered. A second slot holds that ledger, shared by the recorder of every test. The
+slot of the trace is replaced by the next test's trace and cleared when the
+protocol of a test ends, after all three of its reports. Nothing in the plugin grows with the
+number of tests or calls in a session.
 
 ---
 
@@ -1158,9 +1319,58 @@ values to do their work. Nothing else should.
   exception, a pytest report section, the diagnostics recorder, a log record, or
   `as_curl()`. `__repr__` and `__str__` on `RequestInfo`, `GraphQLResponse` and every
   exception render the snapshot form.
+- A recorded call holds a snapshot and finished text, never a live request or a response. The
+  finished text is the one-line summary of each of the first `max_recorded_errors` errors, a
+  cut excerpt of the response data, and the `as_curl()` command. Each is built where the live
+  request is in hand, because that is the one moment its secrets are known, and a recorded
+  call is the only form the report, the log and the failure section read.
 - `ClientConfig` is plain data that no redaction stage runs over, so its `repr()` leaves
   out every field that carries a credential: `headers`, `schema_headers`, `cookies` and
   `proxy`.
+- Every request the client builds lists all four of those credentials in its secret set,
+  whichever of them the call sends, and so does the request that loads the schema. The header
+  fields go through the header rule, so one name can hold a different value in each, and a
+  per-call header that replaces a configured one does not remove the configured value from
+  the set. A cookie value and what the proxy makes the pool send are always credentials. This
+  matters because text built from a request is scrubbed and then cut: a request that did not
+  know a credential could not remove it, and a cut through it would leave its start in the
+  text.
+- A credential that an earlier call sent is also in the secret set of every later call,
+  because a server can repeat a value it was sent and a cap can end inside it. The recorder
+  carries a ledger of the credentials that the calls sent: the real header values, redacted
+  variables, URL userinfo and query values, and the cookies a response set. Each call puts
+  its own into the ledger as the request goes out, after middleware, and the text built for
+  that call is scrubbed with the ledger as well. The ledger belongs to the recorder, so
+  every clone of a client shares it, and `clear()` leaves it alone. The plugin gives the
+  recorder of every test the same ledger, one for the session, because a server can repeat
+  a value in a later test as well as in a later call. The transport is handed
+  the request with the ledger, because it cuts the text of its own errors. It holds each
+  value once, at most 256 values and 262144 characters, and drops the oldest value first,
+  keeping the newest even when it alone is over the size. It has no text form of what it
+  holds, and nothing renders it.
+- A ledger that dropped a value cannot vouch for any text, so it withholds it. Nothing can
+  scrub a value that is not known, and a server can repeat one the ledger dropped: a cap
+  would leave the start of it, and no cap would leave all of it. The ledger remembers that it
+  dropped a value, for good. Every request built from it after that carries one entry in
+  `transport_credentials`, `HISTORY_GAP`, which has no value, is not a credential, and is
+  never held or rendered. While a request carries it, the free-form text that comes from
+  outside the request is replaced by a fixed notice: the text of an error summary, a transport
+  failure, a quoted body, a data excerpt, a diff value, and `RequestInfo.scrub()`. An empty
+  text stays empty. The cap still applies to the notice. The fields of the request itself are
+  not withheld, because the client built them, and neither are the plain values of a
+  `GraphQLErrorInfo`, which a test matches. A request with `redact_values=False` is not
+  scrubbed at all, so nothing is withheld from it. The plugin's ledger covers the session, so
+  in a suite that sends more distinct tokens than the ledger holds, the text of a server is
+  withheld from the call that dropped the first value onward. A call recorded before that
+  keeps its text. Text that code of the project wrote is raw, so it cannot be scrubbed and
+  nothing can vouch for it once there is a gap: the result of a `pytest_graphql_report_section`
+  implementation is replaced by the notice, and so is the whole matcher diff of a failed
+  `actual == matcher`, because a matcher of the project can print text the renderer never
+  scrubbed. Both obey `withhold_if_gapped`, the one function for text of that kind, and
+  like every other withholding it does nothing for a request with `redact_values=False`.
+  Whether a request withholds is decided in one place, `has_history_gap`, which checks that
+  opt-out first. A credential that a client with another recorder sent is not in the set,
+  and nothing tells this client of it. The set is checked whole where a report renders several calls.
 - A `GraphQLErrorInfo` keeps the server's `message`, `path` and `extensions` as sent, so
   a test can match them, and its `repr()` shows none of that text raw. `message` and
   `extensions` are left out. The `repr()` showing `path` is built once, when the response
@@ -1432,12 +1642,29 @@ instead of an environment-variable indirection, which is still safe because that
 no real secret. The error list truncates at `max_recorded_errors`, default 20. Truncation
 is visible, never silent, and states how many bytes or entries were cut. The diagnostics
 recorder is a bounded `deque`, default 50 calls, set by `ClientConfig.max_recorded_calls`,
-and the plugin clears it per test. A client records exactly one call for every request it
+and the plugin clears it per test. The credential ledger in section 7 is bounded too, in
+values and in characters, and text is withheld once it drops a value. A client records exactly one call for every request it
 hands to the transport, and records it before any exception leaves the call. That includes
 a call that fails after the transport returned, through a response that contradicts the
 schema or a raising `after_response`, which is recorded as failed with its status code. A
 call refused before it is sent records nothing. Recording never replaces the exception the
 caller receives: a failure whose message cannot be rendered is recorded by its type name.
+
+The data excerpt of a recorded call follows the same stage order. A key whose path matches
+`redact_variables` shows `[redacted]` in place of its value, whatever shape the value has, so
+the patterns that apply to variables apply to response data too. Every other key and string
+passes the request's scrub and the escape, and the finished text passes the scrub once more,
+because the JSON escaping adds backslashes that can spell a secret. The cut comes last. The
+text is the JSON `json.dumps` writes with its default separators, with `...` for what was left
+out, cut on an entry boundary so a cut never leaves part of a secret behind. A value that fits
+whole is never cut. The text never exceeds `max_diagnostic_bytes` (default 4096) for one call,
+for any limit from zero up: a limit below the three bytes of `...` shows as much of it as
+fits, and a negative limit is no room at all. That is the one size option section 7
+already has, and no option is added for the data. A string too long for the room left is
+shortened with the visible note `... (truncated, <n> byte(s) cut)`. The field count covers the
+whole value and is counted without copying it. The excerpt is checked once against the
+snapshot before it is kept, and a refusal keeps the withheld notice instead of the call
+failing.
 
 `as_curl()` quotes every literal component with `shlex.quote`. A redacted header is not a
 literal component. It renders as two adjacent quoted segments that form one shell word and
@@ -1879,6 +2106,21 @@ version this project knows to be broken, so the bound stays at `<3.3` until the 
 the suite support 3.3. Raising it is one change that edits this section, the metadata and
 the lock file together.
 
+### Development dependencies
+
+`pytest-xdist` is in the `dev` extra, at `>=3.5`, because the suite runs real workers with
+`-n 2` to test the xdist behavior of the plugin. It is a development dependency only.
+
+- Its licence is MIT (`License-Expression: MIT` in its metadata), and so is that of `execnet`,
+  which it requires. Neither is bundled, copied or imported by any module under `src/`.
+- The built wheel names it only as the marker-gated requirement `pytest-xdist>=3.5; extra ==
+  "dev"`, as it names every other `dev` requirement, so `pip install pytest-graphql` does not
+  install it and the wheel contains none of its code. The plugin talks to xdist through hooks
+  and the worker input and output dictionaries, and the hooks only xdist declares are
+  `optionalhook`, so an installation without xdist runs unchanged.
+- Raising or dropping the lower bound is one change that edits the metadata and the lock file
+  together.
+
 ### Operating systems
 
 Linux, macOS and Windows are supported, which is what `docs/reference/SPEC.md` section 9
@@ -1897,6 +2139,11 @@ by operating system.
 - Unit tests never open a non-loopback socket. The guard allows loopback, so integration
   tests may run a real local HTTP server. A non-loopback connection fails the test.
 - `tests/docs/` is part of the tree and executes documentation examples.
+- The full suite runs serially. Under `-n` it fails at collection, because xdist needs every
+  worker to collect the same tests and some parametrized and property tests do not. This is a
+  limit of the suite and not of the plugin. The xdist behavior of the plugin is tested by
+  `tests/unit/test_plugin_xdist.py`, which starts real workers with `-n 2` inside an inner
+  session, so that limit does not affect it.
 
 ### What an exit criterion may claim
 

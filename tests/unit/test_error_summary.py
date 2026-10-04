@@ -114,11 +114,13 @@ def test_a_secret_split_by_a_zero_width_character_is_still_replaced(
     assert "\\u200b" not in summary
 
 
-def test_one_response_computes_its_secret_set_once(
+def test_one_response_computes_its_secret_set_a_fixed_number_of_times(
     schema: GraphQLSchema, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The secret set is the expensive part. Twenty errors with a summary each
-    # must not compute it once per piece of text.
+    # must not compute it once per piece of text: the count is the same for
+    # two errors as for twenty. It is a few per call: the snapshot, the error
+    # texts, the data excerpt and the recorded curl command.
     from pytest_graphql._core.diagnostics import RequestInfo
 
     calls: list[int] = []
@@ -129,14 +131,17 @@ def test_one_response_computes_its_secret_set_once(
         return original(self)
 
     monkeypatch.setattr(RequestInfo, "_redaction_context", counted)
-    errors = tuple(failure(f"e{n}", code="C", path=["a", n]) for n in range(20))
-    client, _ = make_client(
-        schema,
-        envelope({"user": {"id": "u1"}}, errors),
-        headers={"Authorization": "Bearer abcdefghijklmnop"},
-    )
 
-    client.query("user", id="u1", fields=["id"], raw=True, raise_on_error=False)
+    def count_for(number: int) -> int:
+        calls.clear()
+        errors = tuple(failure(f"e{n}", code="C", path=["a", n]) for n in range(number))
+        client, _ = make_client(
+            schema,
+            envelope({"user": {"id": "u1"}}, errors),
+            headers={"Authorization": "Bearer abcdefghijklmnop"},
+        )
+        client.query("user", id="u1", fields=["id"], raw=True, raise_on_error=False)
+        return len(calls)
 
-    # One for the snapshot, one for the texts. Not one per error.
-    assert len(calls) <= 3
+    assert count_for(20) == count_for(2)
+    assert count_for(20) <= 5

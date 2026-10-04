@@ -64,8 +64,8 @@ cycle is promised.
   options has an environment variable, `PYTEST_GQL_` followed by the option name
   without `gql_`, so `gql_max_depth` is `PYTEST_GQL_MAX_DEPTH`. The flags are
   `--gql-url`, `--gql-seed=N|random`, `--gql-no-validate`, `--gql-max-depth` and
-  `--gql-timeout`. `--gql-log`, `--gql-log-level` and `--gql-show-schema-stats` are
-  registered and stored, and print nothing yet. Per setting, the order is: per-call
+  `--gql-timeout`, and `--gql-log`, `--gql-log-level` and `--gql-show-schema-stats`,
+  which are described below. Per setting, the order is: per-call
   argument, flag, fixture, environment variable, ini option, built-in default. A
   value that a source refuses stops the run at the start, and the message names the
   setting and the source and never shows the value. `gql_redact_headers` adds names to
@@ -84,7 +84,30 @@ cycle is promised.
   `pytest_graphql_register_scalars` and `pytest_graphql_report_section`. The request
   and response hooks fold: each implementation receives the result of the one before.
   A scalar registered twice by hooks replaces the first and warns. The report section
-  hook is declared and is called once the failure report exists.
+  hook runs for each failed test that made a call and received a response, and each
+  result becomes a section of its own, in hook order.
+- Reporting. A failed test that made a GraphQL call carries a `GraphQL calls` section
+  in its report. It lists every call the test made, up to `max_recorded_calls`: the
+  kind and name, status, duration, document, variables, the fields automatic selection
+  left out, the data (cut at `max_diagnostic_bytes`, with the field count), and the
+  errors (the first `max_recorded_errors`, with the number left out). The last call is
+  marked `<-- FAILED HERE` and has a `reproduce:` line with its `curl` command. Redacted
+  values show as markers everywhere, including inside response data, and a line that
+  would show a secret is withheld. `RecordedCall` gains `errors`, `data`, `data_fields`,
+  `data_cut` and `curl`, built where the live request is in hand.
+- A failed `actual == matcher` assertion shows the matcher diff of `Matcher.explain`
+  in the pytest report, with the values scrubbed and redacted like every other output.
+- A session header with the endpoint, the seed (and whether `random` chose it) and the
+  run id. The schema is loaded when the first test needs it, so its fingerprint, type
+  and operation counts and load time are printed in a `GraphQL` section at the end of
+  the run. `--gql-show-schema-stats` adds the breakdown by kind and the field count.
+- `--gql-log` logs every call to the logger `pytest_graphql.calls` at `INFO`.
+  `--gql-log-level=summary` (the default) logs one line, and `full` adds the document,
+  variables, skipped fields, data and errors. Only recorded, redacted text is logged.
+- xdist. Each worker loads the schema once, and the end of the run lists each worker's
+  schema and says so. `--gql-seed=random` is chosen once on the controller and every
+  worker uses it. Every worker shares the xdist run id. `pytest-xdist` joins the `dev`
+  extra and is not a dependency of the package.
 
 ### Changed
 

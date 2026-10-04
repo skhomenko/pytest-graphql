@@ -33,11 +33,9 @@ from __future__ import annotations
 
 import dataclasses
 import importlib
-import os
-import uuid
 from collections.abc import Iterator, Mapping
 from functools import partial
-from typing import Any, cast
+from typing import cast
 
 import pytest
 from graphql import GraphQLSchema
@@ -59,8 +57,11 @@ from pytest_graphql._core.headers import merge_headers
 from pytest_graphql._core.lifecycle import Closable, _close_all, _Owned, _report
 from pytest_graphql._core.schema.source import SchemaSource
 from pytest_graphql._core.transport.base import Transport
+from pytest_graphql.plugin import reporting
 from pytest_graphql.plugin.hookspecs import HookMiddleware, ReplacingRegistry
 from pytest_graphql.plugin.options import Settings, settings_of
+from pytest_graphql.plugin.session import run_id as _run_id
+from pytest_graphql.plugin.session import worker_id as _worker_id
 
 _NO_ENDPOINT = (
     "pytest-graphql: no GraphQL endpoint. Pass --gql-url=URL, set the "
@@ -69,35 +70,7 @@ _NO_ENDPOINT = (
 )
 
 
-# -- session inputs -----------------------------------------------------------
-
-
-def _worker_input(config: Any, key: str) -> str | None:
-    """A non-empty string from the xdist worker input, or ``None``."""
-    workerinput = getattr(config, "workerinput", None)
-    if isinstance(workerinput, Mapping):
-        value = workerinput.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return None
-
-
-def _worker_id(config: Any) -> str:
-    """The xdist worker id, or ``"main"`` when the run is not distributed."""
-    return (
-        _worker_input(config, "workerid")
-        or os.environ.get("PYTEST_XDIST_WORKER")
-        or "main"
-    )
-
-
-def _run_id(config: Any) -> str:
-    """The id of this run. xdist gives every worker the same one.
-
-    Outside xdist it is new for each session, so ``unique()`` values differ
-    between runs and still trace back to the run that made them.
-    """
-    return _worker_input(config, "testrunuid") or uuid.uuid4().hex
+# -- shared helpers -----------------------------------------------------------
 
 
 def _sweep(cleanup: list[Closable]) -> None:
@@ -352,12 +325,20 @@ def gql_schema(
 @pytest.fixture(scope="session")
 def _gql_ready_schema(
     pytestconfig: pytest.Config,
+    _gql_session_config: ClientConfig,
     gql_schema: GraphQLSchema,
     gql_schema_source: SchemaSource,
 ) -> GraphQLSchema:
-    """The schema, after ``pytest_graphql_schema_loaded`` ran once for it."""
+    """The schema, after ``pytest_graphql_schema_loaded`` ran once for it.
+
+    It also keeps the facts the report prints about the schema, once for this
+    process, which is once for each xdist worker.
+    """
     pytestconfig.hook.pytest_graphql_schema_loaded(
         schema=gql_schema, source=gql_schema_source
+    )
+    reporting.record_schema(
+        pytestconfig, gql_schema, gql_schema_source, _gql_session_config
     )
     return gql_schema
 
@@ -495,7 +476,14 @@ def gql(
     )
     auth = None if gql_auth is None else resolve_auth(gql_auth)
     fake_context = FakeContext(request.node.nodeid, _gql_unique_source)
-    middleware = (HookMiddleware(pytestconfig),)
+    settings = settings_of(pytestconfig)
+    trace = reporting.CallTrace(
+        request.node.nodeid,
+        config,
+        reporting.log_sink(settings.log_level, config) if settings.log else None,
+        reporting.session_ledger(pytestconfig),
+    )
+    middleware = (HookMiddleware(pytestconfig, trace),)
     client = _client_over(
         gql_transport,
         lambda transport, owns: _client_class()(
@@ -507,7 +495,11 @@ def gql(
             middleware=middleware,
             auth=auth,
             owns_transport=owns,
+            recorder=trace.recorder,
         ),
     )
+    # The report of a failed test reads this, and the protocol hook clears it
+    # once all three reports of the test are made.
+    pytestconfig.stash[reporting.CURRENT] = trace
     yield client
     client.close()
