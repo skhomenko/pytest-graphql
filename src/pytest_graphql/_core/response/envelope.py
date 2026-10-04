@@ -19,7 +19,7 @@ from pytest_graphql._core.diagnostics import (
     DiagnosticSnapshot,
     RequestInfo,
     require_safe_rendering,
-    sanitize_text,
+    text_tools,
 )
 from pytest_graphql._core.errors import GraphQLTestError
 from pytest_graphql._core.response.materialize import (
@@ -136,14 +136,19 @@ def build_response(
         state = "present"
 
     snapshot = request.redacted()
+    sanitize, excerpt = text_tools(request)
     return GraphQLResponse(
         data=data,
         data_state=state,
         errors=tuple(
             GraphQLErrorInfo.from_mapping(
-                item, scrub=lambda text: sanitize_text(request, text)
+                item,
+                scrub=sanitize,
+                # A summary only for the errors a report may show: the rest
+                # are counted, never rendered (max_recorded_errors).
+                excerpt=excerpt if index < request.max_recorded_errors else None,
             )
-            for item in raw.errors
+            for index, item in enumerate(raw.errors)
         ),
         extensions=MappingProxyType(dict(raw.extensions or {})),
         http=HttpInfo(
