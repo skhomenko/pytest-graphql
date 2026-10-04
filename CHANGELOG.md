@@ -132,6 +132,13 @@ cycle is promised.
   the `response` that failed and its `errors`. Building one from a message alone
   still works, and then `response` is `None`. Migration: none.
 
+### Fixed
+
+- The release workflow marks a PEP 440 prerelease tag (alpha, beta, release
+  candidate or dev) as a GitHub prerelease, so it no longer becomes the latest
+  release. `v0.1.0a1` had to be marked by hand. A tag that is not a PEP 440
+  version now stops the release build.
+
 ## [0.1.0a1] - 2026-10-03
 
 First alpha. It contains a working client, transport, response model and one

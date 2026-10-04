@@ -23,6 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
@@ -34,7 +35,12 @@ jobs:
         id: version
         env:
           TAG: ${{ github.ref_name }}
-        run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+        # A tag that is not a PEP 440 version stops the run here, because the
+        # assignment fails and the step runs under bash -e.
+        run: |
+          prerelease="$(python3 scripts/check_artifacts.py --tag "$TAG" --print-prerelease)"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
 
       - name: Build the wheel and the sdist
         # The build backend is pinned by requirements/build.txt, so the program
@@ -209,12 +215,18 @@ jobs:
         with:
           name: release-notes
       - name: Create the release from the changelog section
+        # A PEP 440 prerelease (alpha, beta, release candidate or dev) is marked
+        # as a GitHub prerelease, so it never becomes the latest release. The
+        # flag always carries an explicit true or false; an empty value makes
+        # gh refuse the call.
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
         run: |
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --title "$TAG" \
             --notes-file release-notes.md \
+            --prerelease="$PRERELEASE" \
             dist/*

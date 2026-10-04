@@ -3,7 +3,8 @@
 
 The "Release integrity" section of ``docs/reference/DESIGN_DECISIONS.md``
 requires these checks on every build: PEP 621 metadata completeness, wheel and
-sdist contents, and ``__version__`` agreeing with the tag. Long-description
+sdist contents, and ``__version__`` agreeing with the tag. It also tells the
+release job whether the tag is a PEP 440 prerelease. Long-description
 rendering and the rest of the packaging surface are checked by ``twine check``,
 which runs beside this script rather than inside it.
 
@@ -11,6 +12,7 @@ Usage::
 
     python3 scripts/check_artifacts.py --dist dist --version 0.1.0a1
     python3 scripts/check_artifacts.py --dist dist --tag v0.1.0a1
+    python3 scripts/check_artifacts.py --tag v0.1.0a1 --print-prerelease
     python3 scripts/check_artifacts.py --self-test
 
 Exit codes: 0 clean, 1 findings reported, 2 usage or read error.
@@ -22,6 +24,7 @@ parsed with ``email.parser``, which is the format ``METADATA`` uses.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import tarfile
 import zipfile
@@ -68,9 +71,56 @@ REQUIRED_SDIST_PATHS = (
 ENTRY_POINT_LINE = "graphql = pytest_graphql.plugin"
 
 
+# The version grammar of PEP 440, Appendix B. PEP 440 is in the public domain.
+# Adapted: the optional leading "v" and surrounding whitespace are dropped,
+# because the version here is already taken from the tag, and the match is
+# anchored at both ends.
+_PEP440_VERSION = re.compile(
+    r"""
+    \A
+    (?:(?P<epoch>[0-9]+)!)?
+    (?P<release>[0-9]+(?:\.[0-9]+)*)
+    (?P<pre>
+        [-_.]?
+        (?P<pre_l>a|b|c|rc|alpha|beta|pre|preview)
+        [-_.]?
+        (?P<pre_n>[0-9]+)?
+    )?
+    (?P<post>
+        (?:-(?P<post_n1>[0-9]+))
+        |
+        (?:[-_.]?(?P<post_l>post|rev|r)[-_.]?(?P<post_n2>[0-9]+)?)
+    )?
+    (?P<dev>
+        [-_.]?
+        (?P<dev_l>dev)
+        [-_.]?
+        (?P<dev_n>[0-9]+)?
+    )?
+    (?:\+(?P<local>[a-z0-9]+(?:[-_.][a-z0-9]+)*))?
+    \Z
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
+
+
 def version_from_tag(tag: str) -> str:
     """Return the version a release tag names."""
     return tag[1:] if tag.startswith("v") else tag
+
+
+def is_prerelease(version: str) -> bool:
+    """Whether a PEP 440 version is a prerelease.
+
+    A version with a pre-release or a development segment is a prerelease, as
+    in PEP 440 and ``packaging``. A post-release or a local label alone is not.
+    A string that is not a PEP 440 version raises ``ValueError``, so a release
+    is never published under a guess.
+    """
+    match = _PEP440_VERSION.match(version)
+    if match is None:
+        raise ValueError(f"not a PEP 440 version: {version!r}")
+    return match.group("pre") is not None or match.group("dev") is not None
 
 
 def _one(paths: list[Path], what: str, problems: list[str]) -> Path | None:
@@ -275,7 +325,34 @@ def self_test() -> int:
             print(f"FAIL tag {tag}")
             failures += 1
 
-    total = len(cases) + len(tags)
+    prereleases = (
+        ("0.1.0a1", True),
+        ("0.1.0b1", True),
+        ("0.1.0rc2", True),
+        ("0.1.0.dev0", True),
+        ("0.1.0a1.dev0", True),
+        ("1.0.0-beta.3", True),
+        ("0.1.0", False),
+        ("1.0.0.post1", False),
+        ("1.0.0-1", False),
+        ("1!2.0", False),
+        ("1.0.0+local.7", False),
+    )
+    for version, expected_pre in prereleases:
+        if is_prerelease(version) is not expected_pre:
+            print(f"FAIL prerelease {version}: expected {expected_pre}")
+            failures += 1
+
+    invalid = ("", "v0.1.0", "0.1.0 ", "latest", "0.1.0-alpha-1-x", "0..1")
+    for version in invalid:
+        try:
+            is_prerelease(version)
+        except ValueError:
+            continue
+        print(f"FAIL prerelease {version!r}: expected ValueError")
+        failures += 1
+
+    total = len(cases) + len(tags) + len(prereleases) + len(invalid)
     if failures:
         print(f"\n{failures} of {total} self-test case(s) failed.")
         return 1
@@ -288,6 +365,11 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--dist", default="dist")
     parser.add_argument("--version", default="")
     parser.add_argument("--tag", default="")
+    parser.add_argument(
+        "--print-prerelease",
+        action="store_true",
+        help="print true or false for whether the version is a prerelease",
+    )
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args(argv)
 
@@ -298,6 +380,14 @@ def main(argv: list[str]) -> int:
         print("error: give exactly one of --version and --tag", file=sys.stderr)
         return 2
     expected = args.version or version_from_tag(args.tag)
+
+    if args.print_prerelease:
+        try:
+            print("true" if is_prerelease(expected) else "false")
+        except ValueError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        return 0
 
     dist = Path(args.dist)
     if not dist.is_dir():
