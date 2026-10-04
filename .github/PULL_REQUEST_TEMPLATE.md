@@ -41,7 +41,8 @@ checklist in `docs/reference/CODE_REVIEW_HANDOFF.md`._
 - [ ] Exception naming. The base class is `GraphQLTestError`, never
       `GraphQLError`. (Product boundaries)
 - [ ] snake_case boundary. Wire-format keys stay inside the transport and
-      document-assembly layers. (Product boundaries)
+      document-assembly layers, except factory payloads, which use the exact
+      schema field names. (Product boundaries)
 - [ ] Deterministic seeding. No builtin `hash()` in any seed path. (Selection
       and deterministic data)
 - [ ] Bounded state. Accumulating structures stay bounded. (Diagnostics and

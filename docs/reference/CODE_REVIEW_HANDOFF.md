@@ -207,8 +207,11 @@ after each invariant is where its full statement lives.
   a verdict.
 - **Exception naming (Product boundaries).** The base class is
   `GraphQLTestError`, never `GraphQLError`, which belongs to `graphql-core`.
-- **snake_case boundary (Product boundaries).** snake_case in, snake_case out.
-  Wire-format keys appear only inside the transport and document-assembly layers.
+- **snake_case boundary (Product boundaries).** Arguments and fields are looked
+  up by their snake_case form or their exact schema name. Wire-format keys
+  appear only inside the transport and document-assembly layers, with one
+  exception: factory payloads use the exact schema field names, as sections 1
+  and 4 of `docs/reference/DESIGN_DECISIONS.md` state.
 - **Deterministic seeding (Selection and deterministic data).** No use of the
   builtin `hash()` for any seed. Python salts it per process. Use the documented
   SHA-256 derivation.

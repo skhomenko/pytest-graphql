@@ -35,10 +35,12 @@ published site, along with the rest of `docs/reference/`.
 - The base exception is `GraphQLTestError`. Leaf exception classes keep their specification
   names. The base is renamed to avoid a clash with `graphql.GraphQLError`, which comes from
   a required dependency.
-- Argument and field naming is snake_case in and snake_case out.
-  `gql.mutation("createUser", first_name="John")` sends `firstName`. The factory returns
-  snake_case keys, so `**payload` round-trips. Exact schema spellings stay reachable through
-  `variables={...}`.
+- Arguments and fields are looked up by their snake_case form or their exact schema name,
+  under "Naming resolution" in section 2. `gql.mutation("createUser", first_name="John")`
+  sends `firstName`, and a response field reads as `user.first_name`. Factory payloads use
+  the exact schema field names, under "Input factory rules" in section 4, and both
+  `**payload` and `input=payload` accept them. Exact schema spellings stay reachable
+  through `variables={...}`.
 - Middleware ships as part of v0.1. Hooks run only under pytest, so middleware is the only
   request hook available to a standalone user. The plugin installs one hook-delivering
   middleware into the core chain, so there is one mechanism exposed twice.
