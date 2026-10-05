@@ -10,6 +10,26 @@ cycle is promised.
 
 ## [Unreleased]
 
+### Added
+
+- The documentation site is set up, and it is not published yet. `mkdocs.yml`
+  builds it with MkDocs Material and `mkdocstrings`. `pip install
+  "pytest-graphql[docs]"` installs the tools, and none of them is a runtime
+  dependency. The site has the fifteen pages that the specification names, with
+  the Quickstart written in full, and an API reference generated from
+  `pytest_graphql.__all__`. A `docs` workflow builds and checks it with
+  `--strict` on every pull request. It deploys the site to GitHub Pages only
+  after a release run has uploaded to PyPI, or by a manual run from `main`.
+  Migration: none.
+- A Python block in a documentation page or in the README carries `{.exec}` or
+  `{.no-exec}` after the language. `tests/docs/` runs each `exec` block against
+  the test schema and compiles each `no-exec` block, and it fails a Python block
+  that has neither marker. A broken example now fails CI. Migration: none.
+- The documentation build checks every file it would publish. A file without a
+  recorded licence basis, a Lunr language pack, or a file that names a copyleft
+  licence fails `tests/docs/`, and no hand-written page may cite a contributor
+  document. Migration: none.
+
 ### Changed
 
 - graphql-core 3.3 is supported, alongside 3.2. The dependency is declared as

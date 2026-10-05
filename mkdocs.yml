@@ -1,0 +1,71 @@
+site_name: pytest-graphql
+site_description: Schema-aware GraphQL API testing for pytest.
+site_url: https://skhomenko.github.io/pytest-graphql/
+strict: true
+
+# docs/reference/ is contributor documentation. It is never published, so it
+# stays out of the build output and the navigation. tests/docs proves it.
+exclude_docs: |
+  reference/
+
+# The fifteen pages of SPEC section 13, in its order, then the generated API
+# reference. The first page is index.md so the site root is the Quickstart.
+nav:
+  - Quickstart: index.md
+  - Configuration: configuration.md
+  - Selections: selections.md
+  - Responses: responses.md
+  - Assertions: assertions.md
+  - Errors: errors.md
+  - Factory: factory.md
+  - Authentication: authentication.md
+  - Polling: polling.md
+  - Diagnostics: diagnostics.md
+  - Extending: extending.md
+  - Using without pytest: without-pytest.md
+  - Cookbook: cookbook.md
+  - Migrating from a hand-rolled client: migrating.md
+  - FAQ: faq.md
+  - API reference: api.md
+
+# Drops the Lunr language packs, which search does not load for English and
+# which carry Mozilla Public License headers. See mkdocs_hooks.py.
+hooks:
+  - mkdocs_hooks.py
+
+theme:
+  name: material
+  # Material loads Google Fonts by default, so a visitor's browser would contact
+  # a third party on every page view. System fonts avoid that.
+  font: false
+  features:
+    - content.code.copy
+
+# No repo_url: Material would then fetch repository facts from the GitHub API in
+# every visitor's browser. The footer credit is switched off for the same reason
+# the rest of the site carries no tool trailer.
+extra:
+  generator: false
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            show_source: false
+            # Every name in __all__ must appear, documented or not, so a
+            # missing docstring is visible on the page and not a silent gap.
+            show_if_no_docstring: true
+            # The default hides private names. __all__ is also left out: it is
+            # the list this page is generated from, not a thing to document.
+            filters: ["!^_[^_]", "!^__all__$"]
+
+# Python code blocks carry {.exec} or {.no-exec} after the language, which
+# superfences renders as a CSS class and still highlights as Python. Do not add
+# pymdownx.snippets: it would pull code into a page that tests/docs never sees.
+markdown_extensions:
+  - admonition
+  - pymdownx.highlight
+  - pymdownx.superfences

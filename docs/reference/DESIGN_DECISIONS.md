@@ -2175,6 +2175,63 @@ package.
 - Raising or dropping the lower bound is one change that edits the metadata and the lock file
   together.
 
+### Documentation dependencies
+
+The `docs` extra builds the documentation site. It is a development dependency in the same
+sense as `pytest-xdist`: nothing under `src/` imports it, and the built wheel names each
+package only as a requirement gated on `extra == "docs"`, so `pip install pytest-graphql`
+installs none of it and the wheel contains none of its code. `tests/docs/` asserts that no
+docs package is an unconditional requirement.
+
+| Package | Bound | Licence |
+|---|---|---|
+| `mkdocs` | `>=1.6,<2` | BSD-2-Clause |
+| `mkdocs-material` | `>=9.5,<10` | MIT |
+| `mkdocstrings` | `>=0.26` | ISC |
+| `mkdocstrings-python` | `>=1.12` | ISC |
+
+- The licences are read from the package metadata of the locked versions (1.6.1, 9.7.7,
+  1.0.6 and 2.0.9). The other packages the extra installs are under BSD, MIT, ISC or
+  Apache-2.0 terms, or a dual of them, except `certifi` and `pathspec`, which are MPL-2.0.
+  `certifi` is already a runtime dependency. `pathspec` carries a file-level copyleft
+  licence that applies to its own files, which sit in a development environment and are
+  never copied into this project, the wheel or the site.
+- The upper bound on `mkdocs` is part of the contract. Material for MkDocs states that MkDocs
+  2 removes the plugin system and breaks existing themes, and `mkdocstrings` is a plugin.
+  Raising the bound is a change that edits the metadata, the lock file and this table
+  together.
+- Two packages put files on the published site, Material (the theme) and `mkdocstrings` (one
+  stylesheet, ISC), besides the pages and files MkDocs generates. `SITE_FILES` in
+  `tests/docs/test_site.py` lists every file the build may publish and whose it is. A file
+  outside that list fails the build check, so a theme upgrade or a plugin that adds a file
+  blocks deployment until its licence basis is recorded here and there. The same test file
+  fails on any published file that names a copyleft licence (MPL, GPL, LGPL, AGPL, SSPL or a
+  Creative Commons ShareAlike or NonCommercial licence).
+- Material's theme directory holds the Lunr language packs, which carry Mozilla Public
+  License headers (Lunr Languages and Snowball). MkDocs copies every theme file. Search loads
+  a pack only for a language other than English, and this site's search is English only, so
+  none is ever loaded. `mkdocs_hooks.py` leaves them out of the site, and it stops the build
+  if the search language changes, so a pack is never published without a notice and a source
+  offer. English search needs no pack, because the Lunr core is bundled in the search worker.
+- Material's scripts and stylesheet bundle these libraries, read from the source maps of the
+  locked version (9.7.7): rxjs (Apache-2.0), tslib (0BSD terms), `escape-html`, `clipboard.js`,
+  Lunr and `material-design-color` (MIT), and `focus-visible` (W3C Software and Document
+  License). Material's own code is MIT. The maps carry the notice text for `escape-html`,
+  `clipboard.js`, tslib and Lunr, and the minified files carry none. No separate notice page
+  is published. Whether that placement meets the notice terms of the MIT, Apache-2.0 and W3C
+  licences is a residual licensing question for the maintainer to settle before the site is
+  published. A notice page, if added, is one more entry in `SITE_FILES`.
+- The site loads nothing from a third party. `theme.font: false` stops the Google Fonts
+  requests that Material makes by default, so a visitor's browser contacts only the host
+  of the site. `repo_url` is not set, because Material would then ask the GitHub API for
+  repository facts in every visitor's browser. `extra.generator: false` removes the footer
+  credit. The theme still carries code for mermaid diagrams (fetched from a CDN) and for
+  those repository facts, and both stay inactive while the features that call them are not
+  configured. GitHub Pages serves the site, so GitHub sees each request. That cannot be
+  avoided on Pages.
+- Pages and examples contain project-authored text and the project test schema only. No
+  third-party schema, data or media is published.
+
 ### Operating systems
 
 Linux, macOS and Windows are supported, which is what `docs/reference/SPEC.md` section 9
@@ -2192,12 +2249,107 @@ by operating system.
 
 - Unit tests never open a non-loopback socket. The guard allows loopback, so integration
   tests may run a real local HTTP server. A non-loopback connection fails the test.
-- `tests/docs/` is part of the tree and executes documentation examples.
+- `tests/docs/` is part of the tree. It executes documentation examples and tests the built
+  site, as the next subsection states.
 - The full suite runs serially. Under `-n` it fails at collection, because xdist needs every
   worker to collect the same tests and some parametrized and property tests do not. This is a
   limit of the suite and not of the plugin. The xdist behavior of the plugin is tested by
   `tests/unit/test_plugin_xdist.py`, which starts real workers with `-n 2` inside an inner
   session, so that limit does not affect it.
+
+### Documentation examples
+
+`tests/docs/` checks every Python block in the Markdown pages that the site publishes (every
+page under `docs/` except `docs/reference/`) and in `README.md`.
+
+**Which blocks.** Fenced blocks only, on three or more backticks or tildes at any indent, as
+Material's `pymdownx.superfences` reads them. An indented code block or raw HTML is not
+extracted, so a page does not use either for Python. `pymdownx.snippets` is not enabled,
+because it would pull code into a page that the check never sees. Docstrings reach the site
+through `mkdocstrings` and not through `docs/`, so a docstring example is not run by this
+check.
+
+**Marker syntax.** A Python block carries one marker, written as an attribute list after the
+language: `python {.exec}` or `python {.no-exec}`. Material renders the marker as a CSS class
+on the block and still highlights the block as Python. It also works with other attributes,
+for example `python {.exec title="test_users.py"}`. The bare form `python exec` is not valid
+there. The fence stops being a fence, the following fence pairs with the wrong line, and the
+rest of the page is rendered wrongly with no warning, even under `--strict`. The lint
+therefore rejects it. GitHub and PyPI read the first word of the info string as the
+language, so the README highlights correctly too.
+
+**Lint.** Each of these fails the test for the block, and none depends on the block's
+content:
+
+- a Python block with neither marker, or with both, or with a repeated one;
+- a block with no language, or with an info string that is not a language followed by at most
+  one attribute list;
+- a Python language word other than `python` (`py`, `python3`, `pycon`);
+- a marker on a block that is not Python;
+- a fence that is never closed.
+
+**`no-exec`.** The block is compiled and never run. It is for code that needs a server or
+credentials that the test schema does not have, and for fragments.
+
+**`exec`.** A block that defines a test (a top-level `test*` function or `Test*` class) runs
+as a file in an inner pytest session with the plugin loaded, so `gql` and every other plugin
+fixture behave as they do for a user. The inner project has no ini file and no conftest of its
+own. `gql_transport` is the in-process fake over the test schema, and `gql_url` returns a
+label that is never connected to, as in `tests/unit/plugin_inner.py`. The tests must pass, and
+at least one must run. Any other `exec` block runs in this process in a fresh namespace. The
+only names it has, besides the builtins and `__name__` (`__docs_example__`), are:
+
+- `gql`: a `GraphQLClient` over the test schema in `tests/schema/`, built with
+  `build_client(url=..., transport=..., schema=...)` on the in-process fake transport. It is
+  new for every block and closed when the block ends.
+
+A block imports everything else it uses, as a reader's file would. Blocks run in the order of
+the page, but share nothing, and a block must not change process-wide state. `SystemExit` and
+any exception fail the block. A traceback names the line of the page.
+
+**Network.** Examples run over the in-process transport, so none opens a socket. `tests/docs/`
+carries the same non-loopback socket guard as the unit tests, and a block that tried to
+connect would fail.
+
+**Serial run.** `tests/docs/` collects the same blocks in the same order in every process, so
+it does not depend on `-n`, and the full suite still runs serially.
+
+**Proof that the check checks.** `tests/docs/test_runner.py` sends deliberately broken blocks
+through the same `check` function the real pages use: a raising block, a failed assertion, a
+syntax error, an exit, a failing test, an unknown fixture, an unmarked block and each lint case.
+A runner that skipped unmarked blocks or ignored a failure would fail those tests.
+
+**The built site.** `tests/docs/test_site.py` builds the site with `mkdocs build --strict` in
+a subprocess and checks that:
+
+- the nav is the fifteen pages of `docs/reference/SPEC.md` section 13 in its order, then the
+  API reference, and every file under `docs/` is in it;
+- the output holds no page, sitemap entry or search entry from `docs/reference/`;
+- no page or stylesheet loads anything from a third-party host;
+- the build publishes only the files in `SITE_FILES`, no Lunr language pack, and no file that
+  names a copyleft licence;
+- no hand-written page names a contributor document, a numbered rule (B or C number), a
+  milestone or an unrendered Sphinx role;
+- the API reference renders every name in `pytest_graphql.__all__`;
+- the Quickstart is under 30 lines and holds an install line, one ini line and one `exec`
+  test.
+
+These tests import `mkdocs`, so they need the `docs` extra, which `uv sync --all-extras`
+installs, as every test needs the `dev` extra.
+
+**The API reference.** `docs/api.md` is generated by `mkdocstrings` from `pytest_graphql`
+and so from `__all__`. `show_if_no_docstring` is on, so a name without a docstring still
+appears and the gap is visible. One name needs a second directive. `unique` is a function
+and also the name of the private module that defines it, and static analysis resolves
+`pytest_graphql.unique` to the module, so the page renders it from its defining path with
+the path hidden from the heading. The site test lists that exception.
+
+The API page also republishes the source docstrings, and the existing ones cite SPEC
+sections, B and C numbers, milestone names and `docs/reference/DESIGN_DECISIONS.md`. A reader
+cannot open those. The docstrings must be rewritten for readers before the first deployment.
+Until then the page check for contributor references is a strict expected failure for the API
+page only. It starts to fail when the docstrings are clean, and that is when the marker is
+removed.
 
 ### What an exit criterion may claim
 
@@ -2209,10 +2361,10 @@ by operating system.
   Diamond reuse is not a cycle.
 - Determinism is checked against stored golden vectors under the narrowed promise in section
   4, not as byte-identical output across Python versions.
-- Documentation blocks carrying the `exec` info string are extracted and run by
-  `tests/docs/`. Unmarked blocks are illustrative and only syntax-checked. A lint rule
-  requires every Python block to carry `exec` or `no-exec`, so a block cannot be skipped by
-  accident.
+- Documentation blocks marked `exec` are extracted and run by `tests/docs/`, under the rules in
+  "Documentation examples". Blocks marked `no-exec` are illustrative and only syntax-checked.
+  A lint rule requires every Python block to carry one of the two, so a block cannot be
+  skipped by accident.
 - A release exit is a verified artifact set, not a publication.
 
 ---
@@ -2256,6 +2408,62 @@ by operating system.
   release candidate. A final or a development-only version is not mapped, because its
   classifier is the maintainer's statement at that gate. The artifact checks refuse a
   mismatch, so the maturity PyPI shows always agrees with the version.
+
+### Documentation workflow
+
+The `docs` workflow, `.github/workflows/docs.yml`, builds the site, checks it and deploys it
+to GitHub Pages. It follows the controls above.
+
+**What it checks.** On every pull request, one job builds the site with `mkdocs build
+--strict`, runs `tests/docs/`, and runs `scripts/check_publication_hygiene.py` over every
+published page (each Markdown file under `docs/` except `docs/reference/`, and the README)
+and over the rendered site (its HTML and XML files and the search index). The rendered site
+is scanned as well, because a reader gets the rendered text, and a docstring reaches it
+without passing through a page. The theme's own scripts and styles are third-party code and
+are not scanned. No pull request run deploys.
+
+**When it deploys.** Only in two cases:
+
+- After the `release` workflow finishes, when that run uploaded to PyPI. A push of a `v*`
+  tag does not trigger it. The `gate` job reads the finished run through the Actions API and
+  requires that its `upload to PyPI` job concluded `success`. The result of the run is not
+  enough. While the `RELEASE_PUBLISH` variable is unset, the run ends as a success with
+  every upload job skipped, and that run must deploy nothing. A step that fails after the
+  upload, such as the GitHub release, does not stop the docs of a version that is on PyPI.
+  The job name is the `name` of the `publish-pypi` job in `release.yml`, and a test keeps the
+  two in step. The run must be a push from this repository. A prerelease that reaches PyPI
+  deploys like any other version.
+- By a manual run from `main`, for a correction to the docs alone. It deploys the head of
+  `main`. A manual run from any other ref fails in the gate.
+
+Pushing to `main` does not deploy. A change to the docs reaches the site with the next
+release or the next manual run, so the site never describes an API that PyPI does not have,
+except by a manual run that the maintainer chose to make.
+
+**What it deploys.** After a release, the build checks out the commit that was released, not
+the head of `main`, so the site matches the version on PyPI. One job builds and checks the
+site and uploads it as the Pages artifact. The deploy job publishes that artifact and builds
+nothing, as in "One build, then promotion" above.
+
+**Controls.**
+
+- The default permission is `contents: read`. The `gate` job adds `actions: read` for the
+  one API read. Only the `deploy` job adds `pages: write` and `id-token: write`.
+- Every action is pinned to a full commit SHA with its version in a trailing comment, and the
+  checkout does not persist the token. The actions are `actions/checkout`,
+  `astral-sh/setup-uv`, `actions/upload-pages-artifact` and `actions/deploy-pages`.
+- The `deploy` job runs in the `github-pages` environment. A run started by a finished
+  workflow or by hand runs in the context of `main`, so the environment's default rule, which
+  limits deployments to the default branch, is met. A required reviewer on that environment is
+  the maintainer's choice, and the `pypi` environment has already approved the upload that
+  starts an automatic deploy.
+- Deployments run one at a time, and a running deployment is never cancelled. A newer run of
+  the same pull request replaces the older one.
+- The workflow never changes a repository setting. Enabling Pages with the source set to
+  GitHub Actions is the maintainer's step.
+
+`tests/docs/test_workflow.py` reads the workflow and holds these rules: the pins, the
+triggers, the permissions, the environment and the name of the upload job.
 
 ### Publication path
 

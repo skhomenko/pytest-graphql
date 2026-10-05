@@ -52,7 +52,7 @@ gql_url = http://localhost:8000/graphql
 
 Each test gets its own client through the `gql` fixture:
 
-```python
+```python {.no-exec}
 def test_user_has_a_name(gql):
     user = gql.query("user", id="123")
     assert user == gql.expect.User(id="123", name="Ann")
@@ -75,7 +75,7 @@ For a URL known only at run time, override the `gql_url` fixture in your
 
 Without pytest, use `build_client()`, and close the client when you are done:
 
-```python
+```python {.no-exec}
 from pytest_graphql import build_client
 
 with build_client(url="http://localhost:8000/graphql") as gql:
@@ -84,14 +84,14 @@ with build_client(url="http://localhost:8000/graphql") as gql:
 
 ## Install
 
-```
+```bash
 pip install pytest-graphql
 ```
 
 The required dependencies are `graphql-core`, `httpx`, and `certifi`. `pytest`
 is optional, so the client can be used outside a test suite:
 
-```
+```bash
 pip install "pytest-graphql[pytest]"
 ```
 
