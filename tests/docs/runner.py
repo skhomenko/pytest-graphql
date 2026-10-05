@@ -14,6 +14,10 @@ feed it a deliberately broken block. What it does, by block:
 
 A block in another language is not checked.
 
+``check`` returns what it did with the block: ``"ran"``, ``"compiled"`` or
+``"not-python"``. A caller that has to know that a block was executed, and not
+only accepted, reads that value.
+
 Every block runs over the test schema in ``tests/schema/``, through the
 in-process fake transport, so no example opens a socket.
 """
@@ -21,7 +25,7 @@ in-process fake transport, so no example opens a socket.
 from __future__ import annotations
 
 import ast
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
@@ -48,25 +52,33 @@ class ExampleError(AssertionError):
     """A documentation block failed its check."""
 
 
+Outcome = Literal["ran", "compiled", "not-python"]
+
+
 def check(
     block: Block, pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Check one block, or raise ``ExampleError`` naming where it is."""
+) -> Outcome:
+    """Check one block, or raise ``ExampleError`` naming where it is.
+
+    Returns ``"ran"`` for an ``exec`` block, ``"compiled"`` for a ``no-exec``
+    block, and ``"not-python"`` for a block that is not checked.
+    """
     if block.problems:
         raise ExampleError(f"{block.where}: " + "; ".join(block.problems))
     if not block.is_python:
-        return
+        return "not-python"
     if block.mode == NO_EXEC:
         _compile(block)
-    elif block.mode == EXEC:
+        return "compiled"
+    if block.mode == EXEC:
         tree = _compile(block)
         if _defines_tests(tree):
             _run_as_tests(block, pytester, monkeypatch)
         else:
             _run_in_namespace(block, tree)
-    else:
-        # classify() reports every other case, so this guards a new one.
-        raise ExampleError(f"{block.where}: the block has no usable marker")
+        return "ran"
+    # classify() reports every other case, so this guards a new one.
+    raise ExampleError(f"{block.where}: the block has no usable marker")
 
 
 def _compile(block: Block) -> ast.Module:

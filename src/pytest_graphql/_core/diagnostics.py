@@ -1505,34 +1505,196 @@ class _HeaderEntry:
 
 @dataclass(frozen=True)
 class DiagnosticSnapshot:
-    """The only form of a request that may reach an exception or a report (C2).
+    """A request in the form that is meant for error messages and reports.
 
-    Every field here has already passed redaction, the free-form-text
-    scrub, control-character escaping and truncation. ``truncated`` states,
-    in traversal order, which fields were cut and by how many bytes; it is
-    empty when nothing was cut (C2: "truncation is visible, never silent").
-    ``headers`` is a name-to-rendered-value view for reports; ``curl_headers``
-    is the ordered, render-safe sequence ``as_curl()`` builds its command
-    from, carrying the redaction flag a plain mapping cannot.
+    You get a snapshot from `RequestInfo.redacted()`, and from
+    `GraphQLResponse.request` and the `request` of an exception. It is the only
+    form of a request that reaches an error message or a report. Every field has
+    been through these steps:
+
+    - Header values are replaced by markers when the header name is in
+      `redact_headers`, and variable values when their path matches
+      `redact_variables`. This depends on the name and is always done.
+    - Free text, such as the query text, has the known secret values removed. A
+      known secret is one of these: the value of a header whose name is in
+      `redact_headers`, a variable value at a path that matches
+      `redact_variables`, a cookie value, the user name and password of the URL,
+      every value in the query string of the URL, or a credential that the
+      transport sends outside the headers, such as a proxy password. The value
+      of a header with another name is not a known secret because of that
+      header. It is removed only if the same text is also one of the values
+      above, for example when it is also in the URL. A known secret is removed
+      only while `redact_values` is on, and only if it is at least
+      `min_redacted_value_length` characters long. A shorter one, such as a
+      3-character token, stays in the query text.
+    - Control characters are escaped, and each field is cut to a size limit.
+
+    So a snapshot is safe to show as far as those rules reach. Give test
+    accounts credentials that are long enough, and list every header or variable
+    that holds a secret.
+
+    `truncated` says which fields were cut and by how many bytes. It is empty when
+    nothing was cut, so a cut is never silent.
+
+    A snapshot never changes. `variables` and `headers` are read-only mappings.
+
+    Examples:
+        ```python {.exec}
+        response = gql.query("user", id="u1", fields=["name"], raw=True)
+
+        snapshot = response.request
+        assert snapshot.kind == "query"
+        assert snapshot.operation == "user"
+        assert snapshot.method == "POST"
+        assert snapshot.variables == {"id": "u1"}
+        ```
     """
 
     operation: str | None
+    """The operation name, or `None` for an operation without a name.
+
+    Examples:
+        ```python {.exec}
+        snapshot = gql.query("user", id="u1", fields=["name"], raw=True).request
+        assert snapshot.operation == "user"
+        ```
+    """
     kind: OperationKind
+    """`"query"`, `"mutation"` or `"subscription"`.
+
+    Examples:
+        ```python {.exec}
+        snapshot = gql.query("user", id="u1", fields=["name"], raw=True).request
+        assert snapshot.kind == "query"
+        ```
+    """
     document: str
+    """The GraphQL text that was sent.
+
+    Examples:
+        ```python {.exec}
+        snapshot = gql.query("user", id="u1", fields=["name"], raw=True).request
+        assert snapshot.document.startswith("query user")
+        ```
+    """
     variables: Mapping[str, Any]
+    """The variables that were sent.
+
+    A value whose variable path matches `redact_variables` is replaced by a marker.
+
+    Examples:
+        ```python {.exec}
+        snapshot = gql.query("user", id="u1", fields=["name"], raw=True).request
+        assert snapshot.variables == {"id": "u1"}
+        ```
+    """
     headers: Mapping[str, str]
+    """The headers that were sent.
+
+    A value whose header name is in `redact_headers` is replaced by a marker such
+    as `[redacted:Authorization]`. A header with another name keeps its value.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import RequestInfo
+
+        request = RequestInfo(
+            None, "query", "{ me }", {}, {"Authorization": "Bearer abcdef123456"}, "http://localhost/graphql"
+        )
+        assert request.redacted().headers["Authorization"] == "[redacted:Authorization]"
+        ```
+    """
     method: str
+    """The HTTP method. It is `"POST"`.
+
+    Examples:
+        ```python {.exec}
+        snapshot = gql.query("user", id="u1", fields=["name"], raw=True).request
+        assert snapshot.method == "POST"
+        ```
+    """
     url: str
+    """The URL, without any user name, password or query string.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import RequestInfo
+
+        request = RequestInfo(
+            None, "query", "{ me }", {}, {}, "http://ada:secret-pass@localhost/graphql?token=abc123"
+        )
+        assert "secret-pass" not in request.redacted().url
+        assert "abc123" not in request.redacted().url
+        ```
+    """
     idempotent: bool
+    """Whether the call was marked as safe to try again after a connection failure.
+
+    Examples:
+        ```python {.exec}
+        snapshot = gql.query("user", id="u1", fields=["name"], raw=True).request
+        assert snapshot.idempotent is False
+        ```
+    """
     curl_headers: tuple[_HeaderEntry, ...] = ()
+    """The headers in request order, in the form that `as_curl()` uses.
+
+    Examples:
+        ```python {.exec}
+        snapshot = gql.query("user", id="u1", fields=["name"], raw=True).request
+        assert snapshot.curl_headers == ()
+        ```
+    """
     truncated: tuple[str, ...] = ()
+    """A note for each cut field, such as `"variables: truncated 39 byte(s)"`.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import RequestInfo
+
+        request = RequestInfo(
+            None, "query", "{ a }", {"a": "x" * 50}, {}, "http://x/g",
+            max_diagnostic_bytes=20,
+        )
+        notes = request.redacted().truncated
+        assert any(note.startswith("variables: truncated") for note in notes)
+        ```
+    """
     #: C58. Bounded by ``MAX_OMISSION_RECORDS`` rather than by
     #: ``max_diagnostic_bytes``, because a skipped field is not counted by
     #: ``max_fields`` either and the records need a bound of their own.
     omissions: tuple[OmissionRecord, ...] = ()
+    """The fields that auto-selection left out, and why. At most 50 are kept.
+
+    Each record has `parent_type`, `path` and `reason`. The reason is one of
+    `"required-argument"`, `"deprecated"`, `"connection-page-size"`,
+    `"connection-depth"`, `"depth"`, `"cycle"`, `"should-include"` and
+    `"union-member-cap"`. A record never holds an argument value. The list is empty
+    when you wrote the fields yourself.
+
+    Examples:
+        ```python {.exec}
+        snapshot = gql.query("user", id="u1", raw=True).request
+        record = snapshot.omissions[0]
+        assert record.reason == "cycle"
+        assert record.parent_type == "User"
+        assert record.field_path == "user.manager.manager"
+        ```
+    """
     #: How many omissions the selection produced in total, including the ones
     #: past the bound. ``omissions_dropped`` is what a report states visibly.
     omissions_total: int = 0
+    """How many fields auto-selection left out in all, including those not kept.
+
+    Examples:
+        ```python {.exec}
+        snapshot = gql.query("user", id="u1", fields=["name"], raw=True).request
+        assert snapshot.omissions_total == 0
+
+        wide = gql.query("user", id="u1", raw=True).request
+        assert wide.omissions_total >= len(wide.omissions)
+        ```
+    """
     #: The request's qualifying set as digests only, so a representation
     #: built from this snapshot later can be checked whole (C2, C16).
     _guard: _SecretGuard = field(
@@ -1552,7 +1714,16 @@ class DiagnosticSnapshot:
 
     @property
     def omissions_dropped(self) -> int:
-        """How many omission records the bound cut. Never silent (C2, C58)."""
+        """How many omission records were cut by the limit of 50.
+
+        Examples:
+            ```python {.exec}
+            snapshot = gql.query("user", id="u1", raw=True).request
+            assert snapshot.omissions_dropped == (
+                snapshot.omissions_total - len(snapshot.omissions)
+            )
+            ```
+        """
         return max(self.omissions_total - len(self.omissions), 0)
 
 
@@ -1915,40 +2086,267 @@ def _apply_size_limits(
 
 @dataclass(frozen=True, repr=False)
 class RequestInfo:
-    """One outgoing GraphQL HTTP request, with real values (C2).
+    """One outgoing GraphQL request, with its real header and variable values.
 
-    This is the type ``Transport.send()`` (SPEC 5.6), ``Auth.apply`` (B5) and
-    ``Middleware.before_request`` (B6) see. It gains no representation that
-    shows a real header or variable value: ``__repr__`` and ``__str__``
-    always render ``redacted()`` instead, and only ``redacted()`` or
-    ``as_curl()`` may leave this object.
+    This is the object that `Auth.apply`, `Middleware.before_request` and
+    `Transport.send` receive. They need the real values, because they sign, change
+    and send the request. So the object holds them, and takes care that they do not
+    leak: `repr()` and `str()` show the redacted form, and `redacted()` and
+    `as_curl()` are the views meant for an error message or a report. Redaction
+    covers the headers and variables that the redaction settings name, and known
+    secrets in free text above a minimum length. See `DiagnosticSnapshot`.
 
-    The six redaction settings are constructor data with the documented
-    defaults, the same pattern C13 gives ``HttpxTransport``'s operational
-    limits, so neither this module nor M5a needs ``ClientConfig``.
-    ``max_recorded_errors`` has no effect within this milestone: it exists so
-    M5c's response/recorder code has a field to read once errors exist to
-    bound.
+    A request never changes. `headers` and `variables` are read-only mappings. To
+    change a request, build a new one with `dataclasses.replace()`.
+
+    You build a `RequestInfo` yourself only in tests of your own `Auth`,
+    `Middleware` or `Transport`. The client builds the real ones. The settings
+    that start with `redact_` and `max_` copy the fields of `ClientConfig` that
+    have the same names, with the same defaults.
+
+    Args:
+        operation: The operation name, or `None`.
+        kind: `"query"`, `"mutation"` or `"subscription"`.
+        document: The GraphQL text.
+        variables: The variables, by name.
+        headers: The headers.
+        url: The URL of the endpoint.
+        method: The HTTP method.
+        idempotent: Whether the call may be tried again after a failure to connect.
+        redact_headers: The names of headers whose values are secret.
+        redact_variables: Patterns for variables whose values are secret.
+        redact_values: Whether to remove known secrets from free text. See
+            `DiagnosticSnapshot` for what a known secret is.
+        min_redacted_value_length: The shortest known secret that is removed from
+            free text.
+        max_diagnostic_bytes: The size limit of one field of a snapshot.
+        max_recorded_errors: How many errors a report lists.
+        omissions: The fields that auto-selection left out. The client sets it.
+        omissions_total: How many it left out in all. The client sets it.
+        transport_credentials: Secrets that are not in `headers`, as pairs of a
+            label and a value, such as a proxy password. The client and the
+            transport set it. You do not.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import RequestInfo
+
+        request = RequestInfo(
+            operation="login",
+            kind="mutation",
+            document="mutation login($password: String!) { login }",
+            variables={"password": "hunter2-hunter2"},
+            headers={"Authorization": "Bearer abcdef123456"},
+            url="http://localhost:8000/graphql",
+        )
+        assert request.headers["Authorization"] == "Bearer abcdef123456"
+        assert "abcdef123456" not in repr(request)
+        assert "hunter2" not in repr(request)
+        ```
     """
 
     operation: str | None
+    """The operation name, or `None` for an operation without a name.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import RequestInfo
+
+        request = RequestInfo(
+            "user", "query", "{ user }", {"id": "u1"}, {"X-Trace": "t1"}, "http://localhost/graphql"
+        )
+        assert request.operation == "user"
+        ```
+    """
     kind: OperationKind
+    """`"query"`, `"mutation"` or `"subscription"`.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import RequestInfo
+
+        request = RequestInfo(
+            None, "query", "{ user }", {"id": "u1"}, {"X-Trace": "t1"}, "http://localhost/graphql"
+        )
+        assert request.kind == "query"
+        ```
+    """
     document: str
+    """The GraphQL text.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import RequestInfo
+
+        request = RequestInfo(
+            None, "query", "{ user }", {"id": "u1"}, {"X-Trace": "t1"}, "http://localhost/graphql"
+        )
+        assert request.document == "{ user }"
+        ```
+    """
     variables: Mapping[str, Any]
+    """The variables, by name, with their real values. A read-only mapping.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import RequestInfo
+
+        request = RequestInfo(
+            None, "query", "{ user }", {"id": "u1"}, {"X-Trace": "t1"}, "http://localhost/graphql"
+        )
+        assert request.variables == {"id": "u1"}
+        ```
+    """
     headers: Mapping[str, str]
+    """The headers, with their real values. A read-only mapping.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import RequestInfo
+
+        request = RequestInfo(
+            None, "query", "{ user }", {"id": "u1"}, {"X-Trace": "t1"}, "http://localhost/graphql"
+        )
+        assert request.headers == {"X-Trace": "t1"}
+        ```
+    """
     url: str
+    """The URL of the endpoint.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import RequestInfo
+
+        request = RequestInfo(
+            None, "query", "{ user }", {"id": "u1"}, {"X-Trace": "t1"}, "http://localhost/graphql"
+        )
+        assert request.url == "http://localhost/graphql"
+        ```
+    """
     method: str = "POST"
+    """The HTTP method. The default is `"POST"`.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import RequestInfo
+
+        request = RequestInfo(
+            None, "query", "{ user }", {"id": "u1"}, {"X-Trace": "t1"}, "http://localhost/graphql"
+        )
+        assert request.method == "POST"
+        ```
+    """
     idempotent: bool = False
+    """Whether the call may be tried again after a failure to connect.
+
+    A query may always be tried again. A mutation may be only when this is `True`.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import RequestInfo
+
+        request = RequestInfo(
+            None, "query", "{ user }", {"id": "u1"}, {"X-Trace": "t1"}, "http://localhost/graphql"
+        )
+        assert request.idempotent is False
+        ```
+    """
     redact_headers: frozenset[str] = DEFAULT_REDACT_HEADERS
+    """The names of headers whose values are secret, in lower case.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import RequestInfo
+
+        request = RequestInfo(
+            None, "query", "{ user }", {"id": "u1"}, {"X-Trace": "t1"}, "http://localhost/graphql"
+        )
+        assert "authorization" in request.redact_headers
+        ```
+    """
     redact_variables: tuple[str, ...] = DEFAULT_REDACT_VARIABLES
+    """Patterns for variables whose values are secret.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import RequestInfo
+
+        request = RequestInfo(
+            None, "query", "{ user }", {"id": "u1"}, {"X-Trace": "t1"}, "http://localhost/graphql"
+        )
+        assert "password" in request.redact_variables
+        ```
+    """
     redact_values: bool = True
+    """Whether known secret values are removed from free text.
+
+    See `DiagnosticSnapshot` for what a known secret is.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import RequestInfo
+
+        request = RequestInfo(
+            None, "query", "{ user }", {"id": "u1"}, {"X-Trace": "t1"}, "http://localhost/graphql"
+        )
+        assert request.redact_values is True
+        ```
+    """
     min_redacted_value_length: int = DEFAULT_MIN_REDACTED_VALUE_LENGTH
+    """The shortest known secret value that is removed from free text.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import RequestInfo
+
+        request = RequestInfo(
+            None, "query", "{ user }", {"id": "u1"}, {"X-Trace": "t1"}, "http://localhost/graphql"
+        )
+        assert request.min_redacted_value_length == 8
+        ```
+    """
     max_diagnostic_bytes: int = DEFAULT_MAX_DIAGNOSTIC_BYTES
+    """The size limit of one field of the snapshot, in bytes.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import RequestInfo
+
+        request = RequestInfo(
+            None, "query", "{ user }", {"id": "u1"}, {"X-Trace": "t1"}, "http://localhost/graphql"
+        )
+        assert request.max_diagnostic_bytes == 4096
+        ```
+    """
     max_recorded_errors: int = DEFAULT_MAX_RECORDED_ERRORS
+    """How many of a response's errors a report lists.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import RequestInfo
+
+        request = RequestInfo(
+            None, "query", "{ user }", {"id": "u1"}, {"X-Trace": "t1"}, "http://localhost/graphql"
+        )
+        assert request.max_recorded_errors == 20
+        ```
+    """
     #: C58. The automatic omissions the selection behind this request made,
     #: already rebased onto the finished document by whoever composed it.
     #: ``redacted()`` scrubs, escapes and bounds them onto the snapshot.
     omissions: tuple[OmissionRecord, ...] = ()
+    """The fields that auto-selection left out, and why. At most 50 are kept.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import RequestInfo
+
+        request = RequestInfo(
+            None, "query", "{ user }", {"id": "u1"}, {"X-Trace": "t1"}, "http://localhost/graphql"
+        )
+        assert request.omissions == ()
+        ```
+    """
     #: C58. How many omissions that selection made in total, including the
     #: ones already cut before the records reached this request. It is carried
     #: rather than recounted, because ``omissions`` is bounded and a count
@@ -1956,6 +2354,18 @@ class RequestInfo:
     #: A caller that supplies records and no total gets the count of the
     #: records it supplied, which is the one value that cannot under-report.
     omissions_total: int = 0
+    """How many fields auto-selection left out in all, including those not kept.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import RequestInfo
+
+        request = RequestInfo(
+            None, "query", "{ user }", {"id": "u1"}, {"X-Trace": "t1"}, "http://localhost/graphql"
+        )
+        assert request.omissions_total == 0
+        ```
+    """
     #: C16. Credentials that belong to this request's secret set but are not in
     #: ``headers``, as ``(source label, value)`` pairs: a proxy's userinfo,
     #: the ``Proxy-Authorization`` value built from it, any other proxy
@@ -1966,6 +2376,21 @@ class RequestInfo:
     #: Each one joins the secret set unconditionally and none is ever
     #: rendered. The client and the transport set this, never the caller.
     transport_credentials: tuple[tuple[str, str], ...] = ()
+    """Secrets that are not in `headers`, as pairs of a label and a value.
+
+    Examples are a proxy password and the values of cookies. The client and the
+    transport set this. They are never shown.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import RequestInfo
+
+        request = RequestInfo(
+            None, "query", "{ user }", {"id": "u1"}, {"X-Trace": "t1"}, "http://localhost/graphql"
+        )
+        assert request.transport_credentials == ()
+        ```
+    """
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "variables", MappingProxyType(dict(self.variables)))
@@ -2076,17 +2501,62 @@ class RequestInfo:
         return secrets, marker_for
 
     def scrub(self, text: str) -> str:
-        """Scrub ``text`` of every value in this request's secret set (C59).
+        """Remove this request's secrets from a piece of free text.
 
-        Exposed on its own, not only inside :meth:`redacted`, so a caller
-        with free-form text of its own -- M5a's response excerpts and
-        transport error messages -- can remove this request's
-        known-sensitive values without ever holding the secret set itself
-        (C16: the set is "never returned by a public API"). Like
-        :meth:`redacted`, this only runs the scrub stage: a caller that
-        renders the result into its own report is responsible for running
-        it through :func:`escape_control_characters` too, the same as
-        :meth:`redacted` does.
+        Use it on text that you build yourself and want to show, such as a
+        server's error message or a body excerpt. A server can echo a secret it
+        was sent. Each known secret of this request is replaced by a marker such
+        as `[redacted:Authorization]`: the values of headers whose names are in
+        `redact_headers`, of variables that a redaction pattern matches, of
+        cookies, the user name and password of the URL, every value in its query
+        string, and the credentials that the transport sends outside the headers.
+        A value with a scheme, such as `Bearer <token>`, also has its part after
+        the scheme removed. The value of a header with another name is not
+        removed because of that header, however long it is. It is removed only
+        if the same text is also one of the values above.
+
+        Only a value of at least `min_redacted_value_length` characters is
+        removed, so a shorter secret stays in the text. This removes secrets only.
+        It does not escape control characters or cut the text. If `redact_values`
+        is `False`, it returns the text unchanged. The set of secrets is never
+        returned.
+
+        Args:
+            text: The text to clean.
+
+        Returns:
+            The text with every known secret replaced.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import RequestInfo
+
+            request = RequestInfo(
+                operation=None,
+                kind="query",
+                document="{ me }",
+                variables={},
+                headers={"Authorization": "Bearer abcdef123456"},
+                url="http://localhost:8000/graphql",
+            )
+            text = request.scrub("rejected token abcdef123456")
+            assert text == "rejected token [redacted:Authorization]"
+
+            # A value in the query string of the URL is a known secret too, and so
+            # is a transport credential. A header that is not listed is not.
+            from dataclasses import replace
+
+            url = "http://localhost:8000/graphql?debug=long-query-value"
+            other = replace(
+                request,
+                headers={"X-Trace": "long-trace-value"},
+                url=url,
+                transport_credentials=(("proxy", "long-proxy-password"),),
+            )
+            assert other.scrub("echo long-query-value") == "echo [redacted:url]"
+            assert other.scrub("echo long-proxy-password") == "echo [redacted:proxy]"
+            assert other.scrub("echo long-trace-value") == "echo long-trace-value"
+            ```
         """
         if not self.redact_values:
             return text
@@ -2174,7 +2644,39 @@ class RequestInfo:
         return snapshot, secrets
 
     def redacted(self) -> DiagnosticSnapshot:
-        """The only view of this request that may reach an exception or a report."""
+        """Return the request as a snapshot for error messages and reports.
+
+        Header values and variable values are replaced when their names match the
+        redaction settings. Known secret values (see `scrub()`) are removed from
+        free text such as the query, while `redact_values` is on and for values of
+        at least `min_redacted_value_length` characters. Control characters are
+        escaped and every field is cut to `max_diagnostic_bytes`. A cut is stated in
+        `truncated`. This is the only form of a request that should reach an error
+        message, a log or a report. A secret shorter than the minimum, or one that
+        is not a known secret, can stay in the text. See
+        `DiagnosticSnapshot`.
+
+        Returns:
+            A `DiagnosticSnapshot`.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import RequestInfo
+
+            request = RequestInfo(
+                operation="login",
+                kind="mutation",
+                document="mutation login($password: String!) { login }",
+                variables={"password": "hunter2-hunter2"},
+                headers={"Authorization": "Bearer abcdef123456", "X-Trace": "t1"},
+                url="http://localhost:8000/graphql",
+            )
+            snapshot = request.redacted()
+            assert snapshot.variables == {"password": "[redacted:password]"}
+            assert snapshot.headers["Authorization"] == "[redacted:Authorization]"
+            assert snapshot.headers["X-Trace"] == "t1"
+            ```
+        """
         secrets, marker_for = self._redaction_context()
         snapshot, _ = self._build_snapshot(secrets, marker_for)
         return snapshot
@@ -2194,41 +2696,40 @@ class RequestInfo:
     # -- as_curl() (C45, C48, C54) --------------------------------------------
 
     def as_curl(self) -> str:
-        """A runnable ``curl`` command reproducing this request, secrets hidden.
+        """Return a `curl` command that repeats this request, with secrets hidden.
 
-        Built from :meth:`redacted`, the only view of this request that may
-        cross the rendering boundary (section 7, "Boundary"): the method,
-        URL and body come from the snapshot, and every header comes from
-        ``snapshot.curl_headers`` -- an ordered sequence already scrubbed,
-        escaped and bounded by that same pipeline, so this method never
-        re-derives it over a live field and never looks up a name in a
-        mapping the size limiter may have truncated or dropped a key from.
-        A header matched by ``redact_headers`` never appears as a literal
-        value, redacted or not: it renders as the C48/C54 placeholder, two
-        quoted segments forming one shell word, so the command stays
-        runnable once the caller exports the named environment variable.
-        Every other literal component is quoted as data with
-        ``shlex.quote``, never split across an expansion.
+        The command is built from `redacted()`, so it follows the same rules. A
+        header whose name is in `redact_headers` is written as a shell variable,
+        such as `${PYTEST_GQL_HEADER_AUTHORIZATION}`. Export that variable with the
+        real value, and the command runs as it is. Every other part is quoted for
+        the shell. A variable value that a redaction pattern matches shows a marker.
+        A secret that is not covered, for example one shorter than
+        `min_redacted_value_length` inside the query text, stays in the command.
 
-        Every value that reaches ``json.dumps`` or ``shlex.quote`` is
-        checked against that same call's own output first, against the
-        rendering-boundary risk :meth:`__repr__` also guards: either one's
-        own backslash-, quote- or delimiter-doubling escaping can synthesize
-        a different qualifying secret's spelling from text that was already
-        safe before that call ran. A value that would fail this check is
-        replaced before it is serialized or quoted, never spliced out of
-        already-serialized or already-quoted text afterward -- doing that
-        to a *quoted* command can remove the quote characters the match
-        happens to span, turning inert request-controlled text into live
-        shell syntax (module docstring, "A further transform"). This applies
-        to every individual field the JSON body is built from -- ``query``,
-        ``operationName``, each variable -- but not to the complete, already
-        valid ``--data`` JSON document itself: substituting that whole
-        document for a marker would discard the structured request body
-        `as_curl()` promises to reproduce (module docstring, "A leaf-level
-        check cannot see everything"), so it is quoted directly and, like
-        the complete assembled command, checked once more as a whole
-        immediately before this method returns.
+        Returns:
+            The command, as text.
+
+        Raises:
+            DiagnosticRenderError: When a secret equals text that the command must
+                contain, so that it cannot be replaced safely.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import RequestInfo
+
+            request = RequestInfo(
+                operation=None,
+                kind="query",
+                document="{ me }",
+                variables={},
+                headers={"Authorization": "Bearer abcdef123456"},
+                url="http://localhost:8000/graphql",
+            )
+            command = request.as_curl()
+            assert command.startswith("curl -sS -X POST http://localhost:8000/graphql")
+            assert "${PYTEST_GQL_HEADER_AUTHORIZATION}" in command
+            assert "abcdef123456" not in command
+            ```
         """
         secrets, marker_for = self._redaction_context()
         snapshot, effective_secrets = self._build_snapshot(secrets, marker_for)

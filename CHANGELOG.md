@@ -25,6 +25,11 @@ cycle is promised.
   `{.no-exec}` after the language. `tests/docs/` runs each `exec` block against
   the test schema and compiles each `no-exec` block, and it fails a Python block
   that has neither marker. A broken example now fails CI. Migration: none.
+- `tests/docs/` runs the examples in the docstrings that the API page publishes,
+  and holds the public API to the rule that every public symbol has a docstring
+  with an example. The objects are the ones `mkdocs.yml` and `docs/api.md`
+  render. A failure names the symbol, the file and the source line. An example
+  that is only compiled does not satisfy the rule. Migration: none.
 - The documentation build checks every file it would publish. A file without a
   recorded licence basis, a Lunr language pack, or a file that names a copyleft
   licence fails `tests/docs/`, and no hand-written page may cite a contributor
@@ -32,6 +37,14 @@ cycle is promised.
 
 ### Changed
 
+- The API reference is written for readers. Every name in `pytest_graphql.__all__`
+  has a docstring, and so has each public method, property and attribute of
+  its classes. Each docstring says what the object is for, its parameters, what it
+  returns and raises, and it has an example. The docstrings use the Google style,
+  which `mkdocs.yml` sets for `mkdocstrings`. The API page leaves out
+  `__slots__`, `__repr__`, `__str__`, `__eq__`, `__hash__` and `__post_init__`,
+  and shows the constructor with its class. The check that a published page cites
+  no contributor document now covers the API page too. Migration: none.
 - graphql-core 3.3 is supported, alongside 3.2. The dependency is declared as
   `graphql-core>=3.2,<3.4`, so a project that already uses graphql-core 3.3 can
   install this package. The whole suite passes on the newest 3.2 and the newest

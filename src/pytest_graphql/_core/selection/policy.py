@@ -44,6 +44,27 @@ from graphql import (
 )
 
 CyclePolicy = Literal["stop", "shallow", "id_only"]
+"""What auto-selection does when a type appears again on its own path.
+
+A cycle is a type that contains itself, directly or through other types, such
+as `User.manager`, which is a `User` again. Auto-selection checks each path from
+the top, so the same type in two sibling branches is not a cycle. The value is
+one of three strings:
+
+- `"stop"`: leave the field out.
+- `"shallow"`: select the scalar fields of the repeated type and its `id`, and
+  nothing nested. This is the default.
+- `"id_only"`: select only the `id`, or nothing when the type has none.
+
+Examples:
+    ```python {.exec}
+    from pytest_graphql import ClientConfig, SelectionPolicy
+
+    config = ClientConfig(cycle_policy="id_only")
+    assert config.selection_policy().cycle_policy == "id_only"
+    assert SelectionPolicy().cycle_policy == "shallow"
+    ```
+"""
 
 #: The argument that bounds how many rows a connection field returns. C1
 #: names it, and a connection field without it is skipped rather than
@@ -69,27 +90,199 @@ def _reject(value: object) -> Any:
 
 @dataclass(frozen=True)
 class SelectionPolicy:
-    """How auto-selection walks a schema, and what it is allowed to cost.
+    """The rules the client follows when it chooses fields for you.
 
-    ``max_fields`` is a document-size guard and not a cost control (C1). The
-    cost controls are ``include_deprecated``, the connection page size, and
-    the two width and nesting caps.
+    When you call `query()` or `mutation()` without `fields=`, the client walks
+    the schema from the returned type and selects fields. A `SelectionPolicy`
+    sets how far it goes and what it leaves out, so that a generated query
+    stays small enough to be fast and safe to run.
+
+    A client builds its policy from the matching fields of `ClientConfig`, and
+    `ClientConfig.selection_policy()` returns it. Three fields exist only here,
+    and always have their defaults on a client: `connection_page_size`,
+    `max_union_members` and `max_connection_depth`. In this version a client
+    always builds a policy of this class. It does not use a subclass that you
+    write.
+
+    A policy never changes after it is built. Two policies with equal fields
+    behave the same, and have the same `fingerprint`.
+
+    Args:
+        max_depth: How many levels of objects the client selects. The returned
+            object is level 1, so `1` selects its own scalar fields and no
+            nested object.
+        cycle_policy: What to do when a type repeats on its own path. See
+            `CyclePolicy`.
+        per_type_depth_cap: A stricter limit for named types, as a mapping from
+            type name to a number of levels. It counts the levels below that
+            type, wherever the type appears.
+        include_deprecated: Select fields that the schema marks as deprecated.
+        max_fields: The most fields one query may select. This guards the size
+            of the query. It does not control cost. Exceeding it raises an
+            error that names the type and the ways to reduce the selection.
+        exclude: Patterns for fields that are never selected. Each is
+            `"Type.field"`, `"*.field"` or `"Type.*"`. Any other shape raises
+            `ValueError`.
+        relay_aware: Treat a type whose name ends in `Connection`, with `edges`
+            and `pageInfo` fields, as a Relay connection and select it in the
+            standard page shape.
+        connection_page_size: The `first` value sent for a connection field.
+        max_union_members: How many types of one interface or union are
+            expanded. Types past the limit collapse to `__typename` and `id`.
+        max_connection_depth: How many connections may be expanded inside each
+            other. `1` expands a connection but not a connection inside it.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import SelectionPolicy
+
+        policy = SelectionPolicy(max_depth=2, exclude=["User.balance", "*.preferences"])
+        assert policy.max_depth == 2
+        assert policy.should_include("User", "name", ("name",), 0)
+        assert not policy.should_include("User", "balance", ("balance",), 0)
+        ```
     """
 
     max_depth: int = 3
+    """How many levels of objects the client selects. `1` means scalar fields only.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import SelectionPolicy
+
+        assert SelectionPolicy().max_depth == 3
+        assert SelectionPolicy(max_depth=1).max_depth == 1
+        ```
+    """
     cycle_policy: CyclePolicy = "shallow"
+    """What to do when a type repeats on its own path. The default is `"shallow"`.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import SelectionPolicy
+
+        assert SelectionPolicy().cycle_policy == "shallow"
+        assert SelectionPolicy(cycle_policy="id_only").cycle_policy == "id_only"
+        ```
+    """
     per_type_depth_cap: Mapping[str, int] = field(default_factory=dict)
+    """Stricter depth limits by type name. Stored as a read-only mapping.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import SelectionPolicy
+
+        policy = SelectionPolicy(per_type_depth_cap={"User": 1})
+        assert policy.per_type_depth_cap == {"User": 1}
+        ```
+    """
     include_deprecated: bool = False
+    """Whether deprecated fields are selected. Off by default.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import SelectionPolicy
+
+        assert SelectionPolicy().include_deprecated is False
+        ```
+    """
     max_fields: int = 2000
+    """The most fields one generated query may select.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import SelectionPolicy
+
+        assert SelectionPolicy().max_fields == 2000
+        ```
+    """
     exclude: Sequence[str] = ()
+    """Patterns for fields that are never selected. Stored as a tuple.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import SelectionPolicy
+
+        policy = SelectionPolicy(exclude=["User.balance"])
+        assert policy.exclude == ("User.balance",)
+
+        try:
+            SelectionPolicy(exclude=["balance"])
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("expected an error")
+        ```
+    """
     relay_aware: bool = True
+    """Whether Relay connection types are selected in the standard page shape.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import SelectionPolicy
+
+        assert SelectionPolicy().relay_aware is True
+        ```
+    """
     connection_page_size: int = 10
+    """The `first` value that the client sends for a connection field.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import SelectionPolicy
+
+        assert SelectionPolicy().connection_page_size == 10
+        assert SelectionPolicy(connection_page_size=25).connection_page_size == 25
+        ```
+    """
     max_union_members: int = 10
+    """The most types of one interface or union that are expanded.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import SelectionPolicy
+
+        assert SelectionPolicy().max_union_members == 10
+        ```
+    """
     max_connection_depth: int = 1
+    """How many connections may be expanded inside each other. The default is `1`.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import SelectionPolicy
+
+        assert SelectionPolicy().max_connection_depth == 1
+        ```
+    """
 
     #: Decided from the class under C18, never passed in. Fields that are not
     #: constructor inputs stay out of the fingerprint, which describes inputs.
     memoizable: bool = field(init=False, repr=False, compare=False, default=True)
+    """Whether the client may reuse a selection built under this policy.
+
+    It is decided from the class, and cannot be passed in. It is `False` for a
+    subclass that overrides `should_include()` and not `fingerprint`, because
+    the client cannot tell when such a policy would decide differently.
+
+    Examples:
+        ```python {.exec}
+        import warnings
+
+        from pytest_graphql import SelectionPolicy
+
+
+        class NoSecrets(SelectionPolicy):
+            def should_include(self, parent_type, field_name, path, depth):
+                return field_name != "secret"
+
+
+        assert SelectionPolicy().memoizable is True
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            assert NoSecrets().memoizable is False
+        ```
+    """
 
     def __post_init__(self) -> None:
         # A caller keeps a reference to whatever it passed in, so copying
@@ -124,11 +317,27 @@ class SelectionPolicy:
 
     @property
     def fingerprint(self) -> str:
-        """A stable key covering every constructor field of this policy.
+        """A stable text key that covers every field of this policy.
 
-        Two policies with equal fields behave identically, so the class name
-        is deliberately not part of this value: a subclass that changes no
-        behaviour should share the base class's cache entries.
+        The client reuses a selection it already built when the policy has the
+        same fingerprint. Two policies with equal fields have the same
+        fingerprint, even when they are different classes.
+
+        A subclass whose decisions depend on more than its fields, for example
+        on state outside the object, must override this property and return a
+        value that covers that state too.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import SelectionPolicy
+
+            assert SelectionPolicy(max_depth=2).fingerprint == (
+                SelectionPolicy(max_depth=2).fingerprint
+            )
+            assert SelectionPolicy(max_depth=2).fingerprint != (
+                SelectionPolicy(max_depth=3).fingerprint
+            )
+            ```
         """
         payload: dict[str, Any] = {}
         for declared in fields(self):
@@ -155,10 +364,18 @@ class SelectionPolicy:
 
     @property
     def cache_key(self) -> str | None:
-        """The memoization key, or ``None`` when this policy is never cached.
+        """The key the client uses to reuse selections, or `None` for no reuse.
 
-        Every caller asks this rather than reading ``fingerprint`` directly,
-        so the C18 rule is applied in exactly one place.
+        It is the `fingerprint`, except for a policy whose `memoizable` is
+        `False`, which is never reused.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import SelectionPolicy
+
+            policy = SelectionPolicy()
+            assert policy.cache_key == policy.fingerprint
+            ```
         """
         return self.fingerprint if self.memoizable else None
 
@@ -169,11 +386,36 @@ class SelectionPolicy:
         path: tuple[str, ...],  # noqa: ARG002 -- part of the overridable contract
         depth: int,  # noqa: ARG002 -- part of the overridable contract
     ) -> bool:
-        """Whether one field is selectable. The extension point (B8).
+        """Decide whether the client may select one field.
 
-        The base implementation applies the ``exclude`` patterns. ``path``
-        and ``depth`` are unused here and are passed so a subclass can decide
-        by position, which is the reason the hook exists.
+        The client asks this for each field it considers. The default answer is
+        `False` for a field that matches an `exclude` pattern, and `True` for
+        every other field. A subclass can override it to decide by position. The
+        default ignores `path` and `depth`. A client does not use a subclass yet,
+        so call it on a policy that you build when you test your own rules.
+
+        Positions are measured from the start of the generated part of a query,
+        not from the start of the whole document.
+
+        Args:
+            parent_type: The name of the type that has the field.
+            field_name: The name of the field.
+            path: The field names from the start of the generated part down to
+                this field, including it.
+            depth: How many levels of objects lie above this field. Fields at
+                the start of the generated part have depth `0`.
+
+        Returns:
+            `True` to allow the field.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import SelectionPolicy
+
+            policy = SelectionPolicy(exclude=["User.*"])
+            assert not policy.should_include("User", "name", ("name",), 0)
+            assert policy.should_include("Team", "name", ("name",), 0)
+            ```
         """
         return not any(
             _matches_exclude(pattern, parent_type, field_name)
@@ -181,7 +423,23 @@ class SelectionPolicy:
         )
 
     def depth_cap_for(self, type_name: str) -> int | None:
-        """The stricter per-type cap for a named type, when it has one."""
+        """The depth limit set for one type, or `None` when it has none.
+
+        Args:
+            type_name: The name of a schema type.
+
+        Returns:
+            The limit from `per_type_depth_cap`, if any.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import SelectionPolicy
+
+            policy = SelectionPolicy(per_type_depth_cap={"User": 1})
+            assert policy.depth_cap_for("User") == 1
+            assert policy.depth_cap_for("Team") is None
+            ```
+        """
         return self.per_type_depth_cap.get(type_name)
 
 

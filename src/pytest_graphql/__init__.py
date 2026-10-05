@@ -1,14 +1,28 @@
 """Schema-aware GraphQL test client with an optional pytest plugin.
 
-The public API is re-exported from this module. Per C9, only names a user
-constructs, catches, annotates or calls belong in ``__all__``; a name lands
-here in the milestone that implements it, and the rest of the documented
-surface arrives with the milestones that still owe it. ``__version__`` is the
-single source of the distribution version, and the release workflow checks
-it against the tag.
+`pytest_graphql` sends GraphQL operations to a server and reads back the result.
+It loads the server's schema, chooses the fields to ask for, checks arguments
+before anything is sent, and returns responses that read like Python objects.
 
-Importing this module imports no pytest (C41). The pytest layer lives under
-``pytest_graphql.plugin`` and nothing here reaches into it.
+Every name on this page can be imported from `pytest_graphql` itself. Importing
+the package does not import pytest, so the client works in any Python program.
+Under pytest, the `gql` fixture is a ready client.
+
+Examples:
+    ```python {.exec}
+    def test_user_has_a_name(gql):
+        user = gql.query("user", id="u1")
+        assert user.name == "Ada Lovelace"
+    ```
+
+    Outside pytest, build the client yourself and close it when you are done:
+
+    ```python {.no-exec}
+    from pytest_graphql import build_client
+
+    with build_client(url="http://localhost:8000/graphql") as gql:
+        user = gql.query("user", id="u1")
+    ```
 """
 
 from __future__ import annotations
@@ -108,3 +122,12 @@ __all__ = [
 ]
 
 __version__ = "0.1.0b1"
+"""The installed version of `pytest-graphql`, as a string.
+
+Examples:
+    ```python {.exec}
+    import pytest_graphql
+
+    assert isinstance(pytest_graphql.__version__, str)
+    ```
+"""

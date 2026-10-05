@@ -65,10 +65,41 @@ class Unique:
 
 
 def unique(kind: str | None = None) -> Unique:
-    """Mark a field value that must differ on every call and every run.
+    """Mark a value in a test payload that must be different on every call.
 
-    ``unique()`` and ``unique("string")`` give a short token. ``unique("email")``
-    gives an address on the reserved domain ``example.com``.
+    `gql.fake` is seeded, so it gives the same payload on every run of a test.
+    That breaks a test that writes the payload to a database that has a unique
+    constraint, because the second run repeats the first one's values. Put
+    `unique()` on the field that needs to differ. The factory replaces it with a
+    value that differs between calls, between runs and between parallel workers.
+
+    The marker works at any depth of an override, inside a `dict` or a list. The
+    other fields of the payload keep their seeded values.
+
+    Args:
+        kind: `None` or `"string"` gives a short token. `"email"` gives an
+            address on `example.com`, a domain that is reserved for examples, so
+            a value never reaches a real mailbox.
+
+    Returns:
+        A marker for the factory. It is not the final value.
+
+    Raises:
+        ValueError: When `kind` is a string other than `"string"` or `"email"`.
+        TypeError: When `kind` is not a string or `None`.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import unique
+
+        first = gql.fake.CreatePostInput(title=unique())
+        second = gql.fake.CreatePostInput(title=unique())
+        assert first["title"] != second["title"]
+        assert first["authorId"] == second["authorId"]
+
+        email = gql.fake.CreatePostInput(title=unique("email"))["title"]
+        assert email.endswith("@example.com")
+        ```
     """
     _check_kind(kind)
     return Unique(kind)

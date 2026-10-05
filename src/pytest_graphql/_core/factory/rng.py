@@ -74,13 +74,39 @@ def _check_int(value: object, what: str) -> None:
 
 
 class DeterministicRandom:
-    """A reproducible stream of random values for one seed and one path.
+    """A source of random values that is the same every time for the same inputs.
 
-    ``seed`` is an integer in ``[0, 2**64)``, which is what ``derive_seed``
-    returns. ``path`` names the value the stream is for, such as a type and a
-    field, so two fields never share a stream and adding a field never shifts
-    the values of the others. Integer path segments read as their decimal
-    text.
+    A `ScalarSpec.fake` function receives one of these. The same seed and path
+    give the same values on every machine and every supported Python version, so
+    a test that uses seeded data repeats exactly. This is why the package does
+    not use `random.Random` for any value that reaches output: its stream is
+    only partly stable between Python versions.
+
+    Create one only when you test your own fake functions. Reproducible values
+    and unique values exclude each other. For a value that must differ on every
+    run, use `unique()`.
+
+    Args:
+        seed: An integer from `0` up to but not including `2**64`.
+        *path: Names for the value the stream is for, such as a type name and a
+            field name. Each path gets its own stream, so adding a field does
+            not change the values of the others. A segment is a string or an
+            integer. An integer reads as its decimal text.
+
+    Raises:
+        TypeError: When `seed` or a path segment has the wrong type.
+        ValueError: When `seed` is out of range.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import DeterministicRandom
+
+        name = DeterministicRandom(7, "User", "name").sample_string(8)
+        assert name == DeterministicRandom(7, "User", "name").sample_string(8)
+
+        email = DeterministicRandom(7, "User", "email").sample_string(8)
+        assert email != name
+        ```
     """
 
     __slots__ = ("_counter", "_key", "_pending")
@@ -107,7 +133,27 @@ class DeterministicRandom:
         return taken
 
     def bits(self, width: int) -> int:
-        """An integer of ``width`` random bits, in ``[0, 2**width)``."""
+        """Return an integer of `width` random bits, from `0` to `2**width - 1`.
+
+        Args:
+            width: The number of bits. `0` gives `0`.
+
+        Returns:
+            The integer.
+
+        Raises:
+            TypeError: When `width` is not an `int`.
+            ValueError: When `width` is negative.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import DeterministicRandom
+
+            rng = DeterministicRandom(1, "demo")
+            assert 0 <= rng.bits(8) < 256
+            assert rng.bits(0) == 0
+            ```
+        """
         _check_int(width, "bits()")
         if width < 0:
             raise ValueError(f"bits() needs a width of 0 or more, got {width}.")
@@ -117,7 +163,30 @@ class DeterministicRandom:
         return int.from_bytes(self._take(size), "big") >> (8 * size - width)
 
     def below(self, bound: int) -> int:
-        """A uniform integer in ``[0, bound)``, by rejection sampling."""
+        """Return a uniform integer from `0` up to but not including `bound`.
+
+        Every value has the same chance. The method never uses a remainder,
+        which would favour small values.
+
+        Args:
+            bound: The exclusive upper limit. It must be at least `1`.
+
+        Returns:
+            The integer.
+
+        Raises:
+            TypeError: When `bound` is not an `int`.
+            ValueError: When `bound` is less than `1`.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import DeterministicRandom
+
+            rng = DeterministicRandom(1, "demo")
+            assert all(0 <= rng.below(6) < 6 for _ in range(100))
+            assert rng.below(1) == 0
+            ```
+        """
         _check_int(bound, "below()")
         if bound < 1:
             raise ValueError(f"below() needs a bound of at least 1, got {bound}.")
@@ -130,11 +199,45 @@ class DeterministicRandom:
                 return candidate
 
     def float_unit(self) -> float:
-        """A float in ``[0, 1)`` with exactly 53 random bits."""
+        """Return a float from `0` up to but not including `1`.
+
+        The value is a multiple of `2**-53`, so it is the same on every platform.
+
+        Returns:
+            The float.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import DeterministicRandom
+
+            rng = DeterministicRandom(1, "demo")
+            assert 0.0 <= rng.float_unit() < 1.0
+            ```
+        """
         return self.bits(53) / (1 << 53)
 
     def choice(self, items: Sequence[T]) -> T:
-        """One element of ``items``, which must be a sequence with an order."""
+        """Return one element of a sequence.
+
+        Args:
+            items: A sequence with a stable order, such as a list or a tuple. A
+                set is refused, because its order can change between runs.
+
+        Returns:
+            One of the elements.
+
+        Raises:
+            TypeError: When `items` is not a sequence.
+            ValueError: When `items` is empty.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import DeterministicRandom
+
+            rng = DeterministicRandom(1, "demo")
+            assert rng.choice(["red", "green", "blue"]) in {"red", "green", "blue"}
+            ```
+        """
         if not isinstance(items, Sequence):
             raise TypeError(
                 "choice() needs a sequence, got "
@@ -145,7 +248,30 @@ class DeterministicRandom:
         return items[self.below(len(items))]
 
     def sample_string(self, length: int, alphabet: str = DEFAULT_ALPHABET) -> str:
-        """``length`` characters, each drawn from ``alphabet`` independently."""
+        """Return a string of random characters.
+
+        Args:
+            length: The number of characters. It may be `0`.
+            alphabet: The characters to draw from. The default is the lowercase
+                letters and the digits.
+
+        Returns:
+            The string.
+
+        Raises:
+            TypeError: When `length` is not an `int` or `alphabet` is not a
+                string.
+            ValueError: When `length` is negative or `alphabet` is empty.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import DeterministicRandom
+
+            rng = DeterministicRandom(1, "demo")
+            assert len(rng.sample_string(12)) == 12
+            assert set(rng.sample_string(20, "01")) <= {"0", "1"}
+            ```
+        """
         _check_int(length, "sample_string()")
         if length < 0:
             raise ValueError(

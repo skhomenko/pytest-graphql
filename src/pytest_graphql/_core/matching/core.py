@@ -166,7 +166,36 @@ SILENT = Walk(record=False)
 
 
 class Matcher(ABC):
-    """Base of every matcher. Compare one with ``==`` or ask it to ``evaluate``."""
+    """Something a value can be compared with, to say whether it matches.
+
+    You rarely build a `Matcher` directly. You get one from `gql.expect.Type(...)`
+    or from a helper such as `contains()`, `gt()` or `matches()`. Helpers can
+    also sit inside a plain `dict` or `list` that you compare with a response.
+
+    Use a matcher in one of three ways:
+
+    - `value == matcher` is `True` or `False`. It stops at the first
+      difference, so it costs no more than a normal comparison. Under pytest,
+      a failed `assert` prints a short list of the fields that differ.
+    - `matcher.evaluate(value)` compares again and keeps every difference.
+    - `matcher.explain(value)` returns the lines of that list as text.
+
+    A matcher is partial. It checks the fields it names and ignores the rest.
+    `repr()` of a matcher shows type and field names only, never the expected
+    values, so a secret in an expected value does not appear in a test report.
+    Matchers cannot be used as dictionary keys or set members.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import Matcher, contains
+
+        user = gql.query("user", id="u1")
+        matcher = gql.expect.User(name="Ada Lovelace")
+        assert isinstance(matcher, Matcher)
+        assert user == matcher
+        assert gql.query("users") == contains(matcher)
+        ```
+    """
 
     __slots__ = ()
 
@@ -176,16 +205,92 @@ class Matcher(ABC):
 
     @abstractmethod
     def describe(self, show: Show, depth: int = DESCRIBE_DEPTH) -> str:
-        """A short rendering of what this matcher expects, values through ``show``."""
+        """Describe what this matcher expects, in a short text.
+
+        Every expected value and every field name goes through `show`, so the
+        caller decides what text a value may become. `repr(matcher)` is this
+        method with a `show` that prints only the name of each value's type.
+
+        Args:
+            show: A function that returns the text for one value.
+            depth: How many levels of nested expectations to spell out. Deeper
+                levels are summarized by count.
+
+        Returns:
+            The description.
+
+        Examples:
+            ```python {.exec}
+            matcher = gql.expect.User(name="Ada")
+            assert matcher.describe(lambda value: "?") == "User(?=?)"
+            assert repr(matcher) == "User(name=<str>)"
+            ```
+        """
 
     def evaluate(self, actual: Any) -> MatchResult:
-        """Compare ``actual`` and keep every difference, with exact counts."""
+        """Compare `actual` with this matcher and keep every difference.
+
+        Unlike `==`, this does not stop at the first difference. The counts in
+        the result are exact. The lists of differences and of matched paths
+        keep at most 200 entries each, so a huge response cannot use unbounded
+        memory.
+
+        Args:
+            actual: The value to compare, such as a `Node` or a `NodeList`.
+
+        Returns:
+            A result with these attributes: `ok` (the verdict), `compared` (how
+            many fields were compared), `differ` (how many of them differ),
+            `ignored` (how many fields of the compared objects the matcher did
+            not name), `mismatches` (the differences) and `matched` (the paths
+            that matched).
+
+        Examples:
+            ```python {.exec}
+            user = gql.query("user", id="u1", fields=["id", "name"])
+
+            result = gql.expect.User(name="Ada").evaluate(user)
+            assert not result.ok
+            assert (result.compared, result.differ, result.ignored) == (1, 1, 1)
+            assert result.mismatches[0].path == ("name",)
+            ```
+        """
         walk = Walk(record=True)
         ok = self._check(actual, walk)
         return walk.result(self, ok)
 
     def explain(self, actual: Any, options: RenderOptions | None = None) -> list[str]:
-        """The diff lines for ``actual``, empty when it matches (SPEC 7.5)."""
+        """Return the lines that show how `actual` differs from this matcher.
+
+        The first line is a summary. The lines after it name each field that
+        differs, with the actual value and the expected one, and then the
+        fields that matched. A long list is cut and says how many entries it
+        left out. Values are cleaned of control characters and cut to a
+        length limit. When the result is empty, the value matches.
+
+        Args:
+            actual: The value to compare.
+            options: How to print the lines, such as the limits on line count and
+                value length. Leave it out for the defaults. Under pytest, the
+                failure report passes options that also remove the secrets of the
+                request that produced the response.
+
+        Returns:
+            The lines, or an empty list when `actual` matches.
+
+        Examples:
+            ```python {.exec}
+            user = gql.query("user", id="u1", fields=["id", "name"])
+
+            lines = gql.expect.User(name="Ada").explain(user)
+            assert lines[0] == (
+                "  User does not match "
+                "(1 of 1 compared field differs; 1 response field ignored)"
+            )
+            assert "'Ada Lovelace'" in lines[1]
+            assert gql.expect.User(name="Ada Lovelace").explain(user) == []
+            ```
+        """
         from pytest_graphql._core.matching.render import render_diff
 
         return render_diff(self.evaluate(actual), options)

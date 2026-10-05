@@ -58,9 +58,30 @@ plugins:
             # Every name in __all__ must appear, documented or not, so a
             # missing docstring is visible on the page and not a silent gap.
             show_if_no_docstring: true
-            # The default hides private names. __all__ is also left out: it is
-            # the list this page is generated from, not a thing to document.
-            filters: ["!^_[^_]", "!^__all__$"]
+            # The default hides private names. A lone underscore is hidden too:
+            # it marks the dataclass fields after it as keyword-only and is not
+            # a field. __all__ is left out: it is the list this page is
+            # generated from, not a thing to document. Five dunders carry no
+            # information for a reader (__slots__ is storage, __repr__ and
+            # __str__ are display, __eq__ and __hash__ are comparison and
+            # __post_init__ is validation), so they are left out as well. Every
+            # other dunder is a way to use the object and stays.
+            filters:
+              - "!^_[^_]"
+              - "!^_$"
+              - "!^__all__$"
+              - "!^__(slots|repr|str|eq|hash|post_init)__$"
+            # Docstrings are Google style, with Args, Returns, Raises and
+            # Examples sections. A field is documented by the string under it.
+            # The constructor parameters are written in the class docstring and
+            # shown with the class, so there is no separate __init__ entry.
+            docstring_style: google
+            merge_init_into_class: true
+            separate_signature: true
+            show_signature_annotations: true
+            # Source order puts the fields and methods of a class in the order
+            # the author wrote them, which is the order a reader meets them in.
+            members_order: source
 
 # Python code blocks carry {.exec} or {.no-exec} after the language, which
 # superfences renders as a CSS class and still highlights as Python. Do not add

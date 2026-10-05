@@ -30,6 +30,44 @@ _PATH_SEGMENT = re.compile(r"[^.\[\]]+|\[\d+\]")
 
 
 class Node(Mapping[str, Any]):
+    """One object from a response, such as a `User`, read like a record.
+
+    A `Node` is a read-only mapping. Read a field as an attribute
+    (`user.name`) or as a key (`user["name"]`). Both the exact schema name and
+    the snake_case form work, so `user.joined_at` reads the field `joinedAt`.
+    Reading a field that the response does not hold raises `GraphQLFieldError`.
+    The error lists the fields that are there and suggests a close match. It also
+    reminds you that the field may exist in the schema and still be missing from
+    your selection.
+
+    Values are read lazily. A field that holds an object gives a `Node`, and a
+    field that holds a list of objects gives a `NodeList`. A custom scalar gives
+    the value its registered `parse` function returns, or the raw JSON value
+    when it has none. A key the selection did not ask for is read as raw JSON.
+
+    Iteration and `len()` use the server's own keys. `dict(node)` gives those
+    keys with the values wrapped as above. `node == other` is true for another
+    node or a `dict` with exactly the same data. For a partial comparison, use a
+    matcher such as `gql.expect.User(name="Ada")`. A `Node` cannot be used as a
+    dictionary key.
+
+    `repr()` shows the type name and the field names. It never shows a value, so
+    a secret in the data cannot leak into a test report.
+
+    You do not create a `Node`. The client builds them from responses.
+
+    Examples:
+        ```python {.exec}
+        user = gql.query("user", id="u1")
+
+        assert user.name == "Ada Lovelace"
+        assert user["name"] == "Ada Lovelace"
+        assert user.team.name == "Core"
+        assert user.joined_at == user["joinedAt"]
+        assert "name" in user
+        ```
+    """
+
     __slots__ = ("_cache", "_m", "_named", "_names", "_plan", "_raw", "_selections")
 
     def __init__(
@@ -51,7 +89,25 @@ class Node(Mapping[str, Any]):
 
     @property
     def __typename__(self) -> str | None:
-        """The runtime type name, or ``None`` when the response carried none."""
+        """The name of the object's type, or `None` when it is not known.
+
+        For a field whose schema type is an object type, the name is always
+        known. For an interface or a union, it is known only when the response
+        has `__typename`. The client adds `__typename` to every selection it
+        generates. In a selection you write yourself, ask for it by name.
+
+        Examples:
+            ```python {.exec}
+            user = gql.query("user", id="u1", fields=["id"])
+            assert user.__typename__ == "User"
+
+            node = gql.query("node", id="u1", fields=["id"])
+            assert node.__typename__ is None
+
+            node = gql.query("node", id="u1", fields=["id", "__typename"])
+            assert node.__typename__ == "User"
+            ```
+        """
         return self._m.runtime_name(self._raw, self._named)
 
     def _plan_for(self) -> Mapping[str, FieldPlan]:
@@ -80,6 +136,27 @@ class Node(Mapping[str, Any]):
     # -- mapping ------------------------------------------------------------
 
     def __getitem__(self, key: str) -> Any:
+        """Read a field by its schema name or its snake_case name.
+
+        Args:
+            key: The field name.
+
+        Returns:
+            The field value. A nested object is a `Node`, and a list of objects is a
+            `NodeList`.
+
+        Raises:
+            GraphQLFieldError: When the key is not a string, the response has no
+                such field, or the snake_case name matches two fields. The error
+                is also a `KeyError` and an `AttributeError`.
+
+        Examples:
+            ```python {.exec}
+            user = gql.query("user", id="u1")
+            assert user["name"] == "Ada Lovelace"
+            assert user["joined_at"] == user["joinedAt"]
+            ```
+        """
         if not isinstance(key, str):
             raise GraphQLFieldError(
                 f"a Node key must be a string, got {type(key).__name__}."
@@ -98,32 +175,145 @@ class Node(Mapping[str, Any]):
         return wrapped
 
     def __getattr__(self, name: str) -> Any:
+        """Read a field as an attribute. It works like `node[name]`.
+
+        A name that starts with an underscore is never read as a field. Use
+        `node["_name"]` for a field whose name starts with one.
+
+        Args:
+            name: The field name.
+
+        Returns:
+            The field value.
+
+        Raises:
+            GraphQLFieldError: When the response has no such field. The error is
+                also an `AttributeError`, so `getattr(node, "x", default)` and
+                `hasattr(node, "x")` work as usual.
+
+        Examples:
+            ```python {.exec}
+            user = gql.query("user", id="u1")
+            assert user.name == "Ada Lovelace"
+            assert getattr(user, "nickname", "none") == "none"
+            ```
+        """
         if name.startswith("_"):
             raise AttributeError(name)
         return self[name]
 
     def __iter__(self) -> Iterator[str]:
+        """Iterate over the keys exactly as the server returned them.
+
+        Examples:
+            ```python {.exec}
+            user = gql.query("user", id="u1", fields=["id", "name"])
+            assert list(user) == ["id", "name"]
+            ```
+        """
         return iter(self._raw)
 
     def __len__(self) -> int:
+        """Count the keys the server returned for this object.
+
+        Examples:
+            ```python {.exec}
+            user = gql.query("user", id="u1", fields=["id", "name"])
+            assert len(user) == 2
+            ```
+        """
         return len(self._raw)
 
     def __contains__(self, key: object) -> bool:
+        """Tell whether the object has a field, by either spelling of its name.
+
+        Args:
+            key: The field name. Anything that is not a string gives `False`.
+
+        Returns:
+            `True` when the response has the field.
+
+        Examples:
+            ```python {.exec}
+            user = gql.query("user", id="u1", fields=["id", "joinedAt"])
+            assert "joinedAt" in user
+            assert "joined_at" in user
+            assert "name" not in user
+            ```
+        """
         if not isinstance(key, str):
             return False
         names = self._name_map()
         return names.get(key) is not None
 
     def get(self, key: str, default: Any = None) -> Any:
+        """Read a field, or return `default` when the response does not have it.
+
+        A snake_case name that matches two fields is still an error, because
+        returning a default would hide that.
+
+        Args:
+            key: The field name, in either spelling.
+            default: The value to return for a missing field.
+
+        Returns:
+            The field value, or `default`.
+
+        Examples:
+            ```python {.exec}
+            user = gql.query("user", id="u1", fields=["id"])
+            assert user.get("id") == "u1"
+            assert user.get("name") is None
+            assert user.get("name", "unknown") == "unknown"
+            ```
+        """
         if key in self or self._name_map().is_ambiguous(key):
             return self[key]  # an ambiguous key raises rather than defaulting
         return default
 
     def at(self, path: str, default: Any = MISSING) -> Any:
+        """Read a nested value by a dotted path.
+
+        A segment is a field name or a list index. Write an index as a number
+        (`friends.0.name`) or in brackets (`friends[0].name`). Each name works
+        in its exact schema spelling and in snake_case.
+
+        Args:
+            path: The path to read.
+            default: What to return when a segment does not exist. Without it,
+                a missing segment raises.
+
+        Returns:
+            The value at the path.
+
+        Raises:
+            GraphQLFieldError: When a segment does not exist and no `default`
+                is given.
+
+        Examples:
+            ```python {.exec}
+            user = gql.query("user", id="u2")
+            assert user.at("manager.name") == "Ada Lovelace"
+            assert user.at("friends[0].name") == "Ada Lovelace"
+            assert user.at("manager.nickname", default=None) is None
+            ```
+        """
         return at_path(self, path, default)
 
     def to_dict(self) -> dict[str, Any]:
-        """The raw object, original keys, as an independent copy."""
+        """Return the object as a plain `dict` of the data the server returned.
+
+        The keys are the server's response keys. Nested values are plain JSON
+        values, and custom scalars are not decoded. The copy is independent, so
+        changing it does not change the response.
+
+        Examples:
+            ```python {.exec}
+            fields = ["id", {"team": ["name"]}]
+            user = gql.query("user", id="u1", fields=fields)
+            assert user.to_dict() == {"id": "u1", "team": {"name": "Core"}}
+            ```
+        """
         return copy.deepcopy(self._raw)
 
     # -- comparison and rendering ------------------------------------------
@@ -160,17 +350,54 @@ class Node(Mapping[str, Any]):
 
 
 class NodeList(list[Any]):
-    """A list whose elements are ``Node`` values (or nested lists of them)."""
+    """A list of `Node` values, with helpers to filter and read them.
+
+    A field that holds a list of objects gives a `NodeList`. It is a normal
+    `list`, so `len()`, indexing, slicing and iteration work. A list of lists
+    keeps the nesting, and the inner lists are `NodeList` too.
+
+    Examples:
+        ```python {.exec}
+        users = gql.query("users", fields=["id", "name"])
+
+        assert len(users) == 3
+        assert users[0].name == "Ada Lovelace"
+        assert users.pluck("name") == ["Ada Lovelace", "Grace Hopper", "Alan Turing"]
+        assert users.one(id="u2").name == "Grace Hopper"
+        ```
+    """
 
     def where(self, *, strict: bool = False, **filters: Any) -> NodeList:
-        """The elements that match every filter, as a new ``NodeList``.
+        """Return the elements that match every filter.
 
-        A filter is a plain value or a matcher. It is partial by default: an
-        element matches when each named field matches, and its other fields
-        are ignored. ``strict=True`` also requires the element to carry
-        exactly the named fields. An element that is not a ``Node`` never
-        matches. Counting happens after filtering, so ``len(users.where(...))``
-        is the number of matches.
+        Each keyword is a field name and what its value must be. The value is
+        a plain value or a matcher such as `matches()` or `gt()`. A field name
+        works in either spelling. The match is partial: an element matches when
+        each named field matches, and its other fields are ignored. An element
+        that is not a `Node` never matches.
+
+        The result is a new `NodeList`, so `len(users.where(...))` is the number
+        of matches.
+
+        Args:
+            strict: Also require that the element has no field besides the
+                named ones. Because this is a keyword of `where`, you cannot
+                filter on a field that is itself named `strict`.
+            **filters: The field filters.
+
+        Returns:
+            A new list of the elements that match.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import matches
+
+            users = gql.query("users", fields=["id", "name"])
+            assert users.where(name=matches("^A")).pluck("id") == ["u1", "u3"]
+            exact = users.where(id="u1", name="Ada Lovelace", strict=True)
+            assert exact.ids() == ["u1"]
+            assert users.where(id="u1", strict=True) == []
+            ```
         """
         from pytest_graphql._core.matching.objects import field_filter
 
@@ -182,10 +409,28 @@ class NodeList(list[Any]):
         )
 
     def one(self, *, strict: bool = False, **filters: Any) -> Any:
-        """The only element that matches the filters.
+        """Return the one element that matches the filters.
 
-        Raises ``GraphQLTestError`` unless exactly one element matches, and
-        names how many did. It never prints a response value.
+        The filters work as in `where()`.
+
+        Args:
+            strict: Also require that the element has no field besides the
+                named ones.
+            **filters: The field filters.
+
+        Returns:
+            The matching element.
+
+        Raises:
+            GraphQLTestError: When zero or several elements match. The message
+                gives the number found, the size of the list and the names of
+                the filters. It does not print any response value.
+
+        Examples:
+            ```python {.exec}
+            users = gql.query("users", fields=["id", "name"])
+            assert users.one(name="Grace Hopper").id == "u2"
+            ```
         """
         found = self.where(strict=strict, **filters)
         if len(found) != 1:
@@ -197,13 +442,70 @@ class NodeList(list[Any]):
         return found[0]
 
     def pluck(self, path: str, default: Any = MISSING) -> list[Any]:
-        """``path`` read from every element; ``default`` fills a missing one."""
+        """Read the same path from every element and return the values as a list.
+
+        The path works as in `Node.at()`.
+
+        Args:
+            path: The dotted path to read from each element.
+            default: What to use for an element that lacks the path. Without it,
+                a missing path raises.
+
+        Returns:
+            One value for each element, in order.
+
+        Raises:
+            GraphQLFieldError: When an element lacks the path and no `default`
+                is given.
+
+        Examples:
+            ```python {.exec}
+            fields = ["name", {"manager": ["name"]}]
+            users = gql.query("users", fields=fields)
+            names = ["Ada Lovelace", "Grace Hopper", "Alan Turing"]
+            assert users.pluck("name") == names
+            managers = users.pluck("manager.name", default=None)
+            assert managers == [None, "Ada Lovelace", "Ada Lovelace"]
+            ```
+        """
         return [at_path(element, path, default) for element in self]
 
     def ids(self) -> list[Any]:
+        """Return the `id` of every element. It is `pluck("id")`.
+
+        Examples:
+            ```python {.exec}
+            users = gql.query("users", fields=["id"])
+            assert users.ids() == ["u1", "u2", "u3"]
+            ```
+        """
         return self.pluck("id")
 
     def at(self, path: str, default: Any = MISSING) -> Any:
+        """Read a value from the list by a path that starts with an index.
+
+        Write the index as a number (`0.name`) or in brackets (`[0].name`).
+
+        Args:
+            path: The path to read.
+            default: What to return when a segment does not exist. Without it,
+                a missing segment raises.
+
+        Returns:
+            The value at the path.
+
+        Raises:
+            GraphQLFieldError: When a segment does not exist and no `default`
+                is given.
+
+        Examples:
+            ```python {.exec}
+            users = gql.query("users", fields=["id", "name"])
+            assert users.at("0.name") == "Ada Lovelace"
+            assert users.at("[1].name") == "Grace Hopper"
+            assert users.at("[9].name", default=None) is None
+            ```
+        """
         return at_path(self, path, default)
 
 

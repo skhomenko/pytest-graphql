@@ -142,14 +142,59 @@ def _more_detail(count: int) -> Detail:
 
 
 def contains(*items: Any) -> Contains:
-    """Every item matches a distinct element; extras are allowed.
+    """Match a list that holds an element for each item, in any order.
 
-    An item that could match several elements never takes the one an other
-    item needs.
+    Each item is matched to a different element, and the list may have other
+    elements too. An item can be a plain value, a `dict`, another matcher or a
+    helper. The matching is exact. An item that fits several elements never
+    takes the one element that another item needs. Duplicate items need
+    duplicate elements.
+
+    A very large comparison, more than a million pairs of an item and an
+    element, raises an error that suggests `NodeList.where()` to narrow the
+    list first.
+
+    Args:
+        *items: What the list must hold.
+
+    Returns:
+        A matcher for a list.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import contains
+
+        users = gql.query("users")
+        assert users == contains(
+            gql.expect.User(name="Grace Hopper"),
+            {"name": "Ada Lovelace"},
+        )
+        assert users != contains({"name": "Ada Lovelace"}, {"name": "Ada Lovelace"})
+        ```
     """
     return Contains(items)
 
 
 def unordered(*items: Any) -> Unordered:
-    """The same elements as the items, in any order, and no others."""
+    """Match a list that has the same elements as the items, in any order.
+
+    The list and the items must have the same length, and each item is matched
+    to a different element. An item can be a plain value, a `dict`, another
+    matcher or a helper. Duplicates on either side need duplicates on the other.
+
+    Args:
+        *items: What the list must hold, and nothing else.
+
+    Returns:
+        A matcher for a list.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import unordered
+
+        names = gql.query("users").pluck("name")
+        assert names == unordered("Alan Turing", "Ada Lovelace", "Grace Hopper")
+        assert names != unordered("Alan Turing", "Ada Lovelace")
+        ```
+    """
     return Unordered(items)

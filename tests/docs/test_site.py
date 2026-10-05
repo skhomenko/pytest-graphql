@@ -310,14 +310,6 @@ CONTRIBUTOR_ONLY = re.compile(
     r"|\b[BC]\d{1,3}\b|\bM\d+[a-z]?\b|:(?:mod|class|func|meth|attr|exc|data):"
 )
 
-#: The API page republishes source docstrings, and the existing ones cite the
-#: contributor documents. Rewriting them for readers is pending work, so this
-#: page is a strict expected failure: it turns into a failure the day the
-#: docstrings are clean, which is when the marker must go.
-_DOCSTRINGS_NOT_YET_REWRITTEN = pytest.mark.xfail(
-    strict=True, reason="source docstrings still cite contributor documents"
-)
-
 
 class _Article(HTMLParser):
     """The visible text of a page's main content."""
@@ -356,10 +348,7 @@ def _page_output(source: str) -> str:
 
 @pytest.mark.parametrize(
     "source",
-    [
-        *(name for name, _ in SPEC_PAGES),
-        pytest.param(API_PAGE[0], marks=_DOCSTRINGS_NOT_YET_REWRITTEN),
-    ],
+    [*(name for name, _ in SPEC_PAGES), API_PAGE[0]],
 )
 def test_a_published_page_cites_no_contributor_document(
     site: Path, source: str

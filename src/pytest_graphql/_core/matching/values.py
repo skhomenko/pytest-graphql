@@ -178,53 +178,261 @@ class OneOf(LeafMatcher):
 
 
 def any_value() -> AnyValue:
-    """The field must be present; its value is ignored."""
+    """Match any value, including `null`, as long as the field is in the response.
+
+    Use it when a test needs a field to exist but does not care what it holds.
+    A field that the response does not contain does not match.
+
+    Returns:
+        A matcher to put on a field.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import any_value
+
+        user = gql.query("user", id="u1", fields=["id", "avatar"])
+        assert user.avatar is None
+        assert user == gql.expect.User(avatar=any_value())
+
+        without_avatar = gql.query("user", id="u1", fields=["id"])
+        assert without_avatar != gql.expect.User(avatar=any_value())
+        ```
+    """
     return AnyValue()
 
 
 def absent() -> Absent:
-    """The field must not be in the response. Takes no argument.
+    """Match a field that is not in the response.
 
-    It is a value placed on a field: ``gql.expect.User(deleted_at=absent())``.
+    This is different from a field that is in the response with the value
+    `null`. Put it on a field: `gql.expect.User(deleted_at=absent())`. It takes
+    no argument.
+
+    Returns:
+        A matcher to put on a field.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import absent
+
+        user = gql.query("user", id="u1", fields=["id"])
+        assert user == gql.expect.User(name=absent())
+
+        user = gql.query("user", id="u1", fields=["id", "name"])
+        assert user != gql.expect.User(name=absent())
+        ```
     """
     return Absent()
 
 
 def any_length() -> AnyLength:
-    """The value must be a list, of any length."""
+    """Match a list of any length, including an empty one.
+
+    Returns:
+        A matcher for a list.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import any_length
+
+        team = gql.query("team", id="t1")
+        assert team == gql.expect.Team(members=any_length())
+        assert gql.query("users") == any_length()
+        ```
+    """
     return AnyLength()
 
 
 def length(count: int) -> Length:
-    """The value must be a list of exactly ``count`` elements."""
+    """Match a list that has exactly `count` elements.
+
+    Args:
+        count: The number of elements. It must be an `int` of zero or more.
+
+    Returns:
+        A matcher for a list.
+
+    Raises:
+        TypeError: When `count` is not an `int`. A `bool` is not accepted.
+        ValueError: When `count` is negative.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import length
+
+        team = gql.query("team", id="t1")
+        assert team == gql.expect.Team(members=length(2))
+        assert team != gql.expect.Team(members=length(3))
+        ```
+    """
     return Length(count)
 
 
 def matches(pattern: str | re.Pattern[str]) -> Matches:
-    """The value must be a string in which ``pattern`` is found."""
+    """Match a string in which the regular expression finds a match.
+
+    This is a search, not a full match, so write `^` and `$` when you need the
+    whole string to match. A value that is not a string never matches.
+
+    Args:
+        pattern: A regular expression, as text or as a compiled pattern. The
+            flags of a compiled pattern apply.
+
+    Returns:
+        A matcher for a string.
+
+    Raises:
+        TypeError: When `pattern` is neither a string nor a compiled pattern.
+
+    Examples:
+        ```python {.exec}
+        import re
+
+        from pytest_graphql import matches
+
+        user = gql.query("user", id="u1")
+        assert user == gql.expect.User(id=matches(r"^u[0-9]+$"))
+        assert user == gql.expect.User(name=matches(re.compile("lovelace", re.I)))
+        assert user != gql.expect.User(name=matches(r"^Grace"))
+        ```
+    """
     return Matches(pattern)
 
 
 def gt(bound: Any) -> Comparison:
-    """The value must be greater than ``bound``."""
+    """Match a value that is greater than `bound`.
+
+    It compares numbers, dates and strings. ISO 8601 date strings sort in time
+    order, so they compare correctly. A boolean is not a number. A value that
+    cannot be ordered against `bound` does not match, and does not raise.
+
+    Args:
+        bound: The value to compare with. It must be a number, a date or a
+            string.
+
+    Returns:
+        A matcher for a single value.
+
+    Raises:
+        TypeError: When `bound` is `None`, a boolean, or a container.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import gt
+
+        user = gql.query("user", id="u1")
+        assert user == gql.expect.User(joined_at=gt("2019-12-31"))
+        assert user != gql.expect.User(joined_at=gt("2020-01-01T00:00:00+00:00"))
+        ```
+    """
     return Comparison("gt", bound)
 
 
 def gte(bound: Any) -> Comparison:
-    """The value must be greater than or equal to ``bound``."""
+    """Match a value that is greater than or equal to `bound`.
+
+    It compares numbers, dates and strings. A value that cannot be ordered
+    against `bound` does not match, and does not raise.
+
+    Args:
+        bound: The value to compare with. It must be a number, a date or a
+            string.
+
+    Returns:
+        A matcher for a single value.
+
+    Raises:
+        TypeError: When `bound` is `None`, a boolean, or a container.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import gte
+
+        [attachment] = gql.query("search", term="diagram")
+        assert attachment == gql.expect.Attachment(size_bytes=gte(2048))
+        assert attachment != gql.expect.Attachment(size_bytes=gte(2049))
+        ```
+    """
     return Comparison("gte", bound)
 
 
 def lt(bound: Any) -> Comparison:
-    """The value must be less than ``bound``."""
+    """Match a value that is less than `bound`.
+
+    It compares numbers, dates and strings. A value that cannot be ordered
+    against `bound` does not match, and does not raise.
+
+    Args:
+        bound: The value to compare with. It must be a number, a date or a
+            string.
+
+    Returns:
+        A matcher for a single value.
+
+    Raises:
+        TypeError: When `bound` is `None`, a boolean, or a container.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import lt
+
+        [attachment] = gql.query("search", term="diagram")
+        assert attachment == gql.expect.Attachment(size_bytes=lt(4096))
+        assert attachment != gql.expect.Attachment(size_bytes=lt(2048))
+        ```
+    """
     return Comparison("lt", bound)
 
 
 def lte(bound: Any) -> Comparison:
-    """The value must be less than or equal to ``bound``."""
+    """Match a value that is less than or equal to `bound`.
+
+    It compares numbers, dates and strings. A value that cannot be ordered
+    against `bound` does not match, and does not raise.
+
+    Args:
+        bound: The value to compare with. It must be a number, a date or a
+            string.
+
+    Returns:
+        A matcher for a single value.
+
+    Raises:
+        TypeError: When `bound` is `None`, a boolean, or a container.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import lte
+
+        [attachment] = gql.query("search", term="diagram")
+        assert attachment == gql.expect.Attachment(size_bytes=lte(2048))
+        assert attachment != gql.expect.Attachment(size_bytes=lte(2047))
+        ```
+    """
     return Comparison("lte", bound)
 
 
 def one_of(*values: Any) -> OneOf:
-    """The value must equal one of ``values``."""
+    """Match a value that equals any one of `values`.
+
+    A boolean never equals a number here, although Python says `True == 1`.
+
+    Args:
+        *values: The accepted values. At least one is required.
+
+    Returns:
+        A matcher for a single value.
+
+    Raises:
+        ValueError: When no value is given.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import one_of
+
+        user = gql.query("user", id="u1")
+        assert user == gql.expect.User(name=one_of("Ada Lovelace", "Grace Hopper"))
+        assert user != gql.expect.User(name=one_of("Grace Hopper", "Alan Turing"))
+        ```
+    """
     return OneOf(values)
