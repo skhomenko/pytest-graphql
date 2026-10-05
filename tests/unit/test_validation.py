@@ -8,8 +8,20 @@ directly, one property per test, the way ``test_selection_policy.py`` tests
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from typing import Any
+
 import pytest
-from graphql import GraphQLInt, GraphQLNonNull, GraphQLString, parse
+from graphql import (
+    GraphQLInputField,
+    GraphQLInputObjectType,
+    GraphQLInt,
+    GraphQLList,
+    GraphQLNonNull,
+    GraphQLScalarType,
+    GraphQLString,
+    parse,
+)
 from graphql import (
     build_schema as build_sdl_schema,
 )
@@ -17,6 +29,8 @@ from graphql import (
 from pytest_graphql._core.errors import ArgumentError, SelectionError
 from pytest_graphql._core.validation import (
     RESERVED_OPTIONS,
+    _first_names,
+    _locate,
     check_no_reserved_collision,
     coerce_variables,
     validate_document,
@@ -24,6 +38,16 @@ from pytest_graphql._core.validation import (
 from tests.schema.resolvers import build_schema
 
 SCHEMA = build_schema()
+
+SECRET = "s3cr3t-value-4242"
+
+_FILTER = GraphQLInputObjectType(
+    "Filter",
+    {
+        "limit": GraphQLInputField(GraphQLNonNull(GraphQLInt)),
+        "tags": GraphQLInputField(GraphQLList(GraphQLNonNull(GraphQLString))),
+    },
+)
 
 _COLLISION_SCHEMA = build_sdl_schema(
     """
@@ -168,3 +192,142 @@ class TestCoerceVariables:
                 operation_name="probe",
             )
         assert "'first'" in str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        ("type_", "value", "where"),
+        [
+            (
+                GraphQLNonNull(GraphQLString),
+                {"x": SECRET},
+                "$v is not a valid value of type 'String!'",
+            ),
+            (GraphQLInt, SECRET, "$v is not a valid value of type 'Int'"),
+            (
+                GraphQLList(GraphQLInt),
+                [1, SECRET],
+                "$v[1] is not a valid value of type 'Int'",
+            ),
+            (
+                _FILTER,
+                {"limit": SECRET},
+                "$v.limit is not a valid value of type 'Int!'",
+            ),
+            (
+                GraphQLList(_FILTER),
+                [{"limit": 1}, {"limit": SECRET}],
+                "$v[1].limit is not a valid value of type 'Int!'",
+            ),
+            (
+                _FILTER,
+                {"limit": 1, "nope": SECRET},
+                "$v has no field 'nope' on 'Filter'",
+            ),
+            (
+                _FILTER,
+                {"tags": [SECRET]},
+                "$v is missing the required field 'limit' on 'Filter'",
+            ),
+            (
+                _FILTER,
+                {"zed": SECRET, "nope": 1},
+                "$v is missing the required field 'limit' and has no fields "
+                "'zed', 'nope' on 'Filter'",
+            ),
+            (_FILTER, SECRET, "$v is not a valid value of type 'Filter'"),
+        ],
+    )
+    def test_names_the_path_and_the_type_and_never_the_value(
+        self, type_: Any, value: Any, where: str
+    ) -> None:
+        # graphql-core's own message repeats the value, and its wording differs
+        # between the 3.2 and 3.3 lines. The text here comes from the path.
+        with pytest.raises(ArgumentError) as excinfo:
+            coerce_variables(
+                [("v", type_, value)], kind="query", operation_name="probe"
+            )
+        message = str(excinfo.value)
+        assert where in message
+        assert SECRET not in message
+        assert excinfo.value.__cause__ is None
+        assert excinfo.value.__suppress_context__
+
+    def test_a_valid_nested_value_passes_unchanged(self) -> None:
+        value = {"limit": 3, "tags": ["a", "b"]}
+        result = coerce_variables(
+            [("v", _FILTER, value)], kind="query", operation_name="probe"
+        )
+        assert result == {"v": value}
+
+
+def test_a_message_lists_at_most_five_missing_fields() -> None:
+    many = GraphQLInputObjectType(
+        "Many",
+        {f"f{n}": GraphQLInputField(GraphQLNonNull(GraphQLInt)) for n in range(8)},
+    )
+    with pytest.raises(ArgumentError) as excinfo:
+        coerce_variables([("v", many, {})], kind="query", operation_name="probe")
+    message = str(excinfo.value)
+    assert "'f0', 'f1', 'f2', 'f3', 'f4' and 3 more" in message
+    assert "'f5'" not in message
+
+
+def test_a_hostile_key_or_name_is_clipped_in_the_message() -> None:
+    long_name = "n" * 5000
+    hostile = GraphQLInputObjectType(
+        long_name,
+        {long_name: GraphQLInputField(GraphQLNonNull(GraphQLInt))},
+    )
+    with pytest.raises(ArgumentError) as excinfo:
+        coerce_variables(
+            [("v", hostile, {"k" * 1_000_000: 1})],
+            kind="query",
+            operation_name="probe",
+        )
+    message = str(excinfo.value)
+    assert len(message) < 600
+    assert "k" * 60 + "..." in message
+    assert "k" * 61 not in message
+    assert "n" * 61 not in message
+
+
+def test_a_long_variable_path_is_clipped_in_the_message() -> None:
+    deep = GraphQLInputObjectType(
+        "Deep", {"f" * 5000: GraphQLInputField(GraphQLNonNull(GraphQLInt))}
+    )
+    with pytest.raises(ArgumentError) as excinfo:
+        coerce_variables(
+            [("v", deep, {"f" * 5000: "x"})], kind="query", operation_name="probe"
+        )
+    assert len(str(excinfo.value)) < 600
+
+
+def test_the_names_helper_holds_only_the_first_few() -> None:
+    shown, total = _first_names(f"name{n}" for n in range(100_000))
+    assert shown == ["name0", "name1", "name2", "name3", "name4"]
+    assert total == 100_000
+
+
+def test_a_list_slot_is_found_without_reading_the_rest_of_the_list() -> None:
+    read: list[int] = []
+
+    class Counting:
+        def __iter__(self) -> Iterator[int]:
+            for n in range(1_000_000):
+                read.append(n)
+                yield n
+
+    declared, found = _locate(GraphQLList(GraphQLInt), Counting(), (2,))
+    assert (str(declared), found) == ("Int", 2)
+    assert len(read) == 3
+
+
+def test_a_long_type_name_is_clipped_in_the_generic_message() -> None:
+    def refuse(_value: object) -> object:
+        raise ValueError("no")
+
+    scalar = GraphQLScalarType("S" * 5000, parse_value=refuse)
+    with pytest.raises(ArgumentError) as excinfo:
+        coerce_variables([("v", scalar, 1)], kind="query", operation_name="probe")
+    message = str(excinfo.value)
+    assert len(message) < 400
+    assert "S" * 60 + "..." in message

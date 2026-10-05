@@ -872,6 +872,29 @@ def test_a_raw_argument_the_field_does_not_declare_is_compared_as_written() -> N
     assert "nope: 1" in printed
 
 
+def test_a_conflict_spells_an_object_literal_the_same_on_both_graphql_core_lines() -> (
+    None
+):
+    """graphql-core 3.3 prints ``{ a: 1 }``. The message must read ``{a: 1}``."""
+    selection = Selection(
+        "posts(nope: {a: 1, b: [2]}) { id }", "posts(nope: {a: 2}) { id }"
+    )
+    with pytest.raises(SelectionError) as caught:
+        run(selection)
+    message = str(caught.value)
+    assert "nope: {a: 1, b: [2]}" in message
+    assert "nope: {a: 2}" in message
+
+
+def test_a_conflict_over_an_object_literal_with_a_variable_reads_the_same() -> None:
+    selection = Selection("posts(nope: {a: $x}) { id }", "posts(nope: {a: $y}) { id }")
+    with pytest.raises(SelectionError) as caught:
+        run(selection)
+    message = str(caught.value)
+    assert "nope: {a: $x}" in message
+    assert "nope: {a: $y}" in message
+
+
 def test_two_raw_arguments_with_different_unknown_names_still_conflict() -> None:
     selection = Selection("posts(nope: 1) { id }", "posts(other: 1) { id }")
     with pytest.raises(SelectionError, match="share the response key 'posts'"):
@@ -904,6 +927,20 @@ def test_a_difference_deep_inside_a_nested_input_object_still_conflicts() -> Non
     )
     with pytest.raises(SelectionError, match="share the response key 'save'"):
         run(selection, "Query", schema=schema)
+
+
+def test_a_conflict_over_a_declared_object_argument_with_a_variable() -> None:
+    """A literal that holds a variable has no canonical form and prints as written."""
+    schema = build_sdl_schema(NESTED_INPUT_SDL)
+    selection = Selection(
+        "save(data: {name: $a, inner: {id: 1}})",
+        "save(data: {name: $b, inner: {id: 1}})",
+    )
+    with pytest.raises(SelectionError) as caught:
+        run(selection, "Query", schema=schema)
+    message = str(caught.value)
+    assert "{name: $a, inner: {id: 1}}" in message
+    assert "{name: $b, inner: {id: 1}}" in message
 
 
 def test_a_python_value_with_no_literal_form_compares_by_value() -> None:

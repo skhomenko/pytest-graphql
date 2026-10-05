@@ -59,6 +59,9 @@ jobs:
     # the supported range, never a narrower supported set, so the dependency
     # metadata keeps the full declared range. Adding or removing a row is one
     # change that edits that table and this file together.
+    # The graphql column picks the graphql-core line. "locked" keeps the
+    # version uv.lock pins, which is the newest 3.3. "3.2" replaces only
+    # graphql-core with the newest 3.2 and leaves every other package alone.
     name: py${{ matrix.python }} ${{ matrix.label }}
     runs-on: ubuntu-latest
     continue-on-error: ${{ !matrix.blocking }}
@@ -69,30 +72,42 @@ jobs:
           - python: "3.10"
             label: pytest 7.4
             pytest: oldest
+            graphql: locked
             blocking: true
           - python: "3.10"
             label: pytest current
             pytest: current
+            graphql: locked
             blocking: true
           - python: "3.11"
             label: pytest current
             pytest: current
+            graphql: locked
             blocking: true
           - python: "3.12"
             label: pytest current
             pytest: current
+            graphql: locked
             blocking: true
           - python: "3.13"
             label: pytest current
             pytest: current
+            graphql: locked
             blocking: true
           - python: "3.14"
             label: pytest current
             pytest: current
+            graphql: locked
+            blocking: true
+          - python: "3.14"
+            label: pytest current, graphql-core 3.2
+            pytest: current
+            graphql: "3.2"
             blocking: true
           - python: "3.14"
             label: pytest prerelease
             pytest: prerelease
+            graphql: locked
             blocking: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -127,10 +142,37 @@ jobs:
               exit 1
               ;;
           esac
+      - name: Select the graphql-core line for this row
+        env:
+          SELECTOR: ${{ matrix.graphql }}
+        run: |
+          case "$SELECTOR" in
+            locked)
+              ;;
+            3.2)
+              uv pip install "graphql-core>=3.2,<3.3"
+              ;;
+            *)
+              echo "unknown graphql-core selector: $SELECTOR" >&2
+              exit 1
+              ;;
+          esac
       - name: Report the resolved versions
+        env:
+          SELECTOR: ${{ matrix.graphql }}
         run: |
           uv run --no-sync python -c "import sys; print(sys.version)"
           uv run --no-sync pytest --version
+          uv run --no-sync python -c "import graphql; print('graphql-core', graphql.__version__)"
+          # A row that asked for 3.2 must not pass on 3.3 by accident.
+          if [ "$SELECTOR" = "3.2" ]; then
+            uv run --no-sync python -c "import graphql, sys; sys.exit(0 if graphql.__version__.startswith('3.2.') else 1)"
+          fi
+      - name: Type-check against the 3.2 stubs
+        # The lint job sees the locked 3.3 only, and the two lines type some
+        # AST fields differently.
+        if: matrix.graphql == '3.2'
+        run: uv run --no-sync mypy --strict src/
       - run: uv run --no-sync pytest -q
 
   platform:

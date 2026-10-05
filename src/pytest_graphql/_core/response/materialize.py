@@ -33,11 +33,11 @@ from graphql import (
     GraphQLScalarType,
     GraphQLSchema,
     GraphQLString,
+    GraphQLUnionType,
     InlineFragmentNode,
     OperationDefinitionNode,
     SelectionSetNode,
     get_named_type,
-    is_abstract_type,
     is_composite_type,
     is_object_type,
     is_specified_scalar_type,
@@ -258,9 +258,13 @@ class Materializer:
         if condition.name == runtime:
             return True
         runtime_type = self.schema.get_type(runtime)
-        if runtime_type is None or not is_abstract_type(condition):
+        # An explicit isinstance narrows on both graphql-core lines.
+        # ``is_abstract_type`` is a type guard only from 3.3 on.
+        if runtime_type is None or not isinstance(
+            condition, (GraphQLInterfaceType, GraphQLUnionType)
+        ):
             return False
-        return self.schema.is_sub_type(condition, runtime_type)  # type: ignore[arg-type]
+        return self.schema.is_sub_type(condition, runtime_type)
 
     def runtime_name(
         self,

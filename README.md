@@ -33,8 +33,9 @@ What `0.1.0b1` contains:
   `gql_headers`, `gql_schema` and more), six hooks, a `GraphQL calls` section in
   the report of a failed test, and pytest-xdist support.
 
-Not in this release yet: the documentation site, an on-disk schema cache, and
-support for graphql-core 3.3.
+Not in this release yet: the documentation site and an on-disk schema cache.
+`0.1.0b1` requires graphql-core 3.2. Support for graphql-core 3.3 is
+unreleased, and the changelog lists it under Unreleased.
 
 The changelog records what each release contains:
 https://github.com/skhomenko/pytest-graphql/blob/main/CHANGELOG.md
@@ -96,9 +97,9 @@ pip install "pytest-graphql[pytest]"
 
 ## Supported versions
 
-Python 3.10 through 3.14, with pytest 7.4 or newer when the pytest extra is
-installed. CI tests a representative sample of that range rather than the whole
-cross product.
+Python 3.10 through 3.14, graphql-core 3.2, and pytest 7.4 or newer when the
+pytest extra is installed. The next release adds graphql-core 3.3. CI tests a
+representative sample of that range rather than the whole cross product.
 
 ## License
 

@@ -39,6 +39,7 @@ from graphql import (
 )
 
 from pytest_graphql._core.errors import SelectionError, SelectionTooLargeError
+from pytest_graphql._core.graphql_compat import default_of
 from pytest_graphql._core.selection.builder import BuiltSelection, SelectionBuilder
 from pytest_graphql._core.selection.policy import (
     SelectionPolicy,
@@ -255,7 +256,7 @@ def page_size_argument_survey(schema: GraphQLSchema) -> tuple[int, int]:
 
     Answers the ``connection_page_size`` question directly. Introspection
     can expose a *declared* default for the recognized page-size argument
-    (``GraphQLArgument.default_value``), so this checks for one rather than
+    (read through ``default_of``), so this checks for one rather than
     assuming a corpus schema never states one. Only an undeclared,
     implementation-side runtime default stays outside what any introspection
     document could ever reveal.
@@ -270,7 +271,7 @@ def page_size_argument_survey(schema: GraphQLSchema) -> tuple[int, int]:
             if argument is None:
                 continue
             recognized += 1
-            if argument.default_value is not Undefined:
+            if default_of(argument) is not Undefined:
                 with_default += 1
     return recognized, with_default
 

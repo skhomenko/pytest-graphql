@@ -10,6 +10,34 @@ cycle is promised.
 
 ## [Unreleased]
 
+### Changed
+
+- graphql-core 3.3 is supported, alongside 3.2. The dependency is declared as
+  `graphql-core>=3.2,<3.4`, so a project that already uses graphql-core 3.3 can
+  install this package. The whole suite passes on the newest 3.2 and the newest
+  3.3, and CI tests both. The library behaves the same on both lines. Migration:
+  none.
+- A variable that fails the check against its input type now raises
+  `ArgumentError` with the path and the declared type, for example
+  `$input.lines[1].price is not a valid value of type 'Int!'`. For a missing or
+  an unknown input field the message names the fields, clipped to 60
+  characters. It no longer repeats graphql-core's text, which included the
+  value and differed between 3.2 and 3.3. Migration: a test that matched
+  graphql-core's wording must match the new text.
+
+### Differences between graphql-core 3.2 and 3.3
+
+These come from graphql-core itself, and the library passes them on.
+
+- An integer that a float cannot hold exactly, such as `10**30`, is refused for
+  a `Float` variable on 3.3 and accepted on 3.2.
+- The message of a document validation error is graphql-core's own, and 3.3
+  words a few rules differently, for example a missing required argument.
+- 3.3 prints an object literal with spaces inside the braces. The document that
+  is sent carries the same GraphQL.
+- 3.3 reports a default value that does not fit its declared type as a schema
+  error, and 3.2 does not.
+
 ## [0.1.0b1] - 2026-10-05
 
 First beta. It adds response matching, seeded fake data, error assertions,
