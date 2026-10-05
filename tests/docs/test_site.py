@@ -119,12 +119,55 @@ def test_every_published_page_is_in_the_nav_and_has_its_title() -> None:
         assert first == f"# {title}", name
 
 
-def test_every_page_but_the_quickstart_says_what_it_will_cover() -> None:
-    for name, _title in SPEC_PAGES[1:]:
+#: The guide pages that are written. Every other page after the Quickstart is
+#: still a one-line stub that says what it will cover. A page moves from the
+#: stub test to the guide test below when it is written, so a stub cannot
+#: hide a page that was written and never listed, and a written page cannot
+#: slip back to a stub.
+WRITTEN_PAGES = (
+    "configuration.md",
+    "selections.md",
+    "responses.md",
+    "assertions.md",
+    "factory.md",
+    "authentication.md",
+)
+
+
+def test_every_unwritten_page_says_what_it_will_cover() -> None:
+    stubs = [name for name, _ in SPEC_PAGES[1:] if name not in WRITTEN_PAGES]
+    assert stubs, "every page is written, so this test has nothing left to guard"
+    for name in stubs:
         lines = (ROOT / "docs" / name).read_text(encoding="utf-8").splitlines()
         body = [line for line in lines[1:] if line.strip()]
         assert len(body) == 1, name
         assert body[0].startswith("This page will cover: "), name
+
+
+@pytest.mark.parametrize("name", WRITTEN_PAGES)
+def test_a_written_page_is_no_stub_and_opens_with_what_the_reader_can_do(
+    name: str,
+) -> None:
+    text = (ROOT / "docs" / name).read_text(encoding="utf-8")
+    assert "This page will cover" not in text, name
+    paragraphs = [part for part in text.split("\n\n") if part.strip()]
+    assert paragraphs[0].startswith("# "), name
+    opening = paragraphs[1] if not paragraphs[1].startswith("#") else ""
+    assert opening.startswith("After this page you can "), name
+
+
+def test_a_broken_link_or_anchor_fails_the_strict_build() -> None:
+    """The guide pages link to headings of the generated API reference.
+
+    MkDocs reports a missing anchor at the level ``info`` unless told
+    otherwise, and ``--strict`` fails only on a warning. So the config raises it.
+    """
+    warning = 30
+    validation = load_config(str(ROOT / "mkdocs.yml")).validation
+    assert validation["links"]["anchors"] >= warning
+    assert validation["links"]["not_found"] >= warning
+    assert validation["links"]["unrecognized_links"] >= warning
+    assert validation["nav"]["omitted_files"] >= warning
 
 
 def test_the_build_produces_each_page(site: Path) -> None:
