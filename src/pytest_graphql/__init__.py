@@ -82,7 +82,11 @@ from pytest_graphql._core.response import GraphQLResponse, Node, NodeList
 from pytest_graphql._core.schema.source import SchemaSource
 from pytest_graphql._core.selection.model import AUTO, Field, Selection
 from pytest_graphql._core.selection.policy import CyclePolicy, SelectionPolicy
-from pytest_graphql._core.transport.base import Transport
+from pytest_graphql._core.transport.base import (
+    DerivableTransportBase,
+    RawResponse,
+    Transport,
+)
 
 __all__ = [
     "AUTO",
@@ -92,6 +96,7 @@ __all__ = [
     "BearerAuth",
     "ClientConfig",
     "CyclePolicy",
+    "DerivableTransportBase",
     "DeterministicRandom",
     "DiagnosticRenderError",
     "DiagnosticSnapshot",
@@ -115,6 +120,7 @@ __all__ = [
     "Node",
     "NodeList",
     "OperationNotFoundError",
+    "RawResponse",
     "RequestInfo",
     "ResponseShapeError",
     "ScalarNotRegisteredError",

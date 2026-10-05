@@ -325,12 +325,19 @@ The top-level `__all__` holds only what a user constructs, catches, annotates or
 `Middleware` protocols, `BaseMiddleware`, `BearerAuth`, `HeaderAuth`, `RequestInfo`,
 `DiagnosticSnapshot`, `GraphQLResponse`, `Node`, `NodeList`, and `__version__`.
 
+A custom transport needs two more names, so they are in the top-level surface as well:
+`RawResponse`, which `Transport.send()` returns, and `DerivableTransportBase`, the base class
+that opts a transport into derivation. The compatibility promise for both is at
+`pytest_graphql`. They are still defined in `pytest_graphql._core.transport.base`, and an
+import from that path keeps working, but the promise and the documentation name the top-level
+path only.
+
 `0.1.0` has no built-in `unittest` base class: a `unittest` suite uses `build_client()` and closes
 the client in `tearDownClass`.
 
 Importable from their own modules, and carrying a compatibility promise only at that path:
 `OperationNamespace`, `FakeNamespace`, `ExpectNamespace`, `HttpxTransport`,
-`IntrospectionSource`, `SDLFileSource`, `RawResponse`, `CapturedErrors`, `SelectionInput`,
+`IntrospectionSource`, `SDLFileSource`, `CapturedErrors`, `SelectionInput`,
 `FakeContext`.
 
 ### Constructor and configuration split

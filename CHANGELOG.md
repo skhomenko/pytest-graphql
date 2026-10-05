@@ -45,6 +45,20 @@ cycle is promised.
 - `GraphQLTestCase` is not part of `0.1.0`. There is no built-in `unittest`
   base class. A `unittest` suite uses `build_client()` and closes the client in
   `tearDownClass`. Migration: none.
+- `RawResponse` and `DerivableTransportBase` are importable from `pytest_graphql`.
+  A custom transport needs both: `Transport.send()` returns a `RawResponse`, and a
+  transport that keeps state for each client inherits `DerivableTransportBase`.
+  Each has a docstring with an example. The import from
+  `pytest_graphql._core.transport.base` keeps working, but only the top-level path
+  is promised and documented. Migration: none.
+- The documentation guides are complete. The Polling, Diagnostics, Extending,
+  Using without pytest, Cookbook, Migrating and FAQ pages are written, so no page
+  of the site is a stub, and the README is the Quickstart, a feature list and
+  links to the guides. Every Python example on a page runs in CI, except the few
+  that need a real server, which are compiled only. The failure report, the log
+  lines, the timeout message, the delay table and the hook section that the pages
+  quote are compared with real output, so a change to one of them fails CI until
+  the page says the same. Migration: none.
 
 ### Changed
 
