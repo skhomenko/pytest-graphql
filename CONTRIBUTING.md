@@ -34,6 +34,27 @@ Text intended for publication is scanned separately:
 python3 scripts/check_publication_hygiene.py README.md CHANGELOG.md
 ```
 
+## Documentation
+
+The site is built from `docs/` and `mkdocs.yml`. `docs/reference/` is
+contributor documentation and is never published.
+
+```bash
+uv run mkdocs build --strict
+uv run mkdocs serve
+```
+
+Material prints a notice about MkDocs 2 on every build. Set
+`NO_MKDOCS_2_WARNING=true` to hide it. The `docs` extra keeps MkDocs below 2, so
+the notice does not apply here.
+
+Every Python block in a page under `docs/` and in `README.md` needs a marker
+after the language. Write `python {.exec}` for a block that `tests/docs/` runs
+against the test schema, and `python {.no-exec}` for one that is only compiled.
+Do not write the bare form `python exec`: MkDocs does not render it. The rules
+are in the "Documentation examples" section of
+`docs/reference/DESIGN_DECISIONS.md`.
+
 ## Layout rules
 
 - Library code lives in `src/pytest_graphql/`.

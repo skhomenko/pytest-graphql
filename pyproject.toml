@@ -49,6 +49,18 @@ dev = [
     "pytest-xdist>=3.5",
     "ruff>=0.6",
 ]
+# The documentation site (docs/, mkdocs.yml). Tooling only: nothing under src/
+# imports any of these, and the built wheel names them only as marker-gated
+# requirements, like every dev requirement. MkDocs 2 is a rewrite that the
+# Material theme and mkdocstrings do not support, so the upper bound is part of
+# the contract. See "Documentation dependencies" in
+# docs/reference/DESIGN_DECISIONS.md.
+docs = [
+    "mkdocs>=1.6,<2",
+    "mkdocs-material>=9.5,<10",
+    "mkdocstrings>=0.26",
+    "mkdocstrings-python>=1.12",
+]
 
 [project.urls]
 Documentation = "https://skhomenko.github.io/pytest-graphql/"
@@ -71,6 +83,10 @@ include = [
     "/src",
     "/tests",
     "/scripts",
+    # tests/docs reads these, so the tests in the sdist can run.
+    "/docs",
+    "/mkdocs.yml",
+    "/mkdocs_hooks.py",
     "/CHANGELOG.md",
     "/CONTRIBUTING.md",
     "/README.md",

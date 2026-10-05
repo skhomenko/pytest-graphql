@@ -211,6 +211,7 @@ and release notes, public documentation, site copy, and generated artifacts.
 | `uv run ruff format --check .` | Formatting check |
 | `uv run mypy --strict src/` | Type check |
 | `uv run pytest -q` | Run the test suite |
+| `uv run mkdocs build --strict` | Build the documentation site |
 | `uv build` | Build the distribution |
 | `git config core.hooksPath .githooks` | Activate the Git hooks |
 | `python3 scripts/git_hook_checks.py --self-test` | Test the hook checks |

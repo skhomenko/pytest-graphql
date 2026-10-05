@@ -1,0 +1,159 @@
+name: docs
+
+# Three triggers:
+#
+# - A pull request builds and checks the site. It never deploys.
+# - The release workflow finishing deploys the site, but only when that run
+#   uploaded to PyPI. A run that ends as a success with the upload skipped,
+#   which happens while RELEASE_PUBLISH is unset, deploys nothing. Pushing a
+#   v* tag is not a trigger.
+# - A manual run from main deploys main, for a correction to the docs alone.
+on:
+  pull_request:
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+  workflow_dispatch:
+
+# Least privilege by default. The gate job adds a read of the Actions API, and
+# only the deploy job adds pages: write and id-token: write.
+permissions:
+  contents: read
+
+# A pull request run replaces an older run of the same pull request. Every
+# other run has its own group, so a deploy is never cancelled by another run.
+# The deploy job serializes the deployments itself.
+concurrency:
+  group: docs-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+# The uv release every job runs. See the same pin in test.yml.
+env:
+  UV_VERSION: "0.12.13"
+  UV_PROJECT_ENVIRONMENT: .venv
+  # Material prints a notice about MkDocs 2 on every build. The docs extra caps
+  # MkDocs below 2, so the notice does not apply to this project.
+  NO_MKDOCS_2_WARNING: "true"
+
+jobs:
+  gate:
+    # Decides whether this run deploys. It is the only job that reads another
+    # run, and it holds no write permission.
+    name: decide whether to deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      deploy: ${{ steps.decide.outputs.deploy }}
+    steps:
+      - id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          case "$EVENT" in
+            pull_request)
+              echo "deploy=false" >> "$GITHUB_OUTPUT"
+              ;;
+            workflow_dispatch)
+              if [ "$REF" != "refs/heads/main" ]; then
+                echo "::error::A manual deploy runs from main, not from $REF."
+                exit 1
+              fi
+              echo "deploy=true" >> "$GITHUB_OUTPUT"
+              ;;
+            workflow_run)
+              if [ "$RUN_EVENT" != "push" ] || [ "$HEAD_REPO" != "$REPO" ]; then
+                echo "::notice::The release run was not a push in this repository. Nothing to deploy."
+                echo "deploy=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              # The run can end as a success with the upload skipped, so the
+              # run result is not enough. Ask for the job instead. A step that
+              # fails after the upload, such as the GitHub release, does not
+              # stop the docs of a version that is on PyPI. The job name is the
+              # name of the publish-pypi job in release.yml, and a test keeps
+              # the two in step.
+              uploaded="$(gh api --paginate \
+                "repos/$REPO/actions/runs/$RUN_ID/jobs" \
+                --jq '.jobs[] | select(.name == "upload to PyPI") | .conclusion')"
+              if [ "$uploaded" = "success" ]; then
+                echo "deploy=true" >> "$GITHUB_OUTPUT"
+              else
+                echo "::notice::The release run did not upload to PyPI (job result: ${uploaded:-none}). Nothing to deploy."
+                echo "deploy=false" >> "$GITHUB_OUTPUT"
+              fi
+              ;;
+            *)
+              echo "::error::Unexpected event $EVENT."
+              exit 1
+              ;;
+          esac
+
+  build:
+    # One build. The deploy job publishes the files this job checked, and
+    # builds nothing itself.
+    name: build and check the site
+    needs: gate
+    if: github.event_name == 'pull_request' || needs.gate.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # After a release this is the commit that was released, and not the
+          # newest commit on main. For any other event it is empty, and the
+          # default checkout applies.
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --all-extras
+      - name: Build the site
+        # --strict turns any warning, such as a broken link or a docstring that
+        # does not parse, into a failure.
+        run: uv run --no-sync mkdocs build --strict --site-dir site
+      - name: Run the documentation tests
+        # Runs every exec block, compiles every no-exec block, rejects a Python
+        # block with neither marker, and builds the site again to check it.
+        run: uv run --no-sync pytest tests/docs -q
+      - name: Scan the published pages for publication hygiene
+        # The source pages and the README, then the rendered site, because what
+        # a reader gets is the rendered text, docstrings included. Theme assets
+        # are third-party code and are not ours to rewrite.
+        run: |
+          find docs -name '*.md' -not -path 'docs/reference/*' -print0 \
+            | xargs -0 python3 scripts/check_publication_hygiene.py README.md
+          find site -type f \( -name '*.html' -o -name '*.xml' \
+              -o -name 'search_index.json' \) -print0 \
+            | xargs -0 python3 scripts/check_publication_hygiene.py
+      - name: Upload the site
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+
+  deploy:
+    name: deploy to GitHub Pages
+    needs: [gate, build]
+    if: needs.gate.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
