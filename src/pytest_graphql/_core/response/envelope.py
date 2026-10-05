@@ -38,29 +38,176 @@ DataState = Literal["absent", "null", "present"]
 
 @dataclass(frozen=True, eq=False)
 class GraphQLResponse(Generic[T]):
-    """One executed operation's result (SPEC 3.4).
+    """Everything the server returned for one operation, and how it was sent.
 
-    ``data`` is ``None`` unless ``data_state`` is ``"present"``, in which case
-    it is a ``Node`` over the operation's root type. ``raw`` holds the
-    envelope as the transport parsed it and is never modified.
+    `query()` and `mutation()` return the value of the one field you asked for,
+    so you usually do not see this object. You get it from
+    `GraphQLClient.execute()`, from a call made with `raw=True`, and from the
+    `response` of an error. Use it to read errors next to data, the HTTP status,
+    the timing and the untouched JSON.
+
+    The response is immutable. Its `repr()` shows the status, the state of the
+    data, the number of errors and the redacted request. It never shows a data
+    value or an error message, so a failure report does not leak them.
+
+    The type parameter is the type of `data`. It is `Any` by default. Annotate
+    a variable as `GraphQLResponse[MyType]` if you want your own type for it.
+
+    Examples:
+        ```python {.exec}
+        response = gql.execute('query { user(id: "u1") { name } }')
+
+        assert response.has_data
+        assert response.data.user.name == "Ada Lovelace"
+        assert response.errors == ()
+        assert response.http.status_code == 200
+        ```
     """
 
     data: T
+    """The result of the operation.
+
+    When `data_state` is `"present"`, this is a `Node` that holds the top-level
+    fields you selected. Otherwise it is `None`.
+
+    Examples:
+        ```python {.exec}
+        response = gql.execute('{ user(id: "u1") { name } }')
+        assert response.data.user.name == "Ada Lovelace"
+        ```
+    """
     data_state: DataState
+    """Whether the server sent data: `"present"`, `"null"` or `"absent"`.
+
+    - `"present"`: `data` is an object.
+    - `"null"`: the server sent `data: null`, which happens when an error stopped
+      the whole operation.
+    - `"absent"`: the response has no `data` entry at all. A server response
+      with no `data` entry is a rejected request and raises an error before a
+      response exists, so you will see `"present"` and `"null"`.
+
+    Examples:
+        ```python {.exec}
+        response = gql.execute('{ user(id: "u1") { name } }')
+        assert response.data_state == "present"
+
+        failed = gql.mutation(
+            "updateUser", id="missing", fields=["id"], raise_on_error=False, raw=True
+        )
+        assert failed.data_state == "null"
+        ```
+    """
     errors: tuple[GraphQLErrorInfo, ...]
+    """The entries of the response's `errors` list, in the server's order.
+
+    Each entry has a `message` (text from the server), a `path` and `locations`
+    (or `None`), an `extensions` mapping, and a `code`, which is
+    `extensions["code"]` when that is a string and `None` otherwise. `repr()` of
+    an entry shows the path and locations and not the message. The tuple is
+    empty when the server returned no errors.
+
+    Examples:
+        ```python {.exec}
+        response = gql.execute('{ user(id: "u1") { name } }')
+        assert response.errors == ()
+
+        failed = gql.mutation(
+            "updateUser", id="missing", fields=["id"], raise_on_error=False, raw=True
+        )
+        assert failed.errors[0].path == ("updateUser",)
+        ```
+    """
     extensions: Mapping[str, Any]
+    """The response's top-level `extensions`, or an empty mapping.
+
+    Examples:
+        ```python {.exec}
+        response = gql.execute('{ user(id: "u1") { name } }')
+        assert response.extensions == {}
+        ```
+    """
     http: HttpInfo
+    """The HTTP exchange: `status_code`, `media_type`, `url` and `headers`.
+
+    Examples:
+        ```python {.exec}
+        response = gql.execute('{ user(id: "u1") { name } }')
+        assert response.http.status_code == 200
+        assert response.http.url.startswith("http")
+        ```
+    """
     request: DiagnosticSnapshot
+    """The request that was sent, in its redacted form, for reports.
+
+    Redaction follows the rules in `DiagnosticSnapshot`: it covers the redacted
+    headers and variables, and known secrets in free text above a minimum length.
+    A header or variable that the settings do not name is not redacted by its name.
+
+    Examples:
+        ```python {.exec}
+        response = gql.execute('{ user(id: "u1") { name } }')
+        assert response.request.kind == "query"
+        assert "user" in response.request.document
+        ```
+    """
     raw: Mapping[str, Any]
+    """The response envelope, before any parsing.
+
+    It holds `data`, and holds `errors` and `extensions` only when the server
+    sent them. The values are the JSON the transport parsed. Custom scalars
+    are not decoded here.
+
+    Examples:
+        ```python {.exec}
+        response = gql.execute('{ user(id: "u1") { name } }')
+        assert response.raw == {"data": {"user": {"name": "Ada Lovelace"}}}
+        ```
+    """
     duration_ms: float
+    """How long the transport call took, in milliseconds.
+
+    Examples:
+        ```python {.exec}
+        response = gql.execute('{ user(id: "u1") { name } }')
+        assert response.duration_ms >= 0
+        ```
+    """
 
     @property
     def has_data(self) -> bool:
-        """True only when ``data`` is present and not null (C5)."""
+        """Whether `data` holds an object. `False` when it is `None`.
+
+        Examples:
+            ```python {.exec}
+            response = gql.execute('{ user(id: "u1") { name } }')
+            assert response.has_data
+            assert response.data_state == "present"
+            ```
+        """
         return self.data_state == "present"
 
     def unwrap(self) -> Any:
-        """The value of the single top-level field (B18)."""
+        """Return the value of the one top-level field the operation selected.
+
+        This is what `query()` and `mutation()` do for you. It is for a
+        document that you sent with `execute()`. The count is of the fields the
+        document selects at the top level, whether or not the server returned
+        them.
+
+        Returns:
+            The value of that field.
+
+        Raises:
+            GraphQLTestError: When `data` is not present, or when the document
+                selects more or fewer than one top-level field. The message
+                names the fields.
+
+        Examples:
+            ```python {.exec}
+            response = gql.execute('{ user(id: "u1") { name } }')
+            assert response.unwrap().name == "Ada Lovelace"
+            ```
+        """
         if not self.has_data:
             raise GraphQLTestError(
                 f"cannot unwrap a response whose data is {self.data_state}."
@@ -75,7 +222,33 @@ class GraphQLResponse(Generic[T]):
         return node[fields[0]]
 
     def at(self, path: str, default: Any = MISSING) -> Any:
-        """Read a dotted path from ``data``."""
+        """Read a value from `data` by a dotted path.
+
+        A segment is a field name or a list index. Write an index as a number
+        (`orders.0.total`) or in brackets (`orders[0].total`). Each name works
+        in its exact schema spelling and in snake_case.
+
+        Args:
+            path: The path to read.
+            default: What to return when a segment does not exist. Without it,
+                a missing segment raises.
+
+        Returns:
+            The value at the path.
+
+        Raises:
+            GraphQLFieldError: When a segment does not exist and no `default`
+                is given.
+            GraphQLTestError: When `data` is not present and no `default` is
+                given.
+
+        Examples:
+            ```python {.exec}
+            response = gql.execute('{ user(id: "u1") { name team { name } } }')
+            assert response.at("user.team.name") == "Core"
+            assert response.at("user.nickname", default=None) is None
+            ```
+        """
         if not self.has_data:
             if default is MISSING:
                 raise GraphQLTestError(

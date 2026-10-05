@@ -380,17 +380,79 @@ class SchemaError(GraphQLClientError):
 
 
 class ScalarNotRegisteredError(GraphQLClientError):
-    """A custom scalar has no fake generator registered for it.
+    """`gql.fake` needed a value for a custom scalar that has no generator.
 
-    ``path`` is where the factory needed it: the input type, then the field
-    names, with a list index as an integer. It is optional so the error can be
-    built from the scalar's name alone.
+    The factory fills a field of a custom scalar type by calling the `fake`
+    function of that scalar's `ScalarSpec`. This error means no spec is
+    registered for the scalar. The message gives the code that registers one,
+    and names the field to override instead. A field you give a value for in
+    the call, or one that the factory leaves out, never raises it.
+
+    Args:
+        scalar_name: The name of the scalar.
+        path: Where the factory needed the value: the input type, then the
+            field names, with a list index as an integer. Leave it out when the
+            place is not known.
+
+    Examples:
+        ```python {.exec}
+        from graphql import build_schema
+
+        from pytest_graphql import ScalarNotRegisteredError, build_client
+
+        schema = build_schema(
+            "scalar Money type Query { ping: Boolean } input Pay { amount: Money! }"
+        )
+        client = build_client(
+            url="http://localhost:8000/graphql",
+            transport=gql.transport,
+            schema=schema,
+        )
+        try:
+            client.fake.Pay()
+        except ScalarNotRegisteredError as error:
+            assert error.scalar_name == "Money"
+            assert error.location == "Pay.amount"
+        else:
+            raise AssertionError("expected an error")
+        ```
     """
 
     def __init__(self, scalar_name: str, *, path: Sequence[str | int] = ()) -> None:
         self.scalar_name = scalar_name
+        """The name of the scalar that has no generator.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import ScalarNotRegisteredError
+
+            error = ScalarNotRegisteredError("Money", path=("Pay", "lines", 0, "price"))
+            assert error.scalar_name == "Money"
+            ```
+        """
         self.path = tuple(path)
+        """Where the factory needed the value, as names and list indexes.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import ScalarNotRegisteredError
+
+            error = ScalarNotRegisteredError("Money", path=("Pay", "lines", 0, "price"))
+            assert error.path == ("Pay", "lines", 0, "price")
+            ```
+        """
         self.location = _render_path(self.path) if self.path else None
+        """The path as text, such as `Pay.amount` or `Pay.lines[0].price`, or `None`.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import ScalarNotRegisteredError
+
+            error = ScalarNotRegisteredError("Money", path=("Pay", "lines", 0, "price"))
+            assert error.location == "Pay.lines[0].price"
+            assert ScalarNotRegisteredError("Money").location is None
+            ```
+        """
         spec = (
             f'    registry.register(ScalarSpec(name="{scalar_name}", '
             "serialize=str, fake=lambda rng: ...))"
@@ -430,38 +492,75 @@ def _render_path(path: Sequence[str | int]) -> str:
 
 
 class DiagnosticRenderError(GraphQLClientError):
-    """``RequestInfo.__repr__``/``as_curl()`` found no safe rendering
-    (DESIGN_DECISIONS.md section 7, "Boundary").
+    """A request cannot be shown as text without exposing a secret.
 
-    Raised instead of returning text that would expose a redacted value, or a
-    corrupted ``as_curl()`` request body, when a qualifying secret collides
-    with fixed or generated rendering syntax that no per-leaf substitution
-    can remove: syntax a format cannot omit (a class name, a shell
-    delimiter) cannot be replaced, and an already-valid JSON document (the
-    ``--data`` body) cannot be rewritten without breaking its structure.
+    `repr()` and `as_curl()` of a `RequestInfo` replace secret values with
+    markers. They raise this error when a secret is equal to text that the
+    output must contain, such as a class name or a field name, so that no
+    replacement could remove the secret without breaking the output. The error
+    is raised instead of returning text that shows the secret.
 
-    Neither constructor argument is composed here: the fixed, descriptive
-    prose in :meth:`default_message` and the fixed ``renderer`` label are both
-    compile-time text, and a qualifying secret can equal a substring of
-    either one exactly as it can equal a renderer's own wrapper syntax
-    (DESIGN_DECISIONS.md section 7, "Value scrub for free-form text"). The
-    caller that already holds the qualifying set checks ``renderer``
-    against it, passes an empty string in place of a colliding label, and
-    then checks every complete rendering of the built exception, so this
-    constructor never needs, and is never trusted, to repeat that check.
+    This is rare, because a real secret is long and random. The fix is in the
+    message: use a different value for the colliding secret, or call
+    `redacted()` on the request and read the fields of the snapshot.
+
+    Args:
+        renderer: The name of the output that was refused, such as `"repr()"`.
+        message: The error text. `default_message()` builds the standard one.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import DiagnosticRenderError, RequestInfo
+
+        request = RequestInfo(
+            operation=None,
+            kind="query",
+            document="{ ping }",
+            variables={},
+            headers={"Authorization": "RequestInfo"},
+            url="http://localhost:8000/graphql",
+        )
+        try:
+            repr(request)
+        except DiagnosticRenderError as error:
+            assert error.renderer == "repr()"
+            assert request.redacted().kind == "query"
+        else:
+            raise AssertionError("expected an error")
+        ```
     """
 
     def __init__(self, renderer: str, message: str) -> None:
         self.renderer = renderer
+        """The name of the output that was refused, such as `"repr()"`.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import DiagnosticRenderError
+
+            error = DiagnosticRenderError("as_curl()", "not safe to show")
+            assert error.renderer == "as_curl()"
+            ```
+        """
         super().__init__(message)
 
     @staticmethod
     def default_message(renderer: str) -> str:
-        """The descriptive message a caller uses when it is safe to.
+        """Return the standard message for a refused output.
 
-        A ``@staticmethod`` rather than inline construction so the one
-        primitive that raises this exception owns its text, and checks the
-        built exception's complete renderings against the qualifying set.
+        Args:
+            renderer: The name of the output that was refused.
+
+        Returns:
+            The message, which says what happened and what to do about it.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import DiagnosticRenderError
+
+            text = DiagnosticRenderError.default_message("repr()")
+            assert text.startswith("repr() could not produce a safe representation")
+            ```
         """
         return (
             f"{renderer} could not produce a safe representation of this "
@@ -549,22 +648,59 @@ class GraphQLRequestError(GraphQLTestError):
 
 
 class GraphQLExecutionError(GraphQLTestError):
-    """The server returned an ``errors`` array, or broke the protocol.
+    """The server answered with errors and no usable data.
 
-    ``GraphQLExecutionError(message)`` works as it did in the published
-    alpha. The library always passes ``response=``, the response that failed:
-    the message is then ``summary`` and the response's ``repr``, which shows
-    the status, counts and the redacted request, never a server value. When
-    that ``repr`` refuses to render, the error is still raised with the
-    withheld notice in its place, because a refusal must not replace the
-    error the caller is waiting for. ``response`` is ``None`` and ``errors``
-    is empty only for an instance a caller built without one.
+    `query()` and `mutation()` raise this when the response has an `errors`
+    list and no data, for example when a required field fails, so that `data`
+    is `null`. It is also raised for a server that breaks the protocol, by
+    sending neither errors nor data.
+
+    The message holds the response's `repr()`: the status, the number of errors
+    and the redacted request. It never holds a server value, so a secret that a
+    server echoes back does not enter your test report. Read the errors from
+    `errors`.
+
+    Set `raise_on_error=False` on the client or on a call, and use `raw=True`,
+    to get the response back instead of this error.
+
+    Args:
+        summary: The first line of the message.
+        response: The response that failed. The library always passes it.
+            Without it, `response` is `None` and `errors` is empty.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import GraphQLExecutionError
+
+        try:
+            gql.mutation("updateUser", id="missing", name="Ada", fields=["id"])
+        except GraphQLExecutionError as error:
+            assert error.response.data_state == "null"
+            assert error.errors[0].path == ("updateUser",)
+        else:
+            raise AssertionError("expected an error")
+        ```
     """
 
     def __init__(
         self, summary: str, *, response: GraphQLResponse[Any] | None = None
     ) -> None:
         self.response = response
+        """The response that failed, or `None` when the error was built without one.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import GraphQLExecutionError
+
+            try:
+                gql.mutation("updateUser", id="missing", fields=["id"])
+            except GraphQLExecutionError as error:
+                assert error.response.data_state == "null"
+                assert error.response.errors == error.errors
+            else:
+                raise AssertionError("expected an error")
+            ```
+        """
         if response is None:
             super().__init__(summary)
             return
@@ -573,20 +709,105 @@ class GraphQLExecutionError(GraphQLTestError):
 
     @property
     def errors(self) -> tuple[GraphQLErrorInfo, ...]:
+        """The errors the server returned, from `response`.
+
+        Each entry has `message`, `path`, `locations`, `extensions` and `code`.
+        The tuple is empty when the error has no response.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import GraphQLExecutionError
+
+            try:
+                gql.mutation("updateUser", id="missing", name="Ada", fields=["id"])
+            except GraphQLExecutionError as error:
+                assert len(error.errors) == 1
+                assert error.errors[0] is error.response.errors[0]
+            ```
+        """
         return () if self.response is None else self.response.errors
 
 
 class GraphQLPartialDataError(GraphQLExecutionError):
-    """Errors and data both present, with ``raise_on_partial`` on."""
+    """The server returned data and errors together.
+
+    GraphQL allows a field to fail while the rest of the operation succeeds. The
+    response then has both `data` and `errors`. By default the client raises this
+    error for it, so that an error is never ignored by accident. It is a
+    `GraphQLExecutionError`, so one `except` clause covers both.
+
+    The data is still available in `response.data`. To accept partial data,
+    set `raise_on_partial=False` on the client or on a call. To accept every
+    error, set `raise_on_error=False`.
+
+    Examples:
+        ```python {.exec}
+        from dataclasses import replace
+
+        from pytest_graphql import GraphQLPartialDataError, build_client
+
+
+        class FailsOneField:
+            # Adds an error to every response of another transport.
+
+            def __init__(self, inner):
+                self.inner = inner
+
+            def send(self, request, *, timeout):
+                raw = self.inner.send(request, timeout=timeout)
+                error = {"message": "no access", "path": ["user", "balance"]}
+                return replace(raw, errors=(error,))
+
+            def close(self):
+                pass
+
+
+        client = build_client(
+            url="http://localhost:8000/graphql",
+            transport=FailsOneField(gql.transport),
+            schema=gql.schema,
+        )
+        try:
+            client.query("user", id="u1", fields=["id", "balance"])
+        except GraphQLPartialDataError as error:
+            assert error.response.has_data
+            assert error.response.data.user.id == "u1"
+        else:
+            raise AssertionError("expected an error")
+        ```
+    """
 
 
 class GraphQLFieldError(GraphQLTestError, AttributeError, KeyError):
-    """A response field was accessed that does not exist, or is ambiguous.
+    """You read a field that the response does not have, or a name that is unclear.
 
-    It is also an ``AttributeError`` and a ``KeyError`` so that ``hasattr``,
-    ``getattr(node, name, default)`` and ``Mapping.get`` keep their ordinary
-    meaning on a ``Node``. ``KeyError`` would otherwise render the message
-    through ``repr``, so ``__str__`` is the plain ``Exception`` one.
+    A `Node` raises this when you read a field that is not in the response. The
+    message lists the fields that are there, suggests the closest name, and
+    reminds you that the field may be in the schema but missing from your
+    selection. It is also raised for a snake_case name that matches two
+    different fields. Use the exact field name then.
+
+    It is both an `AttributeError` and a `KeyError`. That keeps `hasattr()`,
+    `getattr(node, "x", default)` and `node.get("x")` working in the usual
+    way.
+
+    Args:
+        message: The error text.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import GraphQLFieldError
+
+        user = gql.query("user", id="u1", fields=["id"])
+        try:
+            user.name
+        except GraphQLFieldError as error:
+            assert isinstance(error, AttributeError)
+            assert isinstance(error, KeyError)
+        else:
+            raise AssertionError("expected an error")
+        assert hasattr(user, "name") is False
+        ```
     """
 
     __str__ = Exception.__str__
@@ -598,6 +819,28 @@ class GraphQLFieldError(GraphQLTestError, AttributeError, KeyError):
     def unknown_field(
         cls, type_name: str, bad_name: str, available: Sequence[str]
     ) -> GraphQLFieldError:
+        """Build the error for a field that is not in the response.
+
+        The library calls this when you read a missing field. You rarely need
+        it yourself.
+
+        Args:
+            type_name: The name of the type that was read.
+            bad_name: The name that was read.
+            available: The field names the response has. The message lists them and
+                suggests the closest one.
+
+        Returns:
+            The error, ready to raise.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import GraphQLFieldError
+
+            error = GraphQLFieldError.unknown_field("User", "nme", ["id", "name"])
+            assert "Did you mean 'name'?" in str(error)
+            ```
+        """
         lines = [f"no field {bad_name!r} on {type_name}."]
         lines.append(f"  Available in this response: {', '.join(available)}")
         match = _best_match(bad_name, available)
@@ -612,7 +855,28 @@ class GraphQLFieldError(GraphQLTestError, AttributeError, KeyError):
     def ambiguous(
         cls, type_name: str, snake_key: str, exact_names: Sequence[str]
     ) -> GraphQLFieldError:
-        """``exact_names`` names every colliding spelling, two or more."""
+        """Build the error for a snake_case name that matches two fields.
+
+        The library calls this when you read such a name. You rarely need it
+        yourself.
+
+        Args:
+            type_name: The name of the type that was read.
+            snake_key: The snake_case name that was read.
+            exact_names: Every exact field name that has this snake_case form. Give
+                two or more.
+
+        Returns:
+            The error, ready to raise.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import GraphQLFieldError
+
+            error = GraphQLFieldError.ambiguous("User", "user_id", ["userId", "UserId"])
+            assert "ambiguous" in str(error)
+            ```
+        """
         return cls(
             f"{snake_key!r} is ambiguous on {type_name}: it matches "
             f"{_and_join(exact_names)}.\n"
@@ -621,15 +885,68 @@ class GraphQLFieldError(GraphQLTestError, AttributeError, KeyError):
 
 
 class ResponseShapeError(GraphQLTestError):
-    """A response value contradicts the type its selection declares (C5).
+    """The server sent a value that does not fit the type in the schema.
 
-    The message names the response path and the schema types only. It never
-    echoes a server-supplied value, so it carries nothing the redaction
-    boundary would have to scrub.
+    The client checks every response against the schema. This error means that
+    a value has the wrong shape, for example a number where the schema says
+    `String`, a list where it says an object, or a `__typename` that is not a
+    possible type. The server is broken or the schema is out of date.
+
+    The message names the place in the response and the types. It never repeats
+    the server's value.
+
+    Args:
+        message: The error text.
+        path: Where in the response the value is: field names, with a list index
+            as an integer.
+
+    Examples:
+        ```python {.exec}
+        from dataclasses import replace
+
+        from pytest_graphql import ResponseShapeError, build_client
+
+
+        class NumberForName:
+            # Returns a number where the schema promises a string.
+
+            def __init__(self, inner):
+                self.inner = inner
+
+            def send(self, request, *, timeout):
+                raw = self.inner.send(request, timeout=timeout)
+                return replace(raw, data={"user": {"id": "u1", "name": 123}})
+
+            def close(self):
+                pass
+
+
+        client = build_client(
+            url="http://localhost:8000/graphql",
+            transport=NumberForName(gql.transport),
+            schema=gql.schema,
+        )
+        try:
+            client.query("user", id="u1", fields=["id", "name"])
+        except ResponseShapeError as error:
+            assert error.path == ("user", "name")
+        else:
+            raise AssertionError("expected an error")
+        ```
     """
 
     def __init__(self, message: str, *, path: tuple[str | int, ...]) -> None:
         self.path = path
+        """Where in the response the bad value is, as names and list indexes.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import ResponseShapeError
+
+            error = ResponseShapeError("bad value", path=("user", "friends", 0, "name"))
+            assert error.path == ("user", "friends", 0, "name")
+            ```
+        """
         super().__init__(message)
 
 
@@ -679,15 +996,44 @@ def _check_against(
 
 
 class ExpectedErrorNotRaised(GraphQLTestError):  # noqa: N818 -- name fixed by SPEC 8.1
-    """An ``expect_error`` block did not end in the error it expected.
+    """An `expect_error` block did not end in the error that it expected.
 
-    Two cases share this class. The block returned without a
-    ``GraphQLExecutionError`` (``errors`` and ``unmatched`` are empty), or it
-    raised one and a filter matched none of its errors (``unmatched`` names
-    the filters and ``errors`` is everything the server returned). ``response``
-    is the last response the block received, or the failed one, and is
-    ``None`` when the block made no GraphQL call. ``calls`` counts the
-    responses the block received.
+    `GraphQLClient.expect_error()` checks that the code in its `with` block
+    fails with a GraphQL error. This error says that the check failed, in one of
+    two ways:
+
+    - The block ended without a `GraphQLExecutionError`. `errors` and
+      `unmatched` are empty. A client that does not raise, because of
+      `raise_on_error=False` or `raise_on_partial=False`, never satisfies the
+      block.
+    - The block raised one, but a filter matched none of its errors. `unmatched`
+      names the filters that failed, and `errors` holds every error the server
+      returned.
+
+    The message lists the errors that the server returned, up to the limit set by
+    `max_recorded_errors`, and says how many it left out.
+
+    Args:
+        message: The error text.
+        response: The last response that the block received, or the failed one.
+            `None` when the block made no GraphQL call.
+        errors: Every error the server returned. Empty when no error was raised.
+        unmatched: The names of the filters that matched no error.
+        calls: How many responses the block received.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ExpectedErrorNotRaised
+
+        try:
+            with gql.expect_error(code="FORBIDDEN"):
+                gql.query("user", id="u1")
+        except ExpectedErrorNotRaised as error:
+            assert error.calls == 1
+            assert error.errors == ()
+        else:
+            raise AssertionError("expected an error")
+        ```
     """
 
     def __init__(
@@ -700,9 +1046,70 @@ class ExpectedErrorNotRaised(GraphQLTestError):  # noqa: N818 -- name fixed by S
         calls: int = 0,
     ) -> None:
         self.response = response
+        """The last response the block received, or `None` when it made no call.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import ExpectedErrorNotRaised
+
+            try:
+                with gql.expect_error(code="FORBIDDEN"):
+                    gql.mutation("updateUser", id="missing", fields=["id"])
+            except ExpectedErrorNotRaised as error:
+                assert error.response.data_state == "null"
+            else:
+                raise AssertionError("expected an error")
+            ```
+        """
         self.errors = tuple(errors)
+        """Every error the server returned. Empty when the block did not fail.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import ExpectedErrorNotRaised
+
+            try:
+                with gql.expect_error(code="FORBIDDEN"):
+                    gql.mutation("updateUser", id="missing", fields=["id"])
+            except ExpectedErrorNotRaised as error:
+                assert len(error.errors) == 1
+                assert error.errors[0].path == ("updateUser",)
+            else:
+                raise AssertionError("expected an error")
+            ```
+        """
         self.unmatched = tuple(unmatched)
+        """The names of the filters that matched no error, such as `"code"`.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import ExpectedErrorNotRaised
+
+            try:
+                with gql.expect_error(code="FORBIDDEN"):
+                    gql.mutation("updateUser", id="missing", fields=["id"])
+            except ExpectedErrorNotRaised as error:
+                assert error.unmatched == ("code",)
+            else:
+                raise AssertionError("expected an error")
+            ```
+        """
         self.calls = calls
+        """How many responses the block received.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import ExpectedErrorNotRaised
+
+            try:
+                with gql.expect_error(code="FORBIDDEN"):
+                    gql.mutation("updateUser", id="missing", fields=["id"])
+            except ExpectedErrorNotRaised as error:
+                assert error.calls == 1
+            else:
+                raise AssertionError("expected an error")
+            ```
+        """
         super().__init__(message)
         if response is not None:
             response.request._guard.check_exception(self)
@@ -711,7 +1118,26 @@ class ExpectedErrorNotRaised(GraphQLTestError):  # noqa: N818 -- name fixed by S
     def no_error(
         cls, *, response: GraphQLResponse[Any] | None, calls: int
     ) -> ExpectedErrorNotRaised:
-        """The block ended without a ``GraphQLExecutionError``."""
+        """Build the error for a block that ended without an execution error.
+
+        The library calls this from `expect_error()`. You rarely need it yourself.
+
+        Args:
+            response: The last response the block received, or `None`.
+            calls: How many responses the block received.
+
+        Returns:
+            The error, ready to raise.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import ExpectedErrorNotRaised
+
+            error = ExpectedErrorNotRaised.no_error(response=None, calls=0)
+            assert error.calls == 0
+            assert "The block made no GraphQL call." in str(error)
+            ```
+        """
         lines = [
             "expect_error: the block did not raise GraphQLExecutionError.",
             "  Expected: a response with errors that the client raises.",
@@ -744,12 +1170,37 @@ class ExpectedErrorNotRaised(GraphQLTestError):  # noqa: N818 -- name fixed by S
         filters: Sequence[tuple[str, str]],
         calls: int,
     ) -> ExpectedErrorNotRaised:
-        """A raised error that no filter set matched.
+        """Build the error for a raised error that a filter did not match.
 
-        ``filters`` is each unmatched filter as its name and the text of the
-        value the author wrote. That text is the author's, not the server's,
-        yet the author can have written a credential into it, so it is
-        checked like every other line.
+        The library calls this from `expect_error()`. You rarely need it yourself.
+
+        Args:
+            response: The response that carried the errors.
+            filters: Each filter that failed, as its name and the text of the value
+                you wrote. The text is checked against the request's secrets, like
+                every other line of the message.
+            calls: How many responses the block received.
+
+        Returns:
+            The error, ready to raise.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import ExpectedErrorNotRaised
+
+            response = gql.mutation(
+                "updateUser",
+                id="missing",
+                fields=["id"],
+                raise_on_error=False,
+                raw=True,
+            )
+            error = ExpectedErrorNotRaised.unmatched_filters(
+                response=response, filters=[("code", "'FORBIDDEN'")], calls=1
+            )
+            assert error.unmatched == ("code",)
+            assert len(error.errors) == 1
+            ```
         """
         from pytest_graphql._core.diagnostics import WITHHELD_TEXT
 
@@ -794,20 +1245,49 @@ class ExpectedErrorNotRaised(GraphQLTestError):  # noqa: N818 -- name fixed by S
 
 
 class WaitTimeoutError(GraphQLTestError):
-    """A ``wait_until`` poll reached its deadline without ``until`` turning true.
+    """A `wait_until` poll reached its deadline before `until` held.
 
-    ``attempts`` counts every call that was made, ``elapsed`` is monotonic
-    seconds from the first attempt, and ``timeout`` is the limit the poll was
-    given. ``last_response`` is the most recent response an attempt received,
-    including the response a swallowed execution error carried, and
-    ``last_exception`` is the most recent exception ``ignore`` swallowed. They
-    are the only per-attempt state a poll keeps, with ``last_exception_request``:
-    the redacted request of the attempt that raised ``last_exception``, or
-    ``None`` when that attempt failed before a request existed.
+    `GraphQLClient.wait_until()` repeats a query until a condition holds. This
+    error says that time ran out. Its attributes tell you what the last attempts
+    saw: how many calls were made, how long the poll ran, the last response, and
+    the last exception that `ignore` swallowed.
 
-    The message shows the text of ``last_exception`` only when a request
-    context of its own attempt is known to check it against. Without one the
-    text is withheld, and the exception stays on ``last_exception``.
+    The message shows the text of the last swallowed exception only when it can
+    check that text against the request of the attempt that raised it. Without
+    that request, the text is withheld to protect secrets. The exception is
+    still available as `last_exception`.
+
+    Args:
+        operation: The name of the query that was polled.
+        attempts: How many calls were made.
+        elapsed: The seconds from the first attempt until the poll stopped.
+        timeout: The limit that the poll was given, in seconds.
+        last_response: The most recent response that any attempt received, or
+            `None` when no attempt got one.
+        last_exception: The most recent exception that `ignore` swallowed, or
+            `None`.
+        last_exception_request: The redacted request of the attempt that raised
+            `last_exception`, or `None` when it failed before a request existed.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import WaitTimeoutError
+
+        try:
+            gql.wait_until(
+                "user",
+                id="u1",
+                until=lambda user: user.name == "Grace Hopper",
+                timeout=0.05,
+                interval=0.01,
+            )
+        except WaitTimeoutError as error:
+            assert error.operation == "user"
+            assert error.attempts >= 1
+            assert error.last_response.data.user.name == "Ada Lovelace"
+        else:
+            raise AssertionError("expected an error")
+        ```
     """
 
     def __init__(
@@ -822,12 +1302,135 @@ class WaitTimeoutError(GraphQLTestError):
         last_exception_request: DiagnosticSnapshot | None = None,
     ) -> None:
         self.operation = operation
+        """The name of the query that was polled.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import WaitTimeoutError
+
+            error = WaitTimeoutError(
+                operation="user",
+                attempts=3,
+                elapsed=0.52,
+                timeout=0.5,
+                last_response=gql.execute("{ __typename }"),
+                last_exception=None,
+            )
+            assert error.operation == "user"
+            ```
+        """
         self.attempts = attempts
+        """How many calls were made. At least one call always runs.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import WaitTimeoutError
+
+            error = WaitTimeoutError(
+                operation="user",
+                attempts=3,
+                elapsed=0.52,
+                timeout=0.5,
+                last_response=gql.execute("{ __typename }"),
+                last_exception=None,
+            )
+            assert error.attempts == 3
+            ```
+        """
         self.elapsed = elapsed
+        """The seconds from the first attempt until the poll stopped.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import WaitTimeoutError
+
+            error = WaitTimeoutError(
+                operation="user",
+                attempts=3,
+                elapsed=0.52,
+                timeout=0.5,
+                last_response=gql.execute("{ __typename }"),
+                last_exception=None,
+            )
+            assert error.elapsed == 0.52
+            ```
+        """
         self.timeout = timeout
+        """The limit the poll was given, in seconds.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import WaitTimeoutError
+
+            error = WaitTimeoutError(
+                operation="user",
+                attempts=3,
+                elapsed=0.52,
+                timeout=0.5,
+                last_response=gql.execute("{ __typename }"),
+                last_exception=None,
+            )
+            assert error.timeout == 0.5
+            ```
+        """
         self.last_response = last_response
+        """The most recent response any attempt received, or `None`.
+
+        It includes the response that a swallowed execution error carried.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import WaitTimeoutError
+
+            error = WaitTimeoutError(
+                operation="user",
+                attempts=3,
+                elapsed=0.52,
+                timeout=0.5,
+                last_response=gql.execute("{ __typename }"),
+                last_exception=None,
+            )
+            assert error.last_response.has_data
+            ```
+        """
         self.last_exception = last_exception
+        """The most recent exception that `ignore` swallowed, or `None`.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import WaitTimeoutError
+
+            error = WaitTimeoutError(
+                operation="user",
+                attempts=3,
+                elapsed=0.52,
+                timeout=0.5,
+                last_response=gql.execute("{ __typename }"),
+                last_exception=None,
+            )
+            assert error.last_exception is None
+            ```
+        """
         self.last_exception_request = last_exception_request
+        """The redacted request of the attempt that raised `last_exception`.
+
+        It is `None` when that attempt failed before a request existed.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import WaitTimeoutError
+
+            error = WaitTimeoutError(
+                operation="user",
+                attempts=3,
+                elapsed=0.52,
+                timeout=0.5,
+                last_response=gql.execute("{ __typename }"),
+                last_exception=None,
+            )
+            assert error.last_exception_request is None
+            ```
+        """
         snapshots = self._snapshots()
         super().__init__(self._render(snapshots))
         _check_against(self, snapshots)
@@ -859,14 +1462,33 @@ class WaitTimeoutError(GraphQLTestError):
         return tuple(found)
 
     def safe_cause(self) -> Exception | None:
-        """``last_exception`` when a traceback may print it, else ``None``.
+        """Return `last_exception` when it is safe to chain as the cause.
 
-        Only a ``GraphQLTestError`` is a candidate, so a foreign exception is
-        named once, in the message, and not printed a second time as a cause.
-        A candidate qualifies when its attempt's request context is known and
-        neither it nor anything linked to it shows a secret of any request this
-        error knows. The class alone does not decide: a caller can build a
-        ``GraphQLTestError`` by hand, and no request ever checked it.
+        Chaining prints the exception, and its notes and causes, in the
+        traceback. So the library chains it only when it is one of this
+        package's own errors, its attempt's request is known, and nothing linked
+        to it shows a secret of any request that this error knows. A foreign
+        exception is named once, in the message, and is never chained.
+
+        Returns:
+            The exception, or `None` when it is not safe to chain.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import WaitTimeoutError
+
+            try:
+                gql.wait_until(
+                    "user",
+                    id="u1",
+                    until=lambda user: False,
+                    timeout=0.02,
+                    interval=0.01,
+                )
+            except WaitTimeoutError as error:
+                assert error.last_exception is None
+                assert error.safe_cause() is None
+            ```
         """
         from pytest_graphql._core.diagnostics import exception_chain_is_clean
 

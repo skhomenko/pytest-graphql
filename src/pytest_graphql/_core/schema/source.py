@@ -33,13 +33,93 @@ from pytest_graphql._core.errors import SchemaError
 
 
 class SchemaSource(Protocol):
-    """Loads a ``GraphQLSchema``, on demand, from wherever it lives."""
+    """Tells the client where to read the schema from.
 
-    def load(self) -> GraphQLSchema: ...
+    By default the client reads the schema by asking the server, with the
+    standard introspection query. Give `build_client()` a `schema_source` when
+    the schema lives somewhere else, for example in a `.graphql` file in your
+    repository, or when the server has introspection turned off.
+
+    Any object with a `load` method and a `fingerprint` property of this shape
+    is a `SchemaSource`. The schema is a `graphql.GraphQLSchema` from
+    `graphql-core`.
+
+    Examples:
+        A source that builds the schema from SDL text:
+
+        ```python {.exec}
+        from graphql import GraphQLSchema, build_schema
+
+        from pytest_graphql import build_client
+
+
+        class InlineSource:
+            def __init__(self, sdl: str) -> None:
+                self.sdl = sdl
+
+            def load(self) -> GraphQLSchema:
+                return build_schema(self.sdl)
+
+            @property
+            def fingerprint(self) -> str:
+                return "inline"
+
+
+        client = build_client(
+            url="http://localhost:8000/graphql",
+            schema_source=InlineSource("type Query { ping: Boolean! }"),
+        )
+        assert "ping" in client.schema.query_type.fields
+        client.close()
+        ```
+    """
+
+    def load(self) -> GraphQLSchema:
+        """Read the schema and return it.
+
+        Returns:
+            The schema.
+
+        Raises:
+            Exception: When the schema cannot be read or is not valid. The
+                exception reaches the caller.
+
+        Examples:
+            ```python {.exec}
+            from graphql import build_schema
+
+            class OneField:
+                fingerprint = "one-field"
+
+                def load(self):
+                    return build_schema("type Query { ping: Boolean! }")
+
+            schema = OneField().load()
+            assert schema.query_type.name == "Query"
+            ```
+        """
+        ...
 
     @property
     def fingerprint(self) -> str:
-        """A stable label for this source, for cache keys and failure reports."""
+        """A stable label for this source.
+
+        Use text that does not change between runs for the same schema, such as
+        a file path. It names the source in cache keys and in failure reports.
+
+        Examples:
+            ```python {.exec}
+            class FileSource:
+                def __init__(self, path):
+                    self.path = path
+
+                @property
+                def fingerprint(self):
+                    return f"sdl:{self.path}"
+
+            assert FileSource("schema.graphql").fingerprint == "sdl:schema.graphql"
+            ```
+        """
         ...
 
 

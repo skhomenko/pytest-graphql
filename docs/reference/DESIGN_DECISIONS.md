@@ -2266,8 +2266,8 @@ page under `docs/` except `docs/reference/`) and in `README.md`.
 Material's `pymdownx.superfences` reads them. An indented code block or raw HTML is not
 extracted, so a page does not use either for Python. `pymdownx.snippets` is not enabled,
 because it would pull code into a page that the check never sees. Docstrings reach the site
-through `mkdocstrings` and not through `docs/`, so a docstring example is not run by this
-check.
+through `mkdocstrings` and not through `docs/`, so this check does not see their examples. The
+block rules below apply to them too, and "Docstring examples" states how they are run.
 
 **Marker syntax.** A Python block carries one marker, written as an attribute list after the
 language: `python {.exec}` or `python {.no-exec}`. Material renders the marker as a CSS class
@@ -2344,12 +2344,40 @@ and also the name of the private module that defines it, and static analysis res
 `pytest_graphql.unique` to the module, so the page renders it from its defining path with
 the path hidden from the heading. The site test lists that exception.
 
-The API page also republishes the source docstrings, and the existing ones cite SPEC
-sections, B and C numbers, milestone names and `docs/reference/DESIGN_DECISIONS.md`. A reader
-cannot open those. The docstrings must be rewritten for readers before the first deployment.
-Until then the page check for contributor references is a strict expected failure for the API
-page only. It starts to fail when the docstrings are clean, and that is when the marker is
-removed.
+The API page republishes the source docstrings, so they are written for readers. The contributor
+reference check of the built site covers the API page like every other page: a docstring that
+cites a SPEC section, a B or C number, a milestone, a path under `docs/reference/` or an
+unrendered Sphinx role fails it. Private modules and private names keep their contributor
+references, because the page does not show them.
+
+**Docstring examples.** `tests/docs/test_docstring_examples.py` checks what the API page renders.
+
+- *Style.* Docstrings are Google style, with `Args`, `Returns`, `Raises` and `Examples`
+  sections, and `docstring_style: google` in `mkdocs.yml` renders them. A data field is
+  documented by the string under it. A constructor is documented in its class docstring, and
+  `merge_init_into_class` shows it with the class. The page leaves out `__slots__`, `__repr__`,
+  `__str__`, `__eq__`, `__hash__` and `__post_init__`, which say nothing a reader can use.
+- *Selection.* The objects are the ones the page renders. The test reads the `filters` and
+  `merge_init_into_class` options from `mkdocs.yml` and the `:::` lines of `docs/api.md`, and
+  applies the filters as `mkdocstrings` does, so a change to the page changes the selection and no
+  list is kept in the test. Griffe reads the source statically, as the build does.
+- *Blocks.* A Python block in a docstring carries `{.exec}` or `{.no-exec}`, as in a page. The
+  `exec` blocks run through the same `check` as the pages, with the same `gql` over the test
+  schema. A failure names the symbol, the file and the source line of the fence, and a traceback
+  inside an example names a source line. `check` returns `"ran"` or `"compiled"`, and the test
+  asserts it, so an `exec` block that was only compiled fails. A `no-exec` block is for code that
+  needs a server, and it is compiled and never run.
+- *The rule.* SPEC section 13 asks every public symbol for a docstring with an example. The
+  public API symbols are the names in `pytest_graphql.__all__`, the package docstring, and every
+  method, property and class that the page shows under them. Each needs a docstring and at least
+  one `exec` block, because a block that is only compiled does not prove the example works. A
+  plain data field, such as a dataclass field, needs a docstring and not an example. The rule
+  does not apply to every object Griffe can load, so an implementation detail that the page does
+  not render is not held to it. Every rendered object also needs a docstring, because
+  `show_if_no_docstring` would show the gap.
+
+`tests/docs/test_runner.py` holds the proof that `check` reports `"ran"`, `"compiled"` and
+`"not-python"` correctly. These tests need the `docs` extra, like the site tests.
 
 ### What an exit criterion may claim
 

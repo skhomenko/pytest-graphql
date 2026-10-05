@@ -66,6 +66,34 @@ class _Auto:
 
 #: Generate the selection for this position from the schema and the policy.
 AUTO: Final[_Auto] = _Auto()
+"""Ask the client to choose the fields for this position.
+
+`AUTO` is the default for `fields=` on `query()` and `mutation()`, so you
+rarely write it. Use it to mix fields you wrote with fields that the client
+chooses: `AUTO` can be the whole `fields=` value, or the sub-selection of one
+field, as in `Field("team", fields=AUTO)` or `{"team": AUTO}`. It cannot be one
+item in a list.
+
+The client generates the selection from the schema and the selection settings of
+`ClientConfig`. For example, `max_depth` bounds how deep the generated part
+goes. Those limits apply to the generated part only, and never to fields you
+wrote yourself.
+
+Examples:
+    ```python {.exec}
+    from pytest_graphql import AUTO
+
+    # The id and name of the user, and the fields the client chooses for the team.
+    response = gql.query(
+        "user",
+        id="u1",
+        fields=["id", "name", {"team": AUTO}],
+        raw=True,
+    )
+    assert "team {" in response.request.document
+    assert response.data.user.team.name == "Core"
+    ```
+"""
 
 SelectionItem = Union[
     str,
@@ -88,25 +116,136 @@ SelectionInput = Union[
 
 @dataclass(frozen=True)
 class Field:
-    """One field in a selection, with arguments, an alias or a type condition.
+    """One field in a selection, when a plain name is not enough.
 
-    ``args`` holds Python values. They are never written into document text:
-    each one is hoisted into a generated variable during normalization, which
-    is what keeps a user value out of the document (C7).
+    Write a plain string for a field with no arguments. Use `Field` when the
+    field takes arguments, needs an alias, or applies only to one type of an
+    interface or union.
 
-    ``fields`` distinguishes two things that look alike. ``None`` means the
-    user listed no sub-selection, which is an error for a field that needs
-    one, because an explicit selection adds nothing on its own (B12).
-    ``AUTO`` asks for the generated selection of that field's type.
+    Argument values are Python values. They are never written into the query
+    text. Each one is sent as a variable, so a value cannot change the shape of
+    the query.
+
+    Args:
+        name: The field name in the schema. The snake_case form of a
+            camelCase name is accepted too.
+        args: Argument values for the field, by argument name.
+        alias: A name for the field in the response. Use it to ask for the same
+            field twice with different arguments. It must be a valid GraphQL
+            name.
+        fields: What to select inside the field. A list of names, nested
+            fields, `AUTO` or a `Selection`. Leave it out for a field with no
+            sub-fields. A field that has sub-fields and no `fields` is an error,
+            because a selection you write adds nothing on its own.
+        on: The name of an object type. The field is then selected only for
+            values of that type, as in `... on User { name }`.
+        directives: Not supported in this version. A non-empty value raises an
+            error. To send a query with directives, use `GraphQLClient.execute()`.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import Field
+
+        response = gql.query(
+            "user",
+            id="u1",
+            fields=[
+                "name",
+                Field("posts", args={"first": 5}, alias="recent", fields=["title"]),
+            ],
+            raw=True,
+        )
+        assert "recent: posts(first: $posts_first)" in response.request.document
+        assert response.data.user.recent[0].title == "Hello World"
+        ```
     """
 
     name: str
+    """The field name, as written in the schema or in snake_case.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import Field
+
+        field = Field(
+            "posts", args={"first": 5}, alias="recent", fields=["title"], on="User"
+        )
+        assert field.name == "posts"
+        ```
+    """
     _: KW_ONLY
     args: Mapping[str, Any] | None = None
+    """Argument values by argument name, or `None` for no arguments.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import Field
+
+        field = Field(
+            "posts", args={"first": 5}, alias="recent", fields=["title"], on="User"
+        )
+        assert field.args == {"first": 5}
+        assert Field("name").args is None
+        ```
+    """
     alias: str | None = None
+    """The name this field has in the response, or `None` to use `name`.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import Field
+
+        field = Field(
+            "posts", args={"first": 5}, alias="recent", fields=["title"], on="User"
+        )
+        assert field.alias == "recent"
+        assert Field("name").alias is None
+        ```
+    """
     fields: SelectionInput | None = None
+    """What to select inside this field, or `None` when nothing is selected.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import Field
+
+        field = Field(
+            "posts", args={"first": 5}, alias="recent", fields=["title"], on="User"
+        )
+        assert field.fields == ["title"]
+        assert Field("name").fields is None
+        ```
+    """
     on: str | None = None
+    """An object type that this field is limited to, or `None` for no limit.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import Field
+
+        field = Field(
+            "posts", args={"first": 5}, alias="recent", fields=["title"], on="User"
+        )
+        assert field.on == "User"
+        assert Field("name").on is None
+        ```
+    """
     directives: Mapping[str, Mapping[str, Any]] | None = field(default=None)
+    """Not supported yet. Setting a value raises an error.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import Field
+
+        assert Field("name").directives is None
+        try:
+            Field("name", directives={"include": {"if": True}})
+        except Exception as error:
+            assert "not supported" in str(error)
+        else:
+            raise AssertionError("expected an error")
+        ```
+    """
 
     def __post_init__(self) -> None:
         if self.directives:
@@ -123,7 +262,16 @@ class Field:
 
     @property
     def response_key(self) -> str:
-        """The key this field occupies in its selection set and in the data."""
+        """The key this field has in the response data: the alias, or else the name.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import Field
+
+            assert Field("posts", alias="recent").response_key == "recent"
+            assert Field("posts").response_key == "posts"
+            ```
+        """
         return self.alias or self.name
 
 
@@ -136,10 +284,31 @@ class InlineFragment:
 
 
 class Selection:
-    """A reusable, named bundle of any selection input form.
+    """A reusable group of fields that you define once and use in many calls.
 
-    Defining a selection once is the intended answer to schema churn, so a
-    ``Selection`` is immutable and every operator returns a new one.
+    The parts can be any of the forms that `fields=` accepts, except `AUTO` on its
+    own: a field name, a nested mapping, a `Field`, a raw GraphQL string or
+    another `Selection`. `AUTO` can still be the sub-selection of a part, as in
+    `Field("team", fields=AUTO)`. When a field changes in your schema, you edit
+    the one `Selection` instead of every test that reads it.
+
+    A `Selection` never changes. Combine them with `+`, and remove a field with
+    `-`. Each operator returns a new `Selection`.
+
+    Args:
+        *parts: The items to select.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import Field, Selection
+
+        USER_BRIEF = Selection("id", "name")
+        USER_WITH_TEAM = USER_BRIEF + Selection({"team": ["name"]})
+
+        user = gql.query("user", id="u2", fields=USER_WITH_TEAM)
+        assert user.name == "Grace Hopper"
+        assert user.team.name == "Core"
+        ```
     """
 
     __slots__ = ("_parts", "_removals")
@@ -150,12 +319,35 @@ class Selection:
 
     @classmethod
     def of(cls, type_name: str, *parts: SelectionItem) -> Selection:
-        """A selection that applies only to ``type_name``.
+        """Make a selection that applies only to values of one type.
 
-        The name is resolved against the schema when the document is built:
-        an unknown name, or one that is not a possible type of the parent,
-        raises there. With no parts the fragment takes the generated
-        selection for that type, because an inline fragment cannot be empty.
+        Use it on a field that returns an interface or a union, to choose
+        fields that exist on one implementation only. It becomes an inline
+        fragment, `... on TypeName { ... }`. The type name is checked against
+        the schema when the query is built. An unknown name, or a type that the
+        field cannot return, raises an error with a suggestion.
+
+        Args:
+            type_name: The name of the object type.
+            *parts: The fields to select for that type. With none, the client
+                chooses the fields of the type, as `AUTO` does.
+
+        Returns:
+            A new selection.
+
+        Raises:
+            SchemaError: When `type_name` is not a type of the schema, or is
+                not a possible type of the field. This error is raised when the
+                query is built, not when this method is called.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import Selection
+
+            fields = ["id", Selection.of("User", "name")]
+            node = gql.query("node", id="u1", fields=fields)
+            assert node.name == "Ada Lovelace"
+            ```
         """
         inner: SelectionInput = Selection(*parts) if parts else AUTO
         return cls(InlineFragment(on=type_name, fields=inner))
@@ -170,25 +362,81 @@ class Selection:
 
     @property
     def parts(self) -> tuple[SelectionItem, ...]:
+        """The items this selection was built from, as they were given.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import Selection
+
+            assert Selection("id", "name").parts == ("id", "name")
+            ```
+        """
         return self._parts
 
     @property
     def removals(self) -> tuple[str, ...]:
+        """The response keys or paths that `-` removed from this selection.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import Selection
+
+            assert (Selection("id", "name") - "id").removals == ("id",)
+            assert Selection("id", "name").removals == ()
+            ```
+        """
         return self._removals
 
     def __add__(self, other: Selection) -> Selection:
-        """Union two selections. Nesting keeps each operand's removals its own."""
+        """Join two selections into one that has the fields of both.
+
+        Two fields that share a response key must be the same request. If they
+        have different arguments or aliases, building the query raises an error.
+        A removal made with `-` on one side stays on that side.
+
+        Args:
+            other: The selection to add.
+
+        Returns:
+            A new selection.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import Selection
+
+            both = Selection("id") + Selection("name")
+            assert gql.query("user", id="u1", fields=both).name == "Ada Lovelace"
+            ```
+        """
         if not isinstance(other, Selection):
             return NotImplemented
         return Selection(self, other)
 
     def __sub__(self, other: str) -> Selection:
-        """Remove a response key, or a dotted path, from this selection.
+        """Remove a field from this selection.
 
-        The removal is recorded against this whole selection, so the operand
-        is nested rather than rewritten. Removing something that is not there
-        raises when the document is built, so a renamed field cannot silently
-        stop being removed.
+        Name a response key, such as `"id"`, or a dotted path to a nested field,
+        such as `"team.id"`. The removal applies to everything in this
+        selection. Removing a field that is not there raises an error when the
+        query is built, so a renamed field cannot silently stop being removed.
+
+        Args:
+            other: The response key or dotted path to remove.
+
+        Returns:
+            A new selection without that field.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import Selection
+
+            brief = Selection("id", "name", {"team": ["id", "name"]})
+            without_ids = brief - "id" - "team.id"
+            user = gql.query("user", id="u1", fields=without_ids)
+            assert "id" not in user
+            assert "id" not in user.team
+            assert user.team.name == "Core"
+            ```
         """
         if not isinstance(other, str):
             return NotImplemented

@@ -15,7 +15,7 @@ import pytest
 from pytest_graphql import GraphQLClient, build_client
 from tests.docs import runner
 from tests.docs.blocks import extract
-from tests.docs.runner import NAMESPACE_NAMES, ExampleError, check
+from tests.docs.runner import NAMESPACE_NAMES, ExampleError, Outcome, check
 
 
 def _check(
@@ -23,9 +23,9 @@ def _check(
     monkeypatch: pytest.MonkeyPatch,
     body: str,
     info: str = "python {.exec}",
-) -> None:
+) -> Outcome:
     (block,) = extract(f"```{info}\n{body}```\n", "page.md")
-    check(block, pytester, monkeypatch)
+    return check(block, pytester, monkeypatch)
 
 
 def test_an_exec_block_that_passes_is_accepted(
@@ -175,3 +175,24 @@ def test_a_test_class_block_runs_too(
 ) -> None:
     body = "class TestIt:\n    def test_it(self, gql):\n        assert gql.schema\n"
     _check(pytester, monkeypatch, body)
+
+
+def test_check_says_that_an_exec_block_ran(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert _check(pytester, monkeypatch, "assert gql.schema\n") == "ran"
+    body = "def test_it(gql):\n    assert gql.schema\n"
+    assert _check(pytester, monkeypatch, body) == "ran"
+
+
+def test_check_says_that_a_no_exec_block_was_only_compiled(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = "raise SystemExit(1)\n"
+    assert _check(pytester, monkeypatch, body, "python {.no-exec}") == "compiled"
+
+
+def test_check_says_that_a_block_in_another_language_was_not_checked(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert _check(pytester, monkeypatch, "pip install x\n", "bash") == "not-python"

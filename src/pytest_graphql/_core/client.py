@@ -150,92 +150,563 @@ def _client_over(
 
 @dataclass
 class ClientConfig:
-    """Everything a client reads that is data rather than an object.
+    """The settings of a client: everything that is data and not an object.
 
-    The split is B4's rule, restated in the "Constructor and configuration
-    split" section of ``docs/reference/DESIGN_DECISIONS.md``: this object
-    holds data, and the constructor holds objects (``transport``, ``schema``,
-    ``scalars``, ``fake_context``, ``middleware``). ``seed`` lives here and never
-    on the client constructor.
+    A `ClientConfig` holds the endpoint, headers, timeouts, selection limits,
+    raising rules, seed and redaction settings. Objects that a client uses, such
+    as the transport, the schema, the scalar registry and the middleware, are
+    arguments of `GraphQLClient` and `build_client()`. The seed lives here and
+    not on the client.
 
-    ``include_deprecated`` defaults to ``False``, not to SPEC 3.10's ``True``:
-    C1 turned it off and the design document states the current rule, so the
-    default here matches ``SelectionPolicy``'s. A config that disagreed with
-    the policy would silently re-enable deprecated fields for every call that
-    did not override it.
+    It is a plain dataclass. Copy it with `dataclasses.replace()` to change a few
+    fields. `build_client()` also accepts any field as a keyword, so
+    `build_client(url=..., max_depth=2)` needs no `ClientConfig` of its own.
+
+    The fields that can hold a credential (`headers`, `schema_headers`,
+    `cookies` and `proxy`) are left out of `repr()`, so printing a config does not
+    show them.
+
+    Many of these settings can also be set for one call, with the keyword of the
+    same name on `query()` or `mutation()`. See `GraphQLClient.query()`.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig, build_client
+
+        config = ClientConfig(timeout=5.0, max_depth=2, headers={"X-Env": "test"})
+        client = build_client(
+            url="http://localhost:8000/graphql",
+            config=config,
+            transport=gql.transport,
+            schema=gql.schema,
+        )
+        assert client.config.max_depth == 2
+        assert client.config.url == "http://localhost:8000/graphql"
+        ```
     """
 
     url: str | None = None
+    """The URL of the GraphQL endpoint. `build_client(url=...)` sets it.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        config = ClientConfig(url="http://localhost:8000/graphql")
+        assert config.url == "http://localhost:8000/graphql"
+        assert ClientConfig().url is None
+        ```
+    """
     #: The fields that carry a credential (``headers``, ``schema_headers``,
     #: ``cookies`` and ``proxy``) stay out of ``repr()``. A configuration is
     #: plain data a traceback or an assertion report prints whole, and no
     #: redaction stage runs over it (C2, C16).
     headers: Mapping[str, str] = field(default_factory=dict, repr=False)
+    """Headers sent with every request.
+
+    This includes the request that loads the schema, unless `schema_headers` is
+    set. Names compare without regard to case.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        config = ClientConfig(headers={"X-Env": "test"})
+        assert config.headers == {"X-Env": "test"}
+        assert "X-Env" not in repr(config)
+        ```
+    """
     #: C4: schema loading uses this alone, so a function-scoped auth fixture
     #: cannot change the session-scoped schema. ``None`` means "use
     #: ``headers``", which is the documented default.
     schema_headers: Mapping[str, str] | None = field(default=None, repr=False)
+    """Headers for the request that loads the schema, and for nothing else.
+
+    Auth objects and per-call headers never reach it. `None`, the default, means
+    use `headers`.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        assert ClientConfig().schema_headers is None
+        config = ClientConfig(schema_headers={"X-Schema": "1"})
+        assert config.schema_headers == {"X-Schema": "1"}
+        ```
+    """
     cookies: Mapping[str, str] = field(default_factory=dict, repr=False)
+    """Cookie values to treat as secrets.
+
+    In this version the client does not send these cookies. The values are only
+    added to the set of secrets that are removed from error messages and reports.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        config = ClientConfig(cookies={"session": "abc123"})
+        assert config.cookies == {"session": "abc123"}
+        assert "abc123" not in repr(config)
+        ```
+    """
     cookie_scope: CookieScope = "none"
+    """Whether a client keeps the cookies that a server sets.
+
+    With `"none"`, the default, every cookie is dropped after each response, so
+    no state carries over from one call to the next. With `"client"`, a client
+    keeps its cookies and sends them back. The cookies belong to that client
+    only. A clone made with `with_headers()` or `as_()` starts with none.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        assert ClientConfig().cookie_scope == "none"
+        assert ClientConfig(cookie_scope="client").cookie_scope == "client"
+        ```
+    """
     #: "Operational limits": a float applied to all four phases, or a
     #: ``Timeout(connect, read, write, pool)``. :meth:`call_timeout` turns
     #: either form into the scalar ceiling ``Transport.send()`` requires.
     timeout: float | httpx.Timeout = DEFAULT_TIMEOUT_SECONDS
+    """The time limit of one call, in seconds. The default is 30.
+
+    A number applies to each of the four phases: connect, read, write and wait
+    for a connection from the pool. To set the phases apart, give an
+    `httpx.Timeout`. A phase set to `None` has no limit. A number must be more
+    than zero and at most 1,000,000, or `math.inf` for no limit. Anything else
+    raises an error before any request is sent.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        import httpx
+
+        assert ClientConfig().timeout == 30.0
+        assert ClientConfig(timeout=5).timeout == 5
+        phases = httpx.Timeout(connect=2, read=20, write=5, pool=1)
+        assert ClientConfig(timeout=phases).call_timeout() == 20
+        ```
+    """
     retries: int = 2
+    """How many times a call is tried again after it fails to connect.
+
+    The default is 2, so a call is tried up to three times. Only a failure to
+    connect is retried, never a request that reached the server, and a mutation
+    is not retried unless the call has `idempotent=True`. The wait between tries
+    grows by steps and has a random part.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        assert ClientConfig().retries == 2
+        assert ClientConfig(retries=0).retries == 0
+        ```
+    """
     #: ``httpx`` semantics: ``True``, a CA bundle path, or an ``SSLContext``.
     verify: bool | str | ssl.SSLContext = True
+    """How to check the server's TLS certificate.
+
+    `True` uses the standard certificate authorities. A string is the path of a
+    CA bundle file. An `ssl.SSLContext` is used as it is. `False` turns the check
+    off and issues a warning.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        assert ClientConfig().verify is True
+        assert ClientConfig(verify="/etc/ssl/ca.pem").verify == "/etc/ssl/ca.pem"
+        ```
+    """
     #: Ambient proxy, netrc and ``SSLKEYLOGFILE`` handling stays off unless a
     #: project opts in, so a run cannot silently route through an ambient
     #: proxy. An explicit :attr:`proxy` is unaffected by this flag.
     trust_env: bool = False
+    """Whether to read proxy settings from the environment.
+
+    Off by default, so a test run does not quietly go through a proxy that the
+    machine happens to have. When it is off, the variables `HTTP_PROXY`,
+    `HTTPS_PROXY` and `NO_PROXY`, the netrc file and `SSLKEYLOGFILE` are ignored.
+    A `proxy` that you set is used either way.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        assert ClientConfig().trust_env is False
+        assert ClientConfig(trust_env=True).trust_env is True
+        ```
+    """
     proxy: httpx.Proxy | str | None = field(default=None, repr=False)
+    """A proxy for every request: a URL, an `httpx.Proxy`, or `None`.
+
+    An explicit proxy takes every request and outranks the environment. A URL
+    that the transport cannot use raises an error that does not quote the URL,
+    because a proxy password can be in it.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        config = ClientConfig(proxy="http://proxy.local:3128")
+        assert config.proxy == "http://proxy.local:3128"
+        assert "proxy.local" not in repr(config)
+        ```
+    """
     max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES
+    """The largest response body that the client reads, in bytes. The default is 32 MiB.
+
+    The count is of bytes after decompression. A larger response raises an
+    error, and the client does not read the rest.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        assert ClientConfig().max_response_bytes == 32 * 1024 * 1024
+        config = ClientConfig(max_response_bytes=1_000_000)
+        assert config.max_response_bytes == 1_000_000
+        ```
+    """
     follow_redirects: bool = False
+    """Not used in this version. The client never follows a redirect.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        assert ClientConfig().follow_redirects is False
+        ```
+    """
     http2: bool = False
+    """Whether to use HTTP/2. It needs the `h2` package that `httpx[http2]` installs.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        assert ClientConfig().http2 is False
+        assert ClientConfig(http2=True).http2 is True
+        ```
+    """
 
     max_depth: int = 3
+    """How many levels of objects auto-selection selects. See `SelectionPolicy`.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        assert ClientConfig().max_depth == 3
+        assert ClientConfig(max_depth=1).selection_policy().max_depth == 1
+        ```
+    """
     cycle_policy: CyclePolicy = "shallow"
+    """What auto-selection does when a type repeats on its path. See `CyclePolicy`.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        assert ClientConfig().cycle_policy == "shallow"
+        assert ClientConfig(cycle_policy="stop").cycle_policy == "stop"
+        ```
+    """
     per_type_depth_cap: Mapping[str, int] = field(default_factory=dict)
+    """Stricter depth limits for named types. See `SelectionPolicy`.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        config = ClientConfig(per_type_depth_cap={"User": 1})
+        assert config.per_type_depth_cap == {"User": 1}
+        assert config.selection_policy().depth_cap_for("User") == 1
+        ```
+    """
     include_deprecated: bool = False
+    """Whether auto-selection selects deprecated fields. Off by default.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        assert ClientConfig().include_deprecated is False
+        assert ClientConfig(include_deprecated=True).include_deprecated is True
+        ```
+    """
     max_fields: int = 2000
+    """The most fields that one generated query may select. See `SelectionPolicy`.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        assert ClientConfig().max_fields == 2000
+        assert ClientConfig(max_fields=500).max_fields == 500
+        ```
+    """
     exclude: Sequence[str] = ()
+    """Patterns for fields that auto-selection never selects.
+
+    Each is `"Type.field"`, `"*.field"` or `"Type.*"`. Use it to leave out fields that
+    your test user may not read.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        config = ClientConfig(exclude=["User.balance", "*.preferences"])
+        assert config.exclude == ["User.balance", "*.preferences"]
+        policy = config.selection_policy()
+        assert not policy.should_include("User", "balance", ("balance",), 0)
+        ```
+    """
     relay_aware: bool = True
+    """Whether auto-selection recognizes Relay connections. See `SelectionPolicy`.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        assert ClientConfig().relay_aware is True
+        assert ClientConfig(relay_aware=False).relay_aware is False
+        ```
+    """
 
     validate: bool = True
+    """Whether to check a query against the schema before it is sent.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        assert ClientConfig().validate is True
+        assert ClientConfig(validate=False).validate is False
+        ```
+    """
     raise_on_error: bool = True
+    """Whether a response with errors raises `GraphQLExecutionError`.
+
+    With `False`, no error is raised, and that includes a partial-data error.
+    Read `response.errors` yourself, usually with `raw=True`.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig, build_client
+
+        client = build_client(
+            url="http://localhost:8000/graphql",
+            transport=gql.transport,
+            schema=gql.schema,
+            config=ClientConfig(raise_on_error=False),
+        )
+        response = client.mutation("updateUser", id="missing", fields=["id"], raw=True)
+        assert response.errors[0].path == ("updateUser",)
+        ```
+    """
     raise_on_partial: bool = True
+    """Whether a response with both data and errors raises `GraphQLPartialDataError`.
+
+    It applies only when `raise_on_error` is `True`.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        assert ClientConfig().raise_on_partial is True
+        assert ClientConfig(raise_on_partial=False).raise_on_partial is False
+        ```
+    """
 
     seed: int = 0
+    """The seed for `gql.fake`. The same seed gives the same data on every run.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import build_client
+
+        def client_with(seed):
+            return build_client(
+                url="http://localhost:8000/graphql",
+                transport=gql.transport,
+                schema=gql.schema,
+                seed=seed,
+            )
+
+
+        one, two = client_with(1), client_with(2)
+        assert one.fake.CreatePostInput() == one.fake.CreatePostInput()
+        assert one.fake.CreatePostInput() != two.fake.CreatePostInput()
+        ```
+    """
     schema_cache_dir: str | None = None
+    """Not used in this version. The client does not cache the schema on disk.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        assert ClientConfig().schema_cache_dir is None
+        ```
+    """
     schema_cache_ttl: int = 0
+    """Not used in this version. The client does not cache the schema on disk.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        assert ClientConfig().schema_cache_ttl == 0
+        ```
+    """
 
     redact_headers: Sequence[str] = tuple(sorted(DEFAULT_REDACT_HEADERS))
+    """The names of headers whose values are hidden in reports and error messages.
+
+    Names compare without regard to case. The default is `authorization`,
+    `cookie`, `proxy-authorization` and `x-api-key`. A list that you give here
+    replaces the default, so include these names when you add one.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        assert "authorization" in ClientConfig().redact_headers
+        config = ClientConfig(redact_headers=("authorization", "x-session"))
+        assert "x-session" in config.redact_headers
+        ```
+    """
     redact_variables: Sequence[str] = DEFAULT_REDACT_VARIABLES
+    """Patterns for variable names whose values are hidden.
+
+    A pattern is a name or a dotted path, and it can have `*` wildcards. It matches
+    at the end of a variable's path, at any depth, in any capitalization. The
+    default covers `password`, `token`, `secret`, `api_key`, `access_token`,
+    `refresh_token`, `authorization`, `otp`, `pin`, `credit_card` and `ssn`. The same
+    patterns hide values in the response data shown in a report.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        assert "password" in ClientConfig().redact_variables
+        config = ClientConfig(redact_variables=["password", "*.card_number"])
+        assert "*.card_number" in config.redact_variables
+        ```
+    """
     redact_values: bool = True
+    """Whether to also remove known secret values from free text.
+
+    Free text is text like a server's error message or the query text. With
+    `True`, a known secret is removed from it if it is at least
+    `min_redacted_value_length` characters long. A server can echo such a value
+    back. See `DiagnosticSnapshot` for what a known secret is. In short, it is a
+    value of a header named in `redact_headers`, of a variable that matches
+    `redact_variables`, a cookie, or a part of the URL, so add the name of every
+    other header or variable that holds a secret. With `False`, no value is
+    removed from free text, and only headers and variables that `redact_headers`
+    and `redact_variables` name are replaced.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        assert ClientConfig().redact_values is True
+        assert ClientConfig(redact_values=False).redact_values is False
+        ```
+    """
     min_redacted_value_length: int = DEFAULT_MIN_REDACTED_VALUE_LENGTH
+    """The shortest known secret that is removed from free text. The default is 8.
+
+    A very short value, such as `1` or `on`, would match ordinary words and
+    damage the text. So a known secret shorter than this stays in free text, for
+    example a 3-character token that appears in the query. Give test accounts
+    credentials that are at least this long. The limit applies only to known
+    secrets. See `redact_values`.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        assert ClientConfig().min_redacted_value_length == 8
+        config = ClientConfig(min_redacted_value_length=12)
+        assert config.min_redacted_value_length == 12
+        ```
+    """
     max_diagnostic_bytes: int = DEFAULT_MAX_DIAGNOSTIC_BYTES
+    """The size limit of one field of a request shown in a report, in bytes.
+
+    The default is 4096. Each cut says how much it removed.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        assert ClientConfig().max_diagnostic_bytes == 4096
+        assert ClientConfig(max_diagnostic_bytes=1024).max_diagnostic_bytes == 1024
+        ```
+    """
     max_recorded_errors: int = DEFAULT_MAX_RECORDED_ERRORS
+    """How many of a response's errors a report or message lists. The default is 20.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        assert ClientConfig().max_recorded_errors == 20
+        assert ClientConfig(max_recorded_errors=5).max_recorded_errors == 5
+        ```
+    """
     max_recorded_calls: int = DEFAULT_MAX_RECORDED_CALLS
+    """How many recent calls the client remembers for a report. The default is 50.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        assert ClientConfig().max_recorded_calls == 50
+        assert ClientConfig(max_recorded_calls=10).max_recorded_calls == 10
+        ```
+    """
 
     def call_timeout(self, override: float | None = None) -> float:
-        """The scalar ceiling ``Transport.send()`` takes for one call.
+        """Return the one time limit, in seconds, that a call hands to the transport.
 
-        ``Transport.send()``'s per-call ``timeout`` is mandatory and scalar
-        (SPEC 5.6), and the transport applies it as a ceiling on each of its
-        own four phases rather than as a replacement of them. So the scalar
-        this returns for a phase-specific :attr:`timeout` is the smallest one
-        that clamps no phase the project configured: the largest configured
-        phase, or no bound at all when a phase was deliberately left
-        unbounded. A stored ``Timeout`` therefore governs the request it
-        describes, exactly as "Operational limits" says it does.
+        The transport takes a single number for each call and applies it as a
+        ceiling on each of its four phases. A `timeout` setting that is one
+        number gives that number. A setting that has a limit for each phase gives
+        the largest of them, which cuts none of the phases short. If any phase
+        has no limit, the result is `math.inf`.
 
-        An explicit per-call ``timeout`` option is the caller's own budget
-        and is used as given, which is how a call tightens a configured
-        phase. It can only tighten: a value looser than a configured phase
-        leaves that phase where the project put it.
+        A per-call `timeout` is used as it is. It can tighten a phase, and it can
+        never make a phase longer than the configured limit.
 
-        Both inputs are held to one domain before any I/O: a number greater
-        than zero, with ``math.inf`` (or a ``None`` phase) for no limit.
+        Args:
+            override: A limit for this call alone, in seconds, or `None` to use
+                the configured one.
+
+        Returns:
+            The limit in seconds.
+
+        Raises:
+            ValueError: When a limit is zero, negative, NaN or above 1,000,000.
+            TypeError: When a limit is not a number.
+
+        Examples:
+            ```python {.exec}
+            import httpx
+
+            from pytest_graphql import ClientConfig
+
+            assert ClientConfig(timeout=5).call_timeout() == 5
+            assert ClientConfig(timeout=5).call_timeout(2) == 2
+            phases = httpx.Timeout(connect=2, read=20, write=5, pool=1)
+            assert ClientConfig(timeout=phases).call_timeout() == 20
+            ```
         """
         if override is not None:
             return checked_seconds(override, source="the timeout option")
@@ -253,7 +724,26 @@ class ClientConfig:
         return max(phase for phase in phases if phase is not None)
 
     def selection_policy(self) -> SelectionPolicy:
-        """The policy this configuration describes, before per-call overrides."""
+        """Return the `SelectionPolicy` that these settings describe.
+
+        It is built from `max_depth`, `cycle_policy`, `per_type_depth_cap`,
+        `include_deprecated`, `max_fields`, `exclude` and `relay_aware`. The other
+        fields of a policy have their defaults. A keyword on a single call can
+        change some of the values for that call.
+
+        Returns:
+            A new policy.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import ClientConfig
+
+            config = ClientConfig(max_depth=2, exclude=["User.balance"])
+            policy = config.selection_policy()
+            assert policy.max_depth == 2
+            assert policy.exclude == ("User.balance",)
+            ```
+        """
         return SelectionPolicy(
             max_depth=self.max_depth,
             cycle_policy=self.cycle_policy,
@@ -295,15 +785,59 @@ def configuration_credentials(config: ClientConfig) -> tuple[tuple[str, str], ..
 
 
 class GraphQLClient:
-    """One logical client: a transport, a schema, and one identity.
+    """A client that sends GraphQL operations to a server as one identity.
 
-    Ownership follows 9.1 exactly. ``owns_transport`` is a constructor
-    argument, never a type check, and it is true exactly when closing this
-    client closes the transport it holds. The cleanup list is the only close
-    mechanism: when no list is supplied the flag builds it, and when a list is
-    supplied it is already complete and this constructor never appends to it.
-    A client never calls ``derive()`` for itself; a clone does, which is why a
-    clone owns a transport only when it derived one.
+    A client has a transport, a schema and a `ClientConfig`. Call `query()` or
+    `mutation()` with the name of a root field and its arguments as keywords. The
+    client checks the call against the schema, chooses the fields to ask for,
+    sends the request and returns the result as a `Node`, a `NodeList` or a
+    plain value.
+
+    Most code gets a client from the `gql` fixture or from `build_client()`.
+    That function loads the schema and creates the transport. Construct a
+    `GraphQLClient` yourself when you already have both.
+
+    Identity changes make a clone. `with_headers()`, `with_auth()`, `as_()` and
+    `anonymous()` return a new client that shares the schema, config, scalar
+    registry and middleware, and has its own headers and auth. Over the default
+    HTTP transport a clone also gets its own connection and cookie state, shares
+    the connection pool, and must be closed.
+
+    The client is a context manager. Leaving the `with` block closes it.
+
+    Args:
+        transport: What sends the requests.
+        schema: The `graphql.GraphQLSchema` of the server.
+        config: The settings. `None` means `ClientConfig()`.
+        scalars: The custom scalars this client knows. `None` creates an empty
+            `ScalarRegistry` that belongs to this client.
+        fake_context: Which test the data of `gql.fake` is for, and the source of
+            its `unique()` values. `None` makes a context for use outside pytest.
+        middleware: Hooks that run around every call. See `Middleware`.
+        auth: The identity applied to every request. See `Auth`.
+        headers: Headers that the client adds on top of those of `config`.
+        owns_transport: Whether `close()` closes `transport`. The default is
+            `False`, so the client never closes a transport that you supplied.
+        cleanup: Internal. The list of what the client closes. `build_client()`
+            passes it. Leave it out.
+        recorder: Internal. The record of recent calls that clones share. Leave it
+            out.
+        builder: Internal. The cache of generated selections that clones share.
+            Leave it out.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import GraphQLClient, build_client
+
+        base = build_client(
+            url="http://localhost:8000/graphql",
+            transport=gql.transport,
+            schema=gql.schema,
+        )
+        with GraphQLClient(transport=base.transport, schema=base.schema) as client:
+            user = client.query("user", id="u1")
+            assert user.name == "Ada Lovelace"
+        ```
     """
 
     def __init__(
@@ -333,6 +867,21 @@ class GraphQLClient:
             # declares is held by tests rather than by this constructor.
             self._cleanup = cleanup
         self.owns_transport = owns_transport
+        """Whether closing this client closes its transport.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import build_client
+
+            assert gql.owns_transport is False
+
+            client = build_client(
+                url="http://localhost:8000/graphql", schema=gql.schema
+            )
+            assert client.owns_transport is True
+            client.close()
+            ```
+        """
         self._closed = False
 
         self._schema = schema
@@ -371,6 +920,29 @@ class GraphQLClient:
     # -- lifecycle ------------------------------------------------------------
 
     def close(self) -> None:
+        """Release what this client owns.
+
+        A client from `build_client()` that created its own transport closes the
+        connection pool. A client over a transport that you gave it closes
+        nothing, because that transport is yours. A clone closes only the
+        transport that it derived for itself.
+
+        It is safe to call it more than once. If closing several things fails,
+        the failures are reported together and none is lost.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import build_client
+
+            client = build_client(
+                url="http://localhost:8000/graphql",
+                schema=gql.schema,
+            )
+            assert client.owns_transport
+            client.close()
+            client.close()
+            ```
+        """
         if self._closed:
             return
         self._closed = True
@@ -379,27 +951,108 @@ class GraphQLClient:
             _report(errors, errors[-1])
 
     def __enter__(self) -> GraphQLClient:
+        """Use the client in a `with` block. It returns the client itself.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import build_client
+
+            with build_client(
+                url="http://localhost:8000/graphql",
+                transport=gql.transport,
+                schema=gql.schema,
+            ) as client:
+                assert client.query("user", id="u1").name == "Ada Lovelace"
+            ```
+        """
         return self
 
     def __exit__(self, *exc_info: object) -> None:
+        """Close the client when the `with` block ends. It never hides an exception.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import build_client
+
+            with build_client(
+                url="http://localhost:8000/graphql",
+                schema=gql.schema,
+            ) as client:
+                assert client.owns_transport
+            ```
+        """
         self.close()
 
     # -- read-only state ------------------------------------------------------
 
     @property
     def schema(self) -> GraphQLSchema:
+        """The schema this client checks calls against, a `graphql.GraphQLSchema`.
+
+        Examples:
+            ```python {.exec}
+            assert gql.schema.query_type.name == "Query"
+            assert "User" in gql.schema.type_map
+            ```
+        """
         return self._schema
 
     @property
     def expect(self) -> ExpectNamespace:
-        """``gql.expect.Type(**fields)``: matchers checked against the schema."""
+        """Build matchers for the types of the schema: `gql.expect.Type(**fields)`.
+
+        `gql.expect.User(name="Ada")` returns a `Matcher` that checks only the
+        fields you name. The type name and the field names are checked against the
+        schema when you build the matcher, so a typo fails on that line and not
+        later. A field name works in its exact spelling and in snake_case. A type
+        with no fields, such as an enum, an input object or a scalar, raises an
+        error.
+
+        Examples:
+            ```python {.exec}
+            user = gql.query("user", id="u1")
+            assert user == gql.expect.User(id="u1", name="Ada Lovelace")
+            assert user != gql.expect.User(name="Grace Hopper")
+            ```
+        """
         if self._expect is None:
             self._expect = ExpectNamespace(self._schema)
         return self._expect
 
     @property
     def fake(self) -> FakeNamespace:
-        """``gql.fake.Type(**overrides)``: seeded input payloads (SPEC 3.7)."""
+        """Build test input for the input types of the schema: `gql.fake.Type()`.
+
+        `gql.fake.CreatePostInput()` returns a `dict` with a value for each field
+        of that input type. The values are seeded by `ClientConfig.seed` and by
+        the test, so the same test gets the same payload on every run. Give
+        keywords to override fields: `gql.fake.CreatePostInput(title="Hello")`. An
+        override key is the exact field name or its snake_case form, and the result
+        uses the exact names. An unknown key raises an error.
+
+        Rules for the values:
+
+        - A required field is always filled. An optional field is filled too,
+          unless you pass `_required_only=True`.
+        - Input objects nested up to `_depth` levels (default `2`) are filled
+          in full. Deeper ones get their required fields only.
+        - A list gets one to three elements.
+        - A custom scalar gets the value from the `fake` function of its
+          `ScalarSpec`. A scalar with no spec raises `ScalarNotRegisteredError`
+          unless you give the field a value.
+        - For a value that must differ on every call, use `unique()`.
+
+        Examples:
+            ```python {.exec}
+            payload = gql.fake.CreatePostInput(title="Hello")
+            assert payload["title"] == "Hello"
+            assert set(payload) == {"title", "authorId"}
+            assert payload == gql.fake.CreatePostInput(title="Hello")
+
+            post = gql.mutation("createPost", input=payload, fields=["title"])
+            assert post.title == "Hello"
+            ```
+        """
         if self._fake is None:
             self._fake = FakeNamespace(
                 self._schema,
@@ -412,19 +1065,60 @@ class GraphQLClient:
 
     @property
     def scalars(self) -> ScalarRegistry:
-        """The custom scalars this client decodes, serializes and fakes."""
+        """The custom scalars that this client decodes, serializes and fakes.
+
+        The registry is shared with the clones of the client. A scalar that you
+        register takes effect on the next call.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import ScalarSpec
+
+            gql.scalars.register(ScalarSpec(name="Money", serialize=str, fake=str))
+            assert "Money" in gql.scalars
+            ```
+        """
         return self._scalars
 
     @property
     def config(self) -> ClientConfig:
+        """The settings of this client.
+
+        Examples:
+            ```python {.exec}
+            assert gql.config.max_depth == 3
+            assert gql.config.raise_on_error is True
+            ```
+        """
         return self._config
 
     @property
     def transport(self) -> Transport:
+        """The transport that this client sends its requests through.
+
+        Examples:
+            ```python {.exec}
+            assert callable(gql.transport.send)
+            assert callable(gql.transport.close)
+            ```
+        """
         return self._transport
 
     @property
     def recorder(self) -> DiagnosticsRecorder:
+        """The record of this client's recent calls.
+
+        The pytest plugin reads it to add the calls of a failed test to the
+        report. Clones of a client share one recorder. It keeps at most
+        `ClientConfig.max_recorded_calls` calls, as redacted text, and never a
+        live request or response. Most code does not use it directly.
+
+        Examples:
+            ```python {.exec}
+            gql.query("user", id="u1", fields=["id"])
+            assert len(gql.recorder.calls) >= 1
+            ```
+        """
         return self._recorder
 
     # -- identity and cloning (C17, C19) --------------------------------------
@@ -462,30 +1156,214 @@ class GraphQLClient:
     def with_headers(
         self, headers: Mapping[str, str] | None = None, /, **named: str
     ) -> GraphQLClient:
-        """A clone carrying these headers on top of this client's (B21, C4)."""
+        """Return a clone that sends extra headers.
+
+        The new headers are added over the ones this client already sends. A
+        header with the same name, in any capitalization, replaces the old one.
+        The clone's headers rank above those of the config and of `Auth`, and
+        below a `headers=` option on a single call.
+
+        Header names that contain a hyphen cannot be keyword arguments, so the
+        method also takes a mapping as its first positional argument. You can
+        use both in one call.
+
+        A clone over the default HTTP transport has its own connection and
+        cookie state, and you must close it. Use it in a `with` block.
+
+        Args:
+            headers: An optional mapping of header names to values. It is
+                positional only.
+            **named: More headers, written as keyword arguments.
+
+        Returns:
+            A new client.
+
+        Examples:
+            ```python {.exec}
+            headers = {"X-Api-Key": "key-123"}
+            with gql.with_headers(headers, Authorization="Bearer abc") as client:
+                assert client.query("user", id="u1").name == "Ada Lovelace"
+            ```
+        """
         return self._clone(
             auth=self._auth,
             headers=merge_headers(self._headers, headers, named),
         )
 
     def with_auth(self, auth: Auth) -> GraphQLClient:
-        """A clone using ``auth`` in place of this client's."""
+        """Return a clone that uses another `Auth` object.
+
+        The clone's headers and the rest of its settings stay as they are. Only the
+        auth changes. Over the default HTTP transport the clone has its own
+        connection and cookie state, and you must close it.
+
+        Args:
+            auth: The identity for the clone.
+
+        Returns:
+            A new client.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import HeaderAuth
+
+            with gql.with_auth(HeaderAuth({"X-Api-Key": "key-123"})) as client:
+                assert client.query("user", id="u1").name == "Ada Lovelace"
+            ```
+        """
         return self._clone(auth=auth, headers=self._headers)
 
     def as_(self, auth: Auth | str) -> GraphQLClient:
-        """A clone under another identity. A bare string is a bearer token."""
+        """Return a clone that acts as another identity.
+
+        Pass an `Auth` object, or a plain string, which is taken as a bearer
+        token. `gql.as_("tok")` is the same as `gql.with_auth(BearerAuth("tok"))`.
+        Use it to test the same call as different users.
+
+        Args:
+            auth: An `Auth` object, or a bearer token as a string.
+
+        Returns:
+            A new client.
+
+        Examples:
+            ```python {.exec}
+            with gql.as_("admin-token") as admin, gql.as_("guest-token") as guest:
+                assert admin.query("user", id="u1").name == "Ada Lovelace"
+                assert guest.query("user", id="u1").name == "Ada Lovelace"
+            ```
+        """
         return self.with_auth(resolve_auth(auth))
 
     def anonymous(self) -> GraphQLClient:
-        """A clone with no auth at all."""
+        """Return a clone that sends no auth.
+
+        Use it to check that a call is refused without a login. The clone drops
+        the `Auth` object. Headers that were set with `with_headers()` stay.
+
+        Returns:
+            A new client.
+
+        Examples:
+            ```python {.exec}
+            with gql.as_("admin-token") as admin:
+                with admin.anonymous() as visitor:
+                    assert visitor.query("users").pluck("id") == ["u1", "u2", "u3"]
+            ```
+        """
         return self._clone(auth=None, headers=self._headers)
 
     # -- calling operations (SPEC 5.2) ----------------------------------------
 
     def query(self, name: str, /, **variables: Any) -> Any:
+        """Run a query by the name of a root field and return its result.
+
+        The client looks the field up in the schema, checks the arguments you
+        gave, chooses the fields to ask for (unless you list them), builds the
+        operation, sends it and returns the value of that one field. The result is
+        a `Node` for an object, a `NodeList` for a list of objects, and a plain
+        value for a scalar. Arguments are sent as variables, so a value never
+        changes the shape of the query text.
+
+        Give each argument of the field as a keyword. A keyword works in its exact
+        schema spelling and in snake_case. The keywords below are options, and not
+        arguments. An argument of the field that has one of these names can only be
+        given through `variables=`.
+
+        - `fields`: what to select. A list or dict of names, a `Field`, a
+          `Selection`, a raw GraphQL string, or `AUTO`, the default.
+        - `variables`: a dict of variables by their exact names. Use it for an
+          argument that has the name of an option. Giving one argument both
+          ways is an error.
+        - `raw`: return the whole `GraphQLResponse` and not the value of the field.
+        - `validate`: check the operation against the schema before it is sent.
+        - `raise_on_error`, `raise_on_partial`: see `ClientConfig`.
+        - `max_depth`, `cycle_policy`, `per_type_depth_cap`, `include_deprecated`,
+          `max_fields`: the selection settings of `ClientConfig`, for this call.
+        - `operation_name`: the name written into the operation. The default is
+          the field name.
+        - `timeout`: the time limit of this call, in seconds. It can shorten a
+          configured limit and cannot make it longer.
+        - `idempotent`: allow a mutation to be tried again after a failure to
+          connect. A query is always allowed.
+        - `headers`: extra headers for this call. They rank above every other
+          source of headers.
+        - `retries`: reserved. It has no effect. Set `ClientConfig.retries`.
+
+        When the operation has one argument of an input object type, you may give
+        the fields of that object as keywords, and they are wrapped into it. This
+        works only when no keyword is an argument of the operation, and at least
+        one is a field of the input. Writing `input=payload` always works.
+
+        Every variable is checked against its input type before it is sent, and a
+        value of a custom scalar goes through the `serialize` function of its
+        `ScalarSpec`. A wrong value raises an error that names the path and the
+        type and never repeats the value.
+
+        Args:
+            name: The name of the root query field, such as `"user"`.
+            **variables: The arguments of the field, and the options above.
+
+        Returns:
+            The value of the field. With `raw=True`, the `GraphQLResponse`.
+
+        Raises:
+            OperationNotFoundError: When the schema has no query with that name.
+                The message suggests the closest name.
+            ArgumentError: When an argument is missing, unknown or has a wrong
+                value.
+            SelectionError: When `fields` is wrong or the operation is not valid.
+            GraphQLExecutionError: When the server returned errors and no data.
+            GraphQLPartialDataError: When the server returned data and errors.
+            ResponseShapeError: When the response does not fit the schema.
+
+        Examples:
+            ```python {.exec}
+            user = gql.query("user", id="u1")
+            assert user.name == "Ada Lovelace"
+
+            user = gql.query("user", id="u1", fields=["name", {"team": ["name"]}])
+            assert user.team.name == "Core"
+
+            response = gql.query("user", id="u1", fields=["name"], raw=True)
+            assert response.http.status_code == 200
+            assert response.data.user.name == "Ada Lovelace"
+            ```
+        """
         return self._call("query", name, variables)
 
     def mutation(self, name: str, /, **variables: Any) -> Any:
+        """Run a mutation by the name of a root field and return its result.
+
+        It works as `query()` does, with the same arguments, options and
+        results, for a root field of the `Mutation` type. A mutation is not tried
+        again after a failure to connect unless you pass `idempotent=True`.
+
+        Args:
+            name: The name of the root mutation field, such as `"createPost"`.
+            **variables: The arguments of the field, and the options of `query()`.
+
+        Returns:
+            The value of the field. With `raw=True`, the `GraphQLResponse`.
+
+        Raises:
+            OperationNotFoundError: When the schema has no mutation with that name.
+            ArgumentError: When an argument is missing, unknown or has a wrong
+                value.
+            GraphQLExecutionError: When the server returned errors and no data.
+            GraphQLPartialDataError: When the server returned data and errors.
+
+        Examples:
+            ```python {.exec}
+            payload = gql.fake.CreatePostInput(title="Hello")
+            post = gql.mutation("createPost", input=payload, fields=["title"])
+            assert post.title == "Hello"
+
+            # The fields of the input object can be given as plain keywords.
+            post = gql.mutation("createPost", title="Hi", author_id="u1")
+            assert post.author.name == "Ada Lovelace"
+            ```
+        """
         return self._call("mutation", name, variables)
 
     def execute(
@@ -496,11 +1374,50 @@ class GraphQLClient:
         operation_name: str | None = None,
         **options: Any,
     ) -> GraphQLResponse[Any]:
-        """Send a raw document, and always return the response itself (C5).
+        """Send a GraphQL document that you wrote, and return the response.
 
-        Convenience unwrapping stays on ``query()`` and ``mutation()``, which
-        have exactly one known top-level field. A raw document may select any
-        number, so ``GraphQLResponse.unwrap()`` is the explicit opt-in here.
+        Use it for a query that `query()` and `mutation()` cannot build, such as
+        one with directives or with several root fields. The document is checked
+        against the schema first, unless you turn that off. Values go in
+        `variables`, and each custom scalar value is serialized and checked as in
+        `query()`.
+
+        It always returns the `GraphQLResponse`. A document may select any number
+        of root fields, so there is no single value to unwrap. Call
+        `GraphQLResponse.unwrap()` when it has exactly one. Errors are raised as
+        they are for `query()`.
+
+        These options work here: `validate`, `raise_on_error`, `raise_on_partial`,
+        `timeout`, `idempotent` and `headers`. See `query()`.
+
+        Args:
+            document: The GraphQL text. It may have several operations.
+            variables: The variables by name. Only variables that the operation
+                declares are sent.
+            operation_name: Which operation to run, when the document has more
+                than one. It is an error to leave it out then.
+            **options: The options listed above.
+
+        Returns:
+            The response.
+
+        Raises:
+            graphql.GraphQLSyntaxError: When the text is not valid GraphQL.
+            SelectionError: When the document does not pass validation against
+                the schema, or has several operations and no `operation_name`.
+            ArgumentError: When a variable has a wrong value.
+            GraphQLExecutionError: When the server returned errors and no data.
+            GraphQLPartialDataError: When the server returned data and errors.
+
+        Examples:
+            ```python {.exec}
+            response = gql.execute(
+                "query Whoami($id: ID!) { user(id: $id) { name } }",
+                {"id": "u1"},
+            )
+            assert response.data.user.name == "Ada Lovelace"
+            assert response.unwrap().name == "Ada Lovelace"
+            ```
         """
         parsed = parse(document)
         if options.get("validate", self._config.validate):
@@ -536,11 +1453,53 @@ class GraphQLClient:
         message_matches: str | re.Pattern[str] | None = None,
         count: int | None = None,
     ) -> AbstractContextManager[CapturedErrors]:
-        """Assert that the block raises a ``GraphQLExecutionError``.
+        """Check that the code in a `with` block fails with a GraphQL error.
 
-        Every supplied filter must match at least one of the response's
-        errors, and ``count`` is the exact number of errors it returned.
-        See :mod:`pytest_graphql._core.expect_error`.
+        The block must end with a `GraphQLExecutionError`. A
+        `GraphQLPartialDataError` counts, because it is one. Any other exception
+        passes through unchanged. If the block ends without one, or a filter
+        fails, it raises `ExpectedErrorNotRaised`. A client set to not raise, with
+        `raise_on_error=False` or `raise_on_partial=False`, never satisfies the
+        block.
+
+        Each filter you give must match at least one error of the response. The
+        filters need not match the same error.
+
+        - `code` equals `extensions["code"]` of the error.
+        - `path` equals the whole path of the error, segment by segment. It is not
+          a prefix.
+        - `message_matches` is a regular expression search on the message.
+        - `count` is the exact number of errors that the server returned. It does not
+          depend on the other filters.
+
+        A block sees the calls of every client in its context, so a call through
+        `gql.as_(...)` counts. The values are checked when you call
+        `expect_error()`, and a wrong one fails there.
+
+        Args:
+            code: The error code to look for.
+            path: The error path to look for, as names and list indexes.
+            message_matches: A pattern, as text or as a compiled pattern.
+            count: How many errors the server returned. An integer of at least 1.
+
+        Returns:
+            A context manager. It gives a `CapturedErrors` object that has
+            `errors` (every error that the server returned), `first` (the first
+            of them) and `response`. Read them after the block has ended.
+
+        Raises:
+            ExpectedErrorNotRaised: When the block does not end in a matching
+                error. It is raised on leaving the block.
+            TypeError: When a filter has the wrong type.
+            ValueError: When a filter has a wrong value, such as a `count` below 1.
+
+        Examples:
+            ```python {.exec}
+            with gql.expect_error(path=["updateUser"], count=1) as caught:
+                gql.mutation("updateUser", id="missing", name="Ada", fields=["id"])
+            assert caught.first.path == ("updateUser",)
+            assert len(caught.errors) == 1
+            ```
         """
         return ExpectedError(
             code=code, path=path, message_matches=message_matches, count=count
@@ -558,9 +1517,63 @@ class GraphQLClient:
         ignore: type[Exception] | tuple[type[Exception], ...] = (),
         **variables: Any,
     ) -> Any:
-        """Run the query ``name`` until ``until`` holds, or raise ``WaitTimeoutError``.
+        """Run a query again and again until a condition holds, or time runs out.
 
-        Queries only. See :mod:`pytest_graphql._core.polling`.
+        Use it when a result becomes true later, for example after a background
+        job. At least one attempt always runs, even with `timeout=0`. After a failed
+        attempt the call sleeps `interval * backoff ** (attempt - 1)` seconds, and
+        never longer than the time that is left. The deadline is the only
+        limit. It is set once at the start.
+
+        The query takes the same arguments and options as `query()`. In this
+        method `timeout` is the deadline of the whole wait. The time limit of one
+        HTTP call is `ClientConfig.timeout`.
+
+        Only queries can be polled. A name that is a mutation raises an error
+        before any call is made.
+
+        `ignore` covers one whole attempt: the call, the unwrapping of the
+        response, and `until`. It names exception classes that are swallowed and
+        counted as a failed attempt. Any other exception passes through unchanged.
+
+        Args:
+            name: The name of the root query field.
+            until: A function that gets what `query()` returns for the same
+                arguments, or the whole response when `raw=True`. The wait ends
+                when its result is true.
+            timeout: The deadline of the whole wait, in seconds. A number of zero
+                or more. Infinity is not accepted.
+            interval: The first sleep between attempts, in seconds. A number of
+                zero or more.
+            backoff: The factor by which the sleep grows after each attempt. A
+                number of one or more. The default `1.0` keeps it constant.
+            ignore: An exception class, or a tuple of classes, to swallow. Each
+                must be a subclass of `Exception`.
+            **variables: The arguments of the field, and the options of `query()`.
+
+        Returns:
+            The value that `until` accepted. It is what `query()` returns.
+
+        Raises:
+            WaitTimeoutError: When the deadline passes before `until` holds. It
+                tells you the attempts, the time, the last response and the last
+                swallowed exception.
+            ArgumentError: When `name` is a mutation.
+            TypeError: When `timeout`, `interval` or `backoff` is not a number, or
+                `ignore` has a class that is not an `Exception` subclass.
+            ValueError: When a number is out of range.
+
+        Examples:
+            ```python {.exec}
+            user = gql.wait_until(
+                "user",
+                id="u1",
+                until=lambda user: user.name == "Ada Lovelace",
+                timeout=5,
+                interval=0.1,
+            )
+            assert user.name == "Ada Lovelace"
+            ```
         """
         return _wait_until(
             self,
@@ -1058,27 +2071,83 @@ def build_client(
     auth: Auth | None = None,
     **config_options: Any,
 ) -> GraphQLClient:
-    """Build a client outside pytest, owning every resource it creates (C28).
+    """Build a client, with its transport and its schema, for use outside pytest.
 
-    This is SPEC 3.11's standalone entry point, so it is the standalone
-    spelling of the constructor and ``ClientConfig`` together. The named
-    parameters above are the objects the constructor takes; every other
-    keyword is a ``ClientConfig`` field, which is what makes the documented
-    ``build_client(url=..., headers=..., max_depth=3)`` shape work. Data
-    options land on the configuration rather than on the client, so C4's
-    default schema identity applies to them: ``headers`` given here is what
-    introspection sends, which an authenticated endpoint requires.
+    This is the standalone way to get a `GraphQLClient`. Under pytest, the `gql`
+    fixture does the same work.
 
-    The client transport is derived with the default flag, so no transfer
-    statement is left to get wrong and the cleanup list is the single owner.
-    The handler runs only on an exception, and an exception anywhere up to the
-    return means the client was never delivered, so closing everything there
-    is always correct and no transfer flag is needed to tell the two cases
-    apart. ``probe.close()`` stays on the success path; the later sweep closes
-    nothing a second time, because every wrapper is idempotent.
+    Without a `transport`, it creates an HTTP transport and loads the schema from
+    the server by the standard introspection query. You can skip that request
+    with `schema=` (a schema you have) or `schema_source=` (a `SchemaSource` that
+    knows where to read it). The client owns the transport it created, so close
+    the client when you are done. Use it in a `with` block.
 
-    ``build_client(transport=...)`` creates no pool and closes nothing: the
-    caller owns what the caller supplied.
+    With a `transport`, the function creates no pool and closes nothing. What you
+    give is yours to close. If no schema is given, it is loaded through that
+    transport.
+
+    If anything fails while the client is built, everything that was created is
+    closed before the error leaves, and no connection is left open.
+
+    Each keyword that is not named below is a field of `ClientConfig`, so
+    `build_client(url=..., headers=..., max_depth=3)` works without a config
+    object. A keyword overrides the same field of a `config` that you also give.
+    A name that is not a field raises `ArgumentError` and lists the valid names, so
+    a misspelled option cannot leave you on a default. `headers` given here are
+    what the schema request sends, which an endpoint with a login needs. To rank a
+    header above `Auth`, set it on the returned client with `with_headers()`.
+
+    Args:
+        url: The URL of the GraphQL endpoint.
+        transport: What sends the requests. `None` creates an HTTP transport.
+        cleanup: Internal. A list that receives each resource that this function
+            creates. Leave it out.
+        config: The settings. Keywords below override its fields.
+        schema: A schema to use as it is. The schema is not loaded.
+        schema_source: Where to read the schema from. It is ignored when `schema`
+            is given.
+        scalars: The custom scalars the client knows. `None` creates an empty
+            registry.
+        fake_context: Which test the data of `gql.fake` is for. `None` makes a
+            context for use outside pytest.
+        middleware: Hooks that run around every call. See `Middleware`.
+        auth: The identity applied to every request. See `Auth`.
+        **config_options: Fields of `ClientConfig`, such as `headers`, `timeout`,
+            `max_depth` or `raise_on_error`.
+
+    Returns:
+        A new client.
+
+    Raises:
+        ArgumentError: When a keyword is not a field of `ClientConfig`.
+        SchemaError: When the schema cannot be loaded or is not valid.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import build_client
+
+        with build_client(
+            url="http://localhost:8000/graphql",
+            transport=gql.transport,
+            schema=gql.schema,
+            max_depth=2,
+        ) as client:
+            assert client.config.max_depth == 2
+            assert client.query("user", id="u1").name == "Ada Lovelace"
+        ```
+
+        Against a real server, the call is the same without `transport` and
+        `schema`:
+
+        ```python {.no-exec}
+        from pytest_graphql import build_client
+
+        with build_client(
+            url="http://localhost:8000/graphql",
+            headers={"Authorization": "Bearer my-token"},
+        ) as gql:
+            user = gql.query("user", id="u1")
+        ```
     """
     config = _configure(config, url, config_options)
 
