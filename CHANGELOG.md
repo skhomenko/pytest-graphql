@@ -34,6 +34,17 @@ cycle is promised.
   recorded licence basis, a Lunr language pack, or a file that names a copyleft
   licence fails `tests/docs/`, and no hand-written page may cite a contributor
   document. Migration: none.
+- The whole exception hierarchy is importable from `pytest_graphql`. Twelve
+  classes were missing: `GraphQLTestError`, `GraphQLClientError`,
+  `ArgumentError`, `OperationNotFoundError`, `SchemaError`, `SelectionError`,
+  `SelectionTooLargeError`, `GraphQLTransportError`, `GraphQLRequestError`,
+  `GraphQLConnectionError`, `GraphQLTimeoutError` and `GraphQLHTTPStatusError`.
+  Each has a docstring with an example, and the Errors page of the
+  documentation site is written. No class changes its name, base class, message
+  or attributes. Migration: none.
+- `GraphQLTestCase` is not part of `0.1.0`. There is no built-in `unittest`
+  base class. A `unittest` suite uses `build_client()` and closes the client in
+  `tearDownClass`. Migration: none.
 
 ### Changed
 

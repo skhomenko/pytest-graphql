@@ -318,12 +318,15 @@ always wins. A keyword matching neither set raises `ArgumentError` listing both 
 ### Top-level surface
 
 The top-level `__all__` holds only what a user constructs, catches, annotates or calls:
-`GraphQLClient`, `ClientConfig`, `build_client`, `GraphQLTestCase`, the exception hierarchy,
+`GraphQLClient`, `ClientConfig`, `build_client`, the exception hierarchy,
 `Selection`, `Field`, `AUTO`, `SelectionPolicy`, `CyclePolicy`, `ScalarSpec`,
 `ScalarRegistry`, `DeterministicRandom`, the matcher helpers, `unique`, the `Transport`,
 `SchemaSource`, `Auth` and
 `Middleware` protocols, `BaseMiddleware`, `BearerAuth`, `HeaderAuth`, `RequestInfo`,
 `DiagnosticSnapshot`, `GraphQLResponse`, `Node`, `NodeList`, and `__version__`.
+
+`0.1.0` has no built-in `unittest` base class: a `unittest` suite uses `build_client()` and closes
+the client in `tearDownClass`.
 
 Importable from their own modules, and carrying a compatibility promise only at that path:
 `OperationNamespace`, `FakeNamespace`, `ExpectNamespace`, `HttpxTransport`,
