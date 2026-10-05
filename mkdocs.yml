@@ -28,6 +28,15 @@ nav:
   - FAQ: faq.md
   - API reference: api.md
 
+# A link to a page, a file or an anchor that does not exist is a warning, so
+# --strict fails on it. Anchors are info by default, and the guide pages link to
+# headings in the generated API reference, so a renamed name must fail the build.
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
 # Drops the Lunr language packs, which search does not load for English and
 # which carry Mozilla Public License headers. See mkdocs_hooks.py.
 hooks:
