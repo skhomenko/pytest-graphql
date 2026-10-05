@@ -129,6 +129,7 @@ WRITTEN_PAGES = (
     "selections.md",
     "responses.md",
     "assertions.md",
+    "errors.md",
     "factory.md",
     "authentication.md",
 )

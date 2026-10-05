@@ -16,15 +16,17 @@ import pytest
 
 import pytest_graphql
 
-#: Every documented top-level name the implemented milestones now owe. The
-#: rest of the documented surface (`GraphQLTestCase` and the full exception
-#: hierarchy) lands with the milestones that implement it. The matcher helpers
-#: arrived with M6, minus `approx`, which D4 dropped. The factory surface
-#: (`DeterministicRandom`, `ScalarRegistry`, `ScalarSpec`, `unique` and the
-#: `ScalarNotRegisteredError` it raises) arrived with M7. The execution
-#: errors, `WaitTimeoutError` and `ExpectedErrorNotRaised` arrived with M8.
+#: Every documented top-level name. `GraphQLTestCase` is not part of it: the
+#: first release has no built-in `unittest` base class, and DESIGN_DECISIONS.md,
+#: "Top-level surface", says so. The matcher helpers arrived with M6, minus
+#: `approx`, which D4 dropped. The factory surface (`DeterministicRandom`,
+#: `ScalarRegistry`, `ScalarSpec`, `unique` and the `ScalarNotRegisteredError`
+#: it raises) arrived with M7. The execution errors, `WaitTimeoutError` and
+#: `ExpectedErrorNotRaised` arrived with M8. The rest of the exception
+#: hierarchy was exported afterwards, so a user can catch every class by name.
 IMPLEMENTED_SURFACE = (
     "AUTO",
+    "ArgumentError",
     "Auth",
     "BaseMiddleware",
     "BearerAuth",
@@ -35,21 +37,32 @@ IMPLEMENTED_SURFACE = (
     "ExpectedErrorNotRaised",
     "Field",
     "GraphQLClient",
+    "GraphQLClientError",
+    "GraphQLConnectionError",
     "GraphQLExecutionError",
+    "GraphQLHTTPStatusError",
     "GraphQLPartialDataError",
+    "GraphQLRequestError",
     "GraphQLResponse",
+    "GraphQLTestError",
+    "GraphQLTimeoutError",
+    "GraphQLTransportError",
     "HeaderAuth",
     "Matcher",
     "Middleware",
     "Node",
     "NodeList",
+    "OperationNotFoundError",
     "RequestInfo",
     "ScalarNotRegisteredError",
     "ScalarRegistry",
     "ScalarSpec",
+    "SchemaError",
     "SchemaSource",
     "Selection",
+    "SelectionError",
     "SelectionPolicy",
+    "SelectionTooLargeError",
     "Transport",
     "WaitTimeoutError",
     "__version__",
@@ -76,6 +89,25 @@ def test_the_documented_name_is_importable_from_the_package(name: str) -> None:
         f"{name} is documented as top-level public API and is not exported."
     )
     assert name in pytest_graphql.__all__
+
+
+def test_every_exception_class_of_the_library_is_exported() -> None:
+    # The classes are read from the module that defines them, so a class added
+    # there and left out of `__all__` fails here, with no second list to update.
+    from pytest_graphql._core import errors
+
+    defined = {
+        name
+        for name, value in vars(errors).items()
+        if isinstance(value, type)
+        and issubclass(value, errors.GraphQLTestError)
+        and value.__module__ == errors.__name__
+    }
+
+    assert {"GraphQLTestError", "WaitTimeoutError"} <= defined
+    assert defined <= set(pytest_graphql.__all__)
+    for name in defined:
+        assert getattr(pytest_graphql, name) is getattr(errors, name)
 
 
 def test_everything_exported_is_reachable() -> None:

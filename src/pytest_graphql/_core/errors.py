@@ -56,7 +56,30 @@ def _pluralize(word: str) -> str:
 
 
 class GraphQLTestError(Exception):
-    """Base of every exception this package raises. Catch this to catch all."""
+    """The base of every exception that `pytest_graphql` raises on purpose.
+
+    Catch it to handle any failure of the library in one place. Every other
+    exception of the library is a subclass of it.
+
+    The library still raises a plain `TypeError` or `ValueError` when a call is
+    wrong in an ordinary Python way, for example an `expect_error()` count
+    below 1. Those are not subclasses of this class.
+
+    It is a different class from `graphql.GraphQLError` of graphql-core, which
+    describes an error in a GraphQL document or result.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import GraphQLClientError, GraphQLTestError
+
+        try:
+            gql.query("usr")
+        except GraphQLTestError as error:
+            assert isinstance(error, GraphQLClientError)
+        else:
+            raise AssertionError("expected an error")
+        ```
+    """
 
     #: Set only when even an empty message would let the ``repr`` show a
     #: request's secret (``_check_exception_text`` in diagnostics.py).
@@ -76,19 +99,130 @@ class GraphQLTestError(Exception):
 
 
 class GraphQLClientError(GraphQLTestError):
-    """Raised before any network call."""
+    """The client could not finish a step that it does itself.
+
+    These steps are checking a call against the schema, loading the schema,
+    making a value for `gql.fake` and showing a request as text. The class
+    says what the client was doing. It does not say who caused the failure,
+    so read the subclass and the message. The message says what was wrong,
+    what was expected and what to do about it.
+
+    Most often the call and the schema disagree. A test that only wants a
+    result should let this error fail the test. Catch it to check that a
+    helper of your own rejects a bad call. A bad name, argument or selection
+    is refused before anything is sent: `OperationNotFoundError`,
+    `ArgumentError`, `SelectionError` and `SelectionTooLargeError` raise
+    before the client sends anything. `SchemaError` can follow a request,
+    because the introspection query that loads the schema goes to the server,
+    and a server that refuses it is the cause. `DiagnosticRenderError` comes
+    after a request was captured.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ArgumentError, GraphQLClientError
+
+        try:
+            gql.query("user", idd="u1")
+        except GraphQLClientError as error:
+            assert isinstance(error, ArgumentError)
+        else:
+            raise AssertionError("expected an error")
+        ```
+    """
 
 
 class OperationNotFoundError(GraphQLClientError):
-    """No operation of the given kind has the given name."""
+    """The schema has no query or mutation with the name you used.
+
+    `query()`, `mutation()` and `wait_until()` raise this when the name matches
+    no operation of that kind. A name matches in its exact spelling and in
+    snake_case. The message suggests the closest names and says how many
+    operations of that kind the schema has.
+
+    Args:
+        kind: `"query"` or `"mutation"`.
+        name: The name that was used.
+        available: Every name of that kind in the schema.
+        total_count: How many names of that kind the schema has.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import OperationNotFoundError
+
+        try:
+            gql.query("usr")
+        except OperationNotFoundError as error:
+            assert error.kind == "query"
+            assert error.name == "usr"
+            assert "user" in error.available
+        else:
+            raise AssertionError("expected an error")
+        ```
+    """
 
     def __init__(
         self, *, kind: str, name: str, available: Sequence[str], total_count: int
     ) -> None:
         self.kind = kind
+        """The kind that was looked up, `"query"` or `"mutation"`.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import OperationNotFoundError
+
+            try:
+                gql.query("usr")
+            except OperationNotFoundError as error:
+                assert error.kind == "query"
+            else:
+                raise AssertionError("expected an error")
+            ```
+        """
         self.name = name
+        """The name that matched no operation.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import OperationNotFoundError
+
+            try:
+                gql.query("usr")
+            except OperationNotFoundError as error:
+                assert error.name == "usr"
+            else:
+                raise AssertionError("expected an error")
+            ```
+        """
         self.available = tuple(available)
+        """Every name of that kind in the schema, as a tuple.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import OperationNotFoundError
+
+            try:
+                gql.query("usr")
+            except OperationNotFoundError as error:
+                assert "user" in error.available
+            else:
+                raise AssertionError("expected an error")
+            ```
+        """
         self.total_count = total_count
+        """How many names of that kind the schema has.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import OperationNotFoundError
+
+            try:
+                gql.query("usr")
+            except OperationNotFoundError as error:
+                assert error.total_count == len(error.available)
+            else:
+                raise AssertionError("expected an error")
+            ```
+        """
         super().__init__(self._render())
 
     def _render(self) -> str:
@@ -105,7 +239,46 @@ class OperationNotFoundError(GraphQLClientError):
 
 
 class ArgumentError(GraphQLClientError):
-    """An operation has no argument, or an input object has no field, by that name."""
+    """An argument of an operation is unknown, missing, repeated or not valid.
+
+    The client raises this before it sends anything, for any of these reasons:
+
+    - The operation has no argument of that name, or an input object has no
+      field of that name. The message shows the signature and suggests the
+      closest name.
+    - A required argument was not given.
+    - One argument was given twice, for example as `user_id` and `userId`.
+    - A value does not fit the declared type of its argument.
+    - `wait_until()` was given a mutation. Only queries can be polled.
+    - A call or `build_client()` got a keyword that is neither an argument nor
+      a configuration option.
+
+    Args:
+        kind: `"query"` or `"mutation"`.
+        operation_name: The name of the operation.
+        bad_name: The name that is not valid.
+        signature: The schema signature of the operation, such as
+            `user(id: ID!): User`.
+        candidates: The names that are valid in the place of `bad_name`. They
+            are the source of the "Did you mean" hint.
+        input_type_name: The input type, when `bad_name` was meant as a field
+            of an input object. Leave it out otherwise.
+        input_fields: The fields of that input type. Leave it out otherwise.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ArgumentError
+
+        try:
+            gql.query("user", idd="u1")
+        except ArgumentError as error:
+            assert error.bad_name == "idd"
+            assert error.signature == "user(id: ID!): User"
+            assert "Did you mean 'id'?" in str(error)
+        else:
+            raise AssertionError("expected an error")
+        ```
+    """
 
     def __init__(
         self,
@@ -119,12 +292,122 @@ class ArgumentError(GraphQLClientError):
         input_fields: Sequence[str] | None = None,
     ) -> None:
         self.kind = kind
+        """The kind of the operation, `"query"` or `"mutation"`.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import ArgumentError
+
+            try:
+                gql.query("user", idd="u1")
+            except ArgumentError as error:
+                assert error.kind == "query"
+            else:
+                raise AssertionError("expected an error")
+            ```
+        """
         self.operation_name = operation_name
+        """The name of the operation.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import ArgumentError
+
+            try:
+                gql.query("user", idd="u1")
+            except ArgumentError as error:
+                assert error.operation_name == "user"
+            else:
+                raise AssertionError("expected an error")
+            ```
+        """
         self.bad_name = bad_name
+        """The name that is not valid, or the name of the argument that has a problem.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import ArgumentError
+
+            try:
+                gql.query("user", idd="u1")
+            except ArgumentError as error:
+                assert error.bad_name == "idd"
+            else:
+                raise AssertionError("expected an error")
+            ```
+        """
         self.signature = signature
+        """The schema signature of the operation. It is empty when the error does not
+        come from one argument name.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import ArgumentError
+
+            try:
+                gql.query("user", idd="u1")
+            except ArgumentError as error:
+                assert error.signature == "user(id: ID!): User"
+            else:
+                raise AssertionError("expected an error")
+            ```
+        """
         self.candidates = tuple(candidates)
+        """The valid names that stand in the place of `bad_name`, as a tuple.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import ArgumentError
+
+            try:
+                gql.query("user", idd="u1")
+            except ArgumentError as error:
+                assert error.candidates == ("id",)
+            else:
+                raise AssertionError("expected an error")
+            ```
+        """
         self.input_type_name = input_type_name
+        """The input type, when `bad_name` was meant as a field of an input object.
+        Otherwise `None`.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import ArgumentError
+
+            error = ArgumentError(
+                kind="mutation",
+                operation_name="createPost",
+                bad_name="titel",
+                signature="createPost(input: CreatePostInput!): Post",
+                candidates=["title", "authorId"],
+                input_type_name="CreatePostInput",
+                input_fields=["title", "authorId"],
+            )
+            assert error.input_type_name == "CreatePostInput"
+            other = ArgumentError.not_a_query(kind="mutation", name="x")
+            assert other.input_type_name is None
+            ```
+        """
         self.input_fields = tuple(input_fields) if input_fields is not None else None
+        """The fields of the input type, as a tuple. `None` when there is no input type.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import ArgumentError
+
+            error = ArgumentError(
+                kind="mutation",
+                operation_name="createPost",
+                bad_name="titel",
+                signature="createPost(input: CreatePostInput!): Post",
+                candidates=["title", "authorId"],
+                input_type_name="CreatePostInput",
+                input_fields=["title", "authorId"],
+            )
+            assert error.input_fields == ("title", "authorId")
+            ```
+        """
         super().__init__(self._render())
 
     def _render(self) -> str:
@@ -170,7 +453,33 @@ class ArgumentError(GraphQLClientError):
     def missing_argument(
         cls, *, kind: str, operation_name: str, arg_name: str, signature: str
     ) -> ArgumentError:
-        """SPEC 8.2: a required argument the caller never supplied."""
+        """Build the error for a required argument that the call did not give.
+
+        The library calls this when a required argument is missing. You rarely
+        need it yourself.
+
+        Args:
+            kind: `"query"` or `"mutation"`.
+            operation_name: The name of the operation.
+            arg_name: The name of the missing argument.
+            signature: The schema signature of the operation.
+
+        Returns:
+            The error, ready to raise.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import ArgumentError
+
+            error = ArgumentError.missing_argument(
+                kind="query",
+                operation_name="user",
+                arg_name="id",
+                signature="user(id: ID!): User",
+            )
+            assert "missing required argument 'id'" in str(error)
+            ```
+        """
         message = (
             f"{kind} {operation_name!r} is missing required argument {arg_name!r}.\n"
             f"  Signature: {signature}"
@@ -185,11 +494,35 @@ class ArgumentError(GraphQLClientError):
     def reserved_name_collision(
         cls, *, kind: str, operation_name: str, arg_name: str, signature: str
     ) -> ArgumentError:
-        """B23: a required argument only a reserved per-call option can name.
+        """Build the error for a required argument named like a call option.
 
-        Every keyword in the per-call option table is always read as that
-        option, so a schema argument sharing its name can never be reached
-        through a plain keyword. ``variables={...}`` is the one route left.
+        Every keyword that a call accepts as an option, such as `raw` or
+        `timeout`, is always read as that option. A schema argument with the same
+        name cannot be given as a plain keyword. `variables={...}` is the one
+        way left. The library calls this when such an argument is required and
+        missing. You rarely need it yourself.
+
+        Args:
+            kind: `"query"` or `"mutation"`.
+            operation_name: The name of the operation.
+            arg_name: The name of the argument.
+            signature: The schema signature of the operation.
+
+        Returns:
+            The error, ready to raise.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import ArgumentError
+
+            error = ArgumentError.reserved_name_collision(
+                kind="query",
+                operation_name="find",
+                arg_name="raw",
+                signature="find(raw: String!): Item",
+            )
+            assert "variables=" in str(error)
+            ```
         """
         message = (
             f"{kind} {operation_name!r} has a required argument {arg_name!r} "
@@ -214,13 +547,39 @@ class ArgumentError(GraphQLClientError):
         second_key: str,
         signature: str,
     ) -> ArgumentError:
-        """Two different supplied keys resolved to the same schema argument.
+        """Build the error for one argument that the call gave twice.
 
-        ``first_key`` and ``second_key`` are the exact and snake spelling of
-        one argument, or an explicit ``variables={...}`` entry alongside a
-        plain keyword for the same name: whichever pair a caller actually
-        supplied together. Silently keeping one and dropping the other would
-        be a value the caller wrote and never sees again.
+        The two keys can be the exact name and the snake_case name of one
+        argument, or a `variables={...}` entry next to a plain keyword. The
+        client refuses both, because it would have to drop one of the values
+        without telling you. The library calls this. You rarely need it
+        yourself.
+
+        Args:
+            kind: `"query"` or `"mutation"`.
+            operation_name: The name of the operation.
+            resolved_name: The schema name of the argument.
+            first_key: The first key that named it.
+            second_key: The second key that named it.
+            signature: The schema signature of the operation.
+
+        Returns:
+            The error, ready to raise.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import ArgumentError
+
+            error = ArgumentError.duplicate_argument(
+                kind="mutation",
+                operation_name="updateUser",
+                resolved_name="userId",
+                first_key="user_id",
+                second_key="userId",
+                signature="updateUser(userId: ID!): User",
+            )
+            assert "received argument 'userId' twice" in str(error)
+            ```
         """
         message = (
             f"{kind} {operation_name!r} received argument {resolved_name!r} twice, "
@@ -237,7 +596,40 @@ class ArgumentError(GraphQLClientError):
     def invalid_value(
         cls, *, kind: str, operation_name: str, arg_name: str, detail: str
     ) -> ArgumentError:
-        """B14: a supplied value fails to coerce against its declared type."""
+        """Build the error for a value that does not fit the type of its argument.
+
+        The library calls this when a value fails the type check. You rarely
+        need it yourself.
+
+        Args:
+            kind: `"query"` or `"mutation"`.
+            operation_name: The name of the operation.
+            arg_name: The name of the argument.
+            detail: What was wrong with the value.
+
+        Returns:
+            The error, ready to raise.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import ArgumentError
+
+            try:
+                gql.query("user", id=object())
+            except ArgumentError as error:
+                assert "invalid value for argument 'id'" in str(error)
+            else:
+                raise AssertionError("expected an error")
+
+            error = ArgumentError.invalid_value(
+                kind="query",
+                operation_name="user",
+                arg_name="id",
+                detail="$id is not a valid value of type 'ID!'.",
+            )
+            assert error.bad_name == "id"
+            ```
+        """
         message = (
             f"{kind} {operation_name!r} received an invalid value for argument "
             f"{arg_name!r}.\n"
@@ -249,10 +641,29 @@ class ArgumentError(GraphQLClientError):
 
     @classmethod
     def not_a_query(cls, *, kind: str, name: str) -> ArgumentError:
-        """``wait_until`` was given an operation that is not a query.
+        """Build the error for `wait_until()` called on a mutation.
 
-        A poll repeats its call, so a mutation would repeat its side effect
-        on every attempt. The schema decided ``kind``, never the name.
+        A poll repeats its call, so a mutation would repeat its side effect on
+        every attempt. The library calls this. You rarely need it yourself.
+
+        Args:
+            kind: What the operation is, such as `"mutation"`.
+            name: The name of the operation.
+
+        Returns:
+            The error, ready to raise.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import ArgumentError
+
+            try:
+                gql.wait_until("updateUser", until=bool)
+            except ArgumentError as error:
+                assert "polls queries only" in str(error)
+            else:
+                raise AssertionError("expected an error")
+            ```
         """
         message = (
             f"wait_until polls queries only, and {name!r} is a {kind}.\n"
@@ -265,13 +676,38 @@ class ArgumentError(GraphQLClientError):
     def unknown_option(
         cls, *, callable_name: str, bad_name: str, candidates: Sequence[str]
     ) -> ArgumentError:
-        """A configuration keyword a public entry point does not accept.
+        """Build the error for a keyword that is not a configuration option.
 
-        The call grammar routes a name the caller wrote and the library does
-        not know to this class, whether the name was meant as a schema
-        argument or as a configuration option. Accepting it silently would
-        leave a client running on the default the caller believed they had
-        replaced.
+        The client refuses an unknown keyword, because accepting it would leave
+        the client running with a default that you believed you had replaced.
+        The library calls this. You rarely need it yourself.
+
+        Args:
+            callable_name: The name of the function that got the keyword.
+            bad_name: The keyword that is not known.
+            candidates: The options that the function accepts. The message
+                lists them and suggests the closest one.
+
+        Returns:
+            The error, ready to raise.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import ArgumentError, build_client
+
+            try:
+                build_client(
+                    url="http://localhost:8000/graphql",
+                    transport=gql.transport,
+                    schema=gql.schema,
+                    timout=5,
+                )
+            except ArgumentError as error:
+                assert error.bad_name == "timout"
+                assert "Did you mean 'timeout'?" in str(error)
+            else:
+                raise AssertionError("expected an error")
+            ```
         """
         names = ", ".join(sorted(candidates))
         message = (
@@ -289,12 +725,58 @@ class ArgumentError(GraphQLClientError):
 
 
 class SelectionError(GraphQLClientError):
-    """An explicit selection is invalid, or the assembled document fails validation."""
+    """A selection is not valid, or the finished document fails the schema check.
+
+    The client raises this before it sends anything, in these cases:
+
+    - `fields` names a field that the type does not have. The message lists the
+      valid names and suggests the closest one.
+    - `fields` asks for sub-fields of a scalar or an enum.
+    - A snake_case field name matches two fields of the schema.
+    - Auto-selection leaves no field to ask for.
+    - A document that you give to `execute()` fails validation against the
+      schema. The message is then the message of graphql-core.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import SelectionError
+
+        try:
+            gql.query("user", id="u1", fields=["nme"])
+        except SelectionError as error:
+            assert "no field 'nme' on User" in str(error)
+            assert "Did you mean 'name'?" in str(error)
+        else:
+            raise AssertionError("expected an error")
+        ```
+    """
 
     @classmethod
     def unknown_field(
         cls, type_name: str, bad_name: str, available: Sequence[str]
     ) -> SelectionError:
+        """Build the error for a field that the type does not have.
+
+        The library calls this when `fields` names such a field. You rarely need
+        it yourself.
+
+        Args:
+            type_name: The name of the type.
+            bad_name: The field name that was written.
+            available: The field names of the type. The message lists them and
+                suggests the closest one.
+
+        Returns:
+            The error, ready to raise.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import SelectionError
+
+            error = SelectionError.unknown_field("User", "nme", ["id", "name"])
+            assert "Did you mean 'name'?" in str(error)
+            ```
+        """
         lines = [f"no field {bad_name!r} on {type_name}."]
         lines.append(f"  Available fields: {', '.join(available)}")
         match = _best_match(bad_name, available)
@@ -306,7 +788,29 @@ class SelectionError(GraphQLClientError):
     def ambiguous_field(
         cls, type_name: str, bad_name: str, spellings: Sequence[str]
     ) -> SelectionError:
-        """A snake spelling that two or more schema fields share."""
+        """Build the error for a snake_case name that two or more fields share.
+
+        The library calls this when `fields` uses such a name. You rarely need
+        it yourself.
+
+        Args:
+            type_name: The name of the type.
+            bad_name: The snake_case name that was written.
+            spellings: The exact field names that have this snake_case form.
+
+        Returns:
+            The error, ready to raise.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import SelectionError
+
+            error = SelectionError.ambiguous_field(
+                "User", "user_id", ["userId", "UserId"]
+            )
+            assert "ambiguous" in str(error)
+            ```
+        """
         return cls(
             f"{bad_name!r} is ambiguous on {type_name}: it matches "
             f"{', '.join(spellings)}.\n"
@@ -315,12 +819,56 @@ class SelectionError(GraphQLClientError):
 
     @classmethod
     def from_validation(cls, message: str) -> SelectionError:
-        """Wrap a graphql-core document-validation message, verbatim."""
+        """Build the error for a document that fails validation.
+
+        The text of graphql-core is kept as it is. The library calls this. You
+        rarely need it yourself.
+
+        Args:
+            message: The validation message.
+
+        Returns:
+            The error, ready to raise.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import SelectionError
+
+            try:
+                gql.execute("{ nope }")
+            except SelectionError as error:
+                assert "Cannot query field 'nope'" in str(error)
+            else:
+                raise AssertionError("expected an error")
+
+            error = SelectionError.from_validation("Cannot query field 'nope'.")
+            assert str(error) == "Cannot query field 'nope'."
+            ```
+        """
         return cls(message)
 
     @classmethod
     def on_leaf_type(cls, *, field_name: str, type_name: str) -> SelectionError:
-        """An explicit selection was given for a field with no fields to select."""
+        """Build the error for sub-fields that were asked for on a scalar or an enum.
+
+        The library calls this when `fields` writes sub-fields under such a
+        field. You rarely need it yourself.
+
+        Args:
+            field_name: The name of the field.
+            type_name: The name of its scalar or enum type.
+
+        Returns:
+            The error, ready to raise.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import SelectionError
+
+            error = SelectionError.on_leaf_type(field_name="name", type_name="String")
+            assert "has no fields to select" in str(error)
+            ```
+        """
         return cls(
             f"{field_name!r} returns {type_name}, a scalar or enum, which has "
             "no fields to select.\n"
@@ -329,7 +877,26 @@ class SelectionError(GraphQLClientError):
 
     @classmethod
     def no_selectable_fields(cls, type_name: str) -> SelectionError:
-        """SPEC 5.4 rule 9: an empty selection set is not a valid document."""
+        """Build the error for an auto-selection that left no field to ask for.
+
+        An empty selection is not a valid document. The message lists the
+        settings that widen the selection. The library calls this. You rarely
+        need it yourself.
+
+        Args:
+            type_name: The name of the type.
+
+        Returns:
+            The error, ready to raise.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import SelectionError
+
+            error = SelectionError.no_selectable_fields("User")
+            assert "produced no fields" in str(error)
+            ```
+        """
         return cls(
             f"auto-selection of {type_name!r} produced no fields.\n"
             "  Every field was removed by the policy, needs an argument, or "
@@ -343,7 +910,32 @@ class SelectionError(GraphQLClientError):
 
 
 class SelectionTooLargeError(GraphQLClientError):
-    """Auto-selection produced more fields than the configured limit."""
+    """Auto-selection would ask for more fields than `max_fields` allows.
+
+    The client builds the selection of a call by walking the schema from the
+    return type of the operation. When the walk finds more fields than
+    `ClientConfig.max_fields`, which is 2000 by default, it stops and raises
+    this error instead of sending a very large document. The message lists the
+    ways to make the selection smaller.
+
+    Args:
+        type_name: The name of the type that was auto-selected.
+        field_count: How many fields the selection would have had.
+        limit: The limit that applied.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import SelectionTooLargeError
+
+        try:
+            gql.query("user", id="u1", max_fields=3)
+        except SelectionTooLargeError as error:
+            assert error.type_name == "User"
+            assert error.field_count > error.limit == 3
+        else:
+            raise AssertionError("expected an error")
+        ```
+    """
 
     _SUGGESTIONS = (
         "  Reduce it by one of:\n"
@@ -354,8 +946,50 @@ class SelectionTooLargeError(GraphQLClientError):
 
     def __init__(self, *, type_name: str, field_count: int, limit: int) -> None:
         self.type_name = type_name
+        """The name of the type that was auto-selected.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import SelectionTooLargeError
+
+            try:
+                gql.query("user", id="u1", max_fields=3)
+            except SelectionTooLargeError as error:
+                assert error.type_name == "User"
+            else:
+                raise AssertionError("expected an error")
+            ```
+        """
         self.field_count = field_count
+        """How many fields the selection would have had.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import SelectionTooLargeError
+
+            try:
+                gql.query("user", id="u1", max_fields=3)
+            except SelectionTooLargeError as error:
+                assert error.field_count > error.limit
+            else:
+                raise AssertionError("expected an error")
+            ```
+        """
         self.limit = limit
+        """The limit that applied, from `max_fields`.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import SelectionTooLargeError
+
+            try:
+                gql.query("user", id="u1", max_fields=3)
+            except SelectionTooLargeError as error:
+                assert error.limit == 3
+            else:
+                raise AssertionError("expected an error")
+            ```
+        """
         first = (
             f"auto-selection of {type_name!r} produced {field_count:,} fields "
             f"(limit {limit})."
@@ -364,10 +998,52 @@ class SelectionTooLargeError(GraphQLClientError):
 
 
 class SchemaError(GraphQLClientError):
-    """A referenced type, or a required schema shape, does not exist."""
+    """A type that you named is not in the schema, or the schema cannot be used.
+
+    The client raises this when:
+
+    - `gql.fake` or `gql.expect` is asked for a type that the schema does not
+      have, or that is not the right kind of type for it;
+    - a selection names a type in a fragment that is not in the schema, or is
+      not a possible type of the field;
+    - the schema cannot be loaded, because the introspection query failed, a
+      schema file cannot be read, or the schema is not valid.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import SchemaError
+
+        try:
+            gql.fake.Nope()
+        except SchemaError as error:
+            assert "no type named 'Nope'" in str(error)
+        else:
+            raise AssertionError("expected an error")
+        ```
+    """
 
     @classmethod
     def unknown_type(cls, name: str, available: Sequence[str]) -> SchemaError:
+        """Build the error for a type that the schema does not have.
+
+        The library calls this. You rarely need it yourself.
+
+        Args:
+            name: The type name that was used.
+            available: The type names of the schema. The message suggests the
+                closest one.
+
+        Returns:
+            The error, ready to raise.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import SchemaError
+
+            error = SchemaError.unknown_type("Usr", ["User", "Team"])
+            assert "Did you mean 'User'?" in str(error)
+            ```
+        """
         lines = [f"no type named {name!r}."]
         match = _best_match(name, available)
         if match:
@@ -376,6 +1052,25 @@ class SchemaError(GraphQLClientError):
 
     @classmethod
     def not_a_possible_type(cls, name: str, parent_name: str) -> SchemaError:
+        """Build the error for a fragment type that the field can never return.
+
+        The library calls this. You rarely need it yourself.
+
+        Args:
+            name: The type of the fragment.
+            parent_name: The type that the fragment is inside.
+
+        Returns:
+            The error, ready to raise.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import SchemaError
+
+            error = SchemaError.not_a_possible_type("Team", "User")
+            assert "not a possible type of 'User'" in str(error)
+            ```
+        """
         return cls(f"{name!r} is not a possible type of {parent_name!r}.")
 
 
@@ -572,14 +1267,43 @@ class DiagnosticRenderError(GraphQLClientError):
 
 
 class GraphQLTransportError(GraphQLTestError):
-    """Raised by the network layer (C3, C13).
+    """The request did not give a usable GraphQL answer.
 
-    Every instance carries ``request``, the redacted ``DiagnosticSnapshot``
-    of the request that failed, never the live ``RequestInfo``
-    (DESIGN_DECISIONS.md section 7, "Boundary"). ``body_excerpt`` is the
-    capped, already scrubbed-and-escaped response text C3 requires for an
-    unparsable response; it is empty for a failure that never received a
-    body, such as a connection or timeout error.
+    This is the base of the errors that come from the network layer. Catch it
+    to handle every failure of the connection and of the HTTP answer in one
+    place. A test that wants a result should let it fail, because the server is
+    not reachable or is not answering as GraphQL.
+
+    The class is raised itself when:
+
+    - the status is 2xx but the body is not a GraphQL response;
+    - the body is larger than `max_response_bytes`;
+    - the response names a character set that Python does not know;
+    - the client cannot build the request, for example because the URL is
+      not valid.
+
+    Its subclasses are `GraphQLConnectionError`, `GraphQLTimeoutError` and
+    `GraphQLHTTPStatusError`.
+
+    The error holds a copy of the request with every secret removed. It never
+    holds the live request, so a credential cannot reach your test report
+    through it.
+
+    Args:
+        message: The error text.
+        request: The request that failed, as a `DiagnosticSnapshot`.
+        body_excerpt: The start of the response body. It is cut to a short
+            length and has secrets removed. It is empty when no body arrived.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import GraphQLTestError, GraphQLTransportError
+
+        request = gql.query("users", raw=True).request
+        error = GraphQLTransportError("not a GraphQL response", request=request)
+        assert isinstance(error, GraphQLTestError)
+        assert error.request.kind == "query"
+        ```
     """
 
     def __init__(
@@ -590,21 +1314,188 @@ class GraphQLTransportError(GraphQLTestError):
         body_excerpt: str = "",
     ) -> None:
         self.request = request
+        """The request that failed, with every secret removed.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import GraphQLTransportError
+
+            request = gql.query("users", raw=True).request
+            error = GraphQLTransportError("not a GraphQL response", request=request)
+            assert error.request is request
+            assert error.request.kind == "query"
+            ```
+        """
         self.body_excerpt = body_excerpt
+        """The start of the response body, cut short and with secrets removed.
+        It is an empty string when no body arrived.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import GraphQLTransportError
+
+            request = gql.query("users", raw=True).request
+            error = GraphQLTransportError(
+                "not JSON", request=request, body_excerpt="<html>"
+            )
+            assert error.body_excerpt == "<html>"
+            assert GraphQLTransportError("no body", request=request).body_excerpt == ""
+            ```
+        """
         super().__init__(message)
         request._guard.check_exception(self)
 
 
 class GraphQLConnectionError(GraphQLTransportError):
-    """The connection could not be established, after every retry attempt."""
+    """The client could not reach the server.
+
+    The connection failed, for example because the server is down, the host
+    name does not resolve, or a connection attempt timed out. A query is tried
+    again after a connection failure, up to `ClientConfig.retries` times, and
+    this error is raised when the last try fails. A mutation is not tried again,
+    unless the call has `idempotent=True`, because the server may have run it.
+
+    Catch it to test how your code behaves when the server is down. Check
+    `request` to see what was being sent.
+
+    The example uses a transport that raises this error, as the HTTP transport
+    does when no server answers, so that it needs no network.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import GraphQLConnectionError, build_client
+
+
+        class FailingTransport:
+            # Fails the way the HTTP transport does when no server answers.
+
+            def send(self, request, *, timeout):
+                raise GraphQLConnectionError(
+                    "connection failed: connection refused",
+                    request=request.redacted(),
+                )
+
+            def close(self):
+                pass
+
+
+        client = build_client(
+            url="http://localhost:8000/graphql",
+            transport=FailingTransport(),
+            schema=gql.schema,
+        )
+        try:
+            client.query("users")
+        except GraphQLConnectionError as error:
+            assert error.request.url == "http://localhost:8000/graphql"
+        else:
+            raise AssertionError("expected an error")
+        ```
+    """
 
 
 class GraphQLTimeoutError(GraphQLTransportError):
-    """A read or write timeout. Never retried (SPEC 5.6)."""
+    """The server did not answer in time.
+
+    The wait for the server, the write of the request or the read of the answer
+    took longer than `ClientConfig.timeout`. The client never tries again after
+    this error, because the server may already have started the work. A timeout
+    while connecting is a `GraphQLConnectionError` instead.
+
+    Catch it to test how your code behaves when the server is slow. The limit
+    for one call is set with `timeout=` on the call or in `ClientConfig`.
+
+    The example uses a transport that raises this error, as the HTTP transport
+    does when a read times out, so that it needs no network.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import GraphQLTimeoutError, build_client
+
+
+        class FailingTransport:
+            # Fails the way the HTTP transport does when a read times out.
+
+            def send(self, request, *, timeout):
+                raise GraphQLTimeoutError(
+                    "request timed out: read timeout",
+                    request=request.redacted(),
+                )
+
+            def close(self):
+                pass
+
+
+        client = build_client(
+            url="http://localhost:8000/graphql",
+            transport=FailingTransport(),
+            schema=gql.schema,
+        )
+        try:
+            client.query("users")
+        except GraphQLTimeoutError as error:
+            assert "timed out" in str(error)
+        else:
+            raise AssertionError("expected an error")
+        ```
+    """
 
 
 class GraphQLHTTPStatusError(GraphQLTransportError):
-    """A non-2xx response carrying no valid GraphQL envelope (C3)."""
+    """The server answered with an error status and no GraphQL result.
+
+    The status was not 2xx, for example 502 from a proxy or 401 from a gateway,
+    and the body was not a GraphQL response. `status_code` holds the status and
+    `body_excerpt` holds the start of the body, with secrets removed. A non-2xx
+    answer that is a valid GraphQL response is not this error. It becomes a
+    `GraphQLRequestError` or a `GraphQLExecutionError`, according to its body.
+
+    Catch it to test how your code behaves when something in front of the server
+    fails.
+
+    The example uses a transport that raises this error, as the HTTP transport
+    does for a 502 answer, so that it needs no network.
+
+    Args:
+        message: The error text.
+        request: The request that failed, as a `DiagnosticSnapshot`.
+        status_code: The HTTP status code of the answer.
+        body_excerpt: The start of the body, cut short and with secrets removed.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import GraphQLHTTPStatusError, build_client
+
+
+        class FailingTransport:
+            # Fails the way the HTTP transport does for a 502 answer.
+
+            def send(self, request, *, timeout):
+                raise GraphQLHTTPStatusError(
+                    "request failed with status 502: Bad Gateway",
+                    request=request.redacted(),
+                    status_code=502,
+                    body_excerpt="Bad Gateway",
+                )
+
+            def close(self):
+                pass
+
+
+        client = build_client(
+            url="http://localhost:8000/graphql",
+            transport=FailingTransport(),
+            schema=gql.schema,
+        )
+        try:
+            client.query("users")
+        except GraphQLHTTPStatusError as error:
+            assert error.status_code == 502
+            assert error.body_excerpt == "Bad Gateway"
+        else:
+            raise AssertionError("expected an error")
+        ```
+    """
 
     def __init__(
         self,
@@ -615,19 +1506,80 @@ class GraphQLHTTPStatusError(GraphQLTransportError):
         body_excerpt: str = "",
     ) -> None:
         self.status_code = status_code
+        """The HTTP status code of the answer.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import GraphQLHTTPStatusError
+
+            request = gql.query("users", raw=True).request
+            error = GraphQLHTTPStatusError(
+                "bad gateway", request=request, status_code=502
+            )
+            assert error.status_code == 502
+            ```
+        """
         super().__init__(message, request=request, body_excerpt=body_excerpt)
 
 
 class GraphQLRequestError(GraphQLTestError):
-    """The server rejected the request before execution (C3).
+    """The server refused the request before it ran it.
 
-    A valid GraphQL envelope with no ``data`` entry at all, at any status,
-    means the server never started executing the request. This is distinct
-    from ``GraphQLExecutionError``, which means execution ran: an envelope
-    carrying a ``data`` entry, even ``null``, went through execution before
-    it failed. ``errors`` holds the envelope's structured error objects,
-    already scrubbed and escaped; ``request`` is the redacted snapshot, per
-    the same boundary rule every transport exception follows.
+    The server answered with a GraphQL response that has `errors` and no `data`
+    at all, whatever the status. This is what a server sends for a document it
+    cannot parse or validate, or for a request that it does not accept. The
+    operation never started, so this differs from `GraphQLExecutionError`,
+    where the operation ran and failed. A response with a `data` entry, even a
+    `null` one, is an execution result.
+
+    `expect_error()` does not catch this error, because it is not an execution
+    error. To test that a server refuses a request, catch this class.
+
+    Args:
+        message: The error text.
+        request: The request that failed, as a `DiagnosticSnapshot`.
+        status_code: The HTTP status code of the answer.
+        media_type: The media type of the answer.
+        errors: The error objects of the answer, as mappings. Secrets are
+            removed.
+
+    Examples:
+        The example uses a transport that raises this error, as the HTTP
+        transport does for a rejected document, so that it needs no network.
+
+        ```python {.exec}
+        from pytest_graphql import GraphQLRequestError, build_client
+
+
+        class RejectingTransport:
+            # Fails the way the HTTP transport does for a document the server rejects.
+
+            def send(self, request, *, timeout):
+                raise GraphQLRequestError(
+                    "the server rejected the request before execution (status 400).",
+                    request=request.redacted(),
+                    status_code=400,
+                    media_type="application/json",
+                    errors=({"message": "Syntax Error: Unexpected Name 'usr'."},),
+                )
+
+            def close(self):
+                pass
+
+
+        client = build_client(
+            url="http://localhost:8000/graphql",
+            transport=RejectingTransport(),
+            schema=gql.schema,
+        )
+        try:
+            client.query("users")
+        except GraphQLRequestError as error:
+            assert error.status_code == 400
+            assert error.errors[0]["message"].startswith("Syntax Error")
+        else:
+            raise AssertionError("expected an error")
+        ```
     """
 
     def __init__(
@@ -640,9 +1592,73 @@ class GraphQLRequestError(GraphQLTestError):
         errors: tuple[Mapping[str, Any], ...],
     ) -> None:
         self.request = request
+        """The request that failed, with every secret removed.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import GraphQLRequestError
+
+            error = GraphQLRequestError(
+                "rejected",
+                request=gql.query("users", raw=True).request,
+                status_code=400,
+                media_type="application/json",
+                errors=({"message": "Syntax Error"},),
+            )
+            assert error.request.kind == "query"
+            ```
+        """
         self.status_code = status_code
+        """The HTTP status code of the answer.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import GraphQLRequestError
+
+            error = GraphQLRequestError(
+                "rejected",
+                request=gql.query("users", raw=True).request,
+                status_code=400,
+                media_type="application/json",
+                errors=({"message": "Syntax Error"},),
+            )
+            assert error.status_code == 400
+            ```
+        """
         self.media_type = media_type
+        """The media type of the answer, such as `application/json`.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import GraphQLRequestError
+
+            error = GraphQLRequestError(
+                "rejected",
+                request=gql.query("users", raw=True).request,
+                status_code=400,
+                media_type="application/json",
+                errors=({"message": "Syntax Error"},),
+            )
+            assert error.media_type == "application/json"
+            ```
+        """
         self.errors = errors
+        """The error objects of the answer, as a tuple of mappings. Secrets are removed.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import GraphQLRequestError
+
+            error = GraphQLRequestError(
+                "rejected",
+                request=gql.query("users", raw=True).request,
+                status_code=400,
+                media_type="application/json",
+                errors=({"message": "Syntax Error"},),
+            )
+            assert error.errors[0]["message"] == "Syntax Error"
+            ```
+        """
         super().__init__(message)
         request._guard.check_exception(self)
 
