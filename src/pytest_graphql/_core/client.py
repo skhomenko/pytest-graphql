@@ -65,6 +65,7 @@ from pytest_graphql._core.expect_error import (
     observe_response,
 )
 from pytest_graphql._core.factory import FakeContext, FakeNamespace, ScalarRegistry
+from pytest_graphql._core.graphql_compat import ast_tuple
 from pytest_graphql._core.headers import merge_headers
 from pytest_graphql._core.lifecycle import Closable, _close_all, _Owned, _report
 from pytest_graphql._core.matching.expect import ExpectNamespace
@@ -930,7 +931,7 @@ def _declared_variables(
 ) -> list[tuple[str, GraphQLInputType, Any]]:
     """Each declared variable with its resolved type and supplied value (B14)."""
     declared: list[tuple[str, GraphQLInputType, Any]] = []
-    for node in definition.variable_definitions:
+    for node in ast_tuple(definition.variable_definitions):
         name = node.variable.name.value
         if name not in values:
             continue

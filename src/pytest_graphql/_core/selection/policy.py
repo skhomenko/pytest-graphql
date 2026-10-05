@@ -40,7 +40,7 @@ from graphql import (
     GraphQLNamedType,
     GraphQLNonNull,
     GraphQLObjectType,
-    Undefined,
+    is_required_argument,
 )
 
 CyclePolicy = Literal["stop", "shallow", "id_only"]
@@ -255,7 +255,5 @@ def missing_required_arguments(
     return tuple(
         name
         for name, argument in field_.args.items()
-        if isinstance(argument.type, GraphQLNonNull)
-        and argument.default_value is Undefined
-        and name not in supplied
+        if is_required_argument(argument) and name not in supplied
     )

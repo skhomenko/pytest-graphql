@@ -56,6 +56,7 @@ from graphql import (
 from graphql.pyutils import is_iterable
 
 from pytest_graphql._core.factory.scalars import ScalarRegistry
+from pytest_graphql._core.graphql_compat import parse_scalar_input
 
 #: How deeply a JSON value from a custom scalar may nest before it is refused.
 MAX_JSON_DEPTH = 128
@@ -122,9 +123,9 @@ def _walk(
 def _built_in(value: Any, type_: GraphQLScalarType) -> Any:
     """The JSON form of a built-in scalar, or ``value`` when the scalar refuses it."""
     try:
-        return type_.parse_value(value)
+        return parse_scalar_input(type_, value)
     except Exception:
-        # Validation reports the refusal, with graphql-core's own message.
+        # Validation reports the refusal, by path and declared type.
         return value
 
 

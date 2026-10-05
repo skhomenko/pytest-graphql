@@ -15,6 +15,8 @@ from typing import Any
 from graphql import GraphQLError, GraphQLResolveInfo, GraphQLSchema
 from graphql import build_schema as build_ast_schema
 
+from tests.schema.scalar_hooks import set_scalar_parser, set_scalar_serializer
+
 SDL_PATH = Path(__file__).resolve().parent / "sdl.graphql"
 
 # ---------------------------------------------------------------------------
@@ -432,7 +434,7 @@ def build_schema() -> GraphQLSchema:
 
     for scalar_name, (serialize, parse_value) in SCALAR_SERIALIZERS.items():
         scalar_type = schema.type_map[scalar_name]
-        scalar_type.serialize = serialize  # type: ignore[attr-defined]
-        scalar_type.parse_value = parse_value  # type: ignore[attr-defined]
+        set_scalar_serializer(scalar_type, serialize)
+        set_scalar_parser(scalar_type, parse_value)
 
     return schema

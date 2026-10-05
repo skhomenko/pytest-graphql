@@ -135,8 +135,13 @@ Where the fixtures sit in the order:
   A schema argument whose name collides with an option is reachable only through
   `variables=`, and the error says so.
 - Every variable value is checked against its input type after assembly. A failure becomes
-  `ArgumentError` naming the path. Document validation alone does not check values, so this
-  closes the gap where a wrongly typed variable reached the network.
+  `ArgumentError` naming the path (`$input.lines[1].price`) and the declared type. When the
+  failure sits on an input object, the message names the missing required fields and the
+  fields the schema does not declare, at most five of each. Every name, type and path in it is
+  clipped to 60 characters. It never repeats a value, and it never uses graphql-core's
+  own text, which repeats the value and differs between graphql-core 3.2 and 3.3. Document
+  validation alone does not check values, so this closes the gap where a wrongly typed
+  variable reached the network.
 - Variables are serialized before they are checked, on every path that sends one: `query()`,
   `mutation()` and `execute()`, whether the value came from a keyword, from `variables=`, from
   a generated payload or from a field argument of an explicit selection. Each custom scalar
@@ -765,7 +770,7 @@ question 5 stays open.
   (2 of 42 fields in `catalog.graphql`, 1 of 31 in `feed.graphql`), so excluding them by
   default avoids surfacing known-legacy fields unless a test asks for one.
 - `connection_page_size=10`: kept, on rationale rather than corpus measurement. GraphQL SDL
-  can declare a default for a page-size argument (`GraphQLArgument.default_value`), so the
+  can declare a default for a page-size argument (read through `default_of`), so the
   harness checks for one directly rather than assuming its absence: of `catalog.graphql`'s 3
   recognized `first` arguments, 1 (`Query.categories`) declares a default; the other 2, plus
   all of `feed.graphql`'s connections, do not. Only a server's undeclared,
@@ -2052,18 +2057,23 @@ range is the compatibility promise.
 CI does not run the whole cross product of that range. It runs the representative jobs in
 the table below, one job per row. The table is the CI matrix, not a narrower supported set.
 
-| Python | pytest | Blocking |
-|---|---|---|
-| 3.10 | 7.4, the oldest supported | Yes |
-| 3.10 | current stable | Yes |
-| 3.11 | current stable | Yes |
-| 3.12 | current stable | Yes |
-| 3.13 | current stable | Yes |
-| 3.14 | current stable | Yes |
-| 3.14 | latest prerelease | No |
+| Python | pytest | graphql-core | Blocking |
+|---|---|---|---|
+| 3.10 | 7.4, the oldest supported | locked, the newest 3.3 | Yes |
+| 3.10 | current stable | locked, the newest 3.3 | Yes |
+| 3.11 | current stable | locked, the newest 3.3 | Yes |
+| 3.12 | current stable | locked, the newest 3.3 | Yes |
+| 3.13 | current stable | locked, the newest 3.3 | Yes |
+| 3.14 | current stable | locked, the newest 3.3 | Yes |
+| 3.14 | current stable | newest 3.2 | Yes |
+| 3.14 | latest prerelease | locked, the newest 3.3 | No |
 
-`current stable` and `latest prerelease` resolve at install time. Every other value is
-fixed. The Python floor is 3.10 and the pytest floor is 7.4.
+`current stable`, `latest prerelease` and `newest 3.2` resolve at install time. `locked` is
+the version `uv.lock` pins. Every other value is fixed. The Python floor is 3.10 and the
+pytest floor is 7.4. The `newest 3.2` row replaces only graphql-core and leaves every other
+package as locked. Besides the suite, that row runs `mypy --strict`, because the two
+graphql-core lines type some AST fields differently and the lint job sees only the locked
+one.
 
 The range is a bound in both directions, and `requires-python` declares both ends as
 `>=3.10,<3.15`. A floor alone would let an installer treat an untested future interpreter as
@@ -2100,13 +2110,55 @@ check applies from the point where a client exists.
 
 ### Runtime dependency bounds
 
-`graphql-core` is declared as `>=3.2,<3.3`. `docs/reference/SPEC.md` section 9 allows
-`<4`, but graphql-core 3.3.0 changed the types the selection and validation layers rely
-on: field `arguments` may be `None`, and variable coercion behaves differently. The suite
-fails on 3.3. An upper bound the suite does not pass would let an installer choose a
-version this project knows to be broken, so the bound stays at `<3.3` until the code and
-the suite support 3.3. Raising it is one change that edits this section, the metadata and
-the lock file together.
+`graphql-core` is declared as `>=3.2,<3.4`, the 3.2 and the 3.3 lines. `docs/reference/SPEC.md`
+section 9 allows `<4`, and this document narrows that to the lines the suite passes on. A
+bound above what CI tests would say more than this project tests, and a bound below what
+users run would keep a project that already uses graphql-core 3.3 from installing this
+package.
+
+- The library behaves the same on both lines. Where graphql-core 3.3 changed something the
+  library relies on, the library keeps its documented behavior and does not pass the change
+  on to users.
+- `src/pytest_graphql/_core/graphql_compat.py` is the only module that reads a graphql-core
+  shape that differs between the lines. It detects a difference by what graphql-core offers,
+  never by comparing version numbers, and each of its functions is tested on both lines.
+  One flag, `LINE_3_3`, set by the public `GraphQLDefaultInput` class, decides every choice
+  between the two behaviors. A 3.3 export the module needs that is missing fails the import,
+  and never selects the 3.2 behavior, which would be wrong on 3.3 without any error. A module
+  that needs a new difference absorbed adds a function there.
+- The differences the library absorbs, so a user sees one behavior:
+  - An absent AST collection (field arguments, operation variable definitions) is `None`
+    in 3.3 and an empty tuple in 3.2. `ast_tuple` reads both as a tuple.
+  - `print_ast` spells an object literal `{ a: 1 }` in 3.3 and `{a: 1}` in 3.2. The
+    selection layer builds literals by hand and compares text, so `print_value` gives both
+    lines the 3.2 spelling.
+  - 3.3 keeps a default declared in SDL or received by introspection as a literal and leaves
+    `default_value` as `Undefined`. `default_of` returns the coerced value on both lines, and
+    required-argument checks use graphql-core's own `is_required_argument`.
+  - 3.3 removed the `on_error` callback of `coerce_input_value`. `invalid_input_path` asks
+    where a value fails by using `validate_input_value` where it exists and the callback
+    where it does not, and returns only the path. The first failure ends the walk, so memory
+    and calls into a scalar's hooks do not grow with the number of failures in a value.
+  - `is_abstract_type` narrows types in 3.3 only, so the code narrows with `isinstance`.
+- The differences the library does not absorb, because the text or the verdict is
+  graphql-core's own and the library passes it through by design:
+  - The message of a document validation error (SPEC 8.2 asks for graphql-core's message).
+    The wording of a few rules differs between the lines, for example a missing required
+    argument.
+  - The whitespace of a printed document, which carries the same GraphQL on both lines.
+  - An integer that a float cannot hold exactly, given to a `Float` variable. 3.3 refuses it
+    and 3.2 accepts it. `tests/unit/test_graphql_compat.py` states this per line.
+  - The strictness of schema validation. 3.3 reports a default value that does not fit its
+    declared type as a schema error, and 3.2 does not. The wording of the schema errors both
+    lines share, such as a circular required input object, differs.
+- `uv.lock` pins the newest 3.3. One blocking CI row installs the newest 3.2 over it, as the
+  matrix above records. Both lines must pass the whole suite, and a failure on either is a
+  defect in the library.
+- Raising the ceiling to a later line is one change that edits this section, the metadata,
+  the lock file and the matrix together. It happens only after the whole suite passes on
+  that line, and it gives the new line a row of its own. `graphql_compat.py` is read first,
+  because every deprecated name 3.3 still accepts (`parse_value`, `serialize`,
+  `default_value`) is a candidate for removal there.
 
 ### Development dependencies
 

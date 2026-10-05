@@ -72,7 +72,6 @@ from graphql import (
     get_named_type,
     is_composite_type,
     parse,
-    print_ast,
 )
 from graphql.language import FragmentSpreadNode
 from graphql.pyutils import is_iterable
@@ -85,6 +84,7 @@ from pytest_graphql._core.errors import (
     SelectionError,
     SelectionTooLargeError,
 )
+from pytest_graphql._core.graphql_compat import ast_tuple, default_of, print_value
 from pytest_graphql._core.naming import NameMap, field_signature
 from pytest_graphql._core.selection.builder import (
     PAGE_SIZE_VARIABLE,
@@ -488,7 +488,7 @@ class _Collector:
             return
         name, definition = self._resolve_field(parent_type, node.name.value)
         key = alias or name
-        arguments = tuple(node.arguments)
+        arguments = ast_tuple(node.arguments)
         entry = _Entry(
             key=key,
             name=name,
@@ -997,8 +997,8 @@ def _canonical_object(node: ValueNode, type_: GraphQLInputObjectType) -> str | N
     for name, declared in type_.fields.items():
         if name in written:
             canonical = _canonical_literal(written[name], declared.type)
-        elif declared.default_value is not Undefined:
-            canonical = _canonical_default(declared.default_value, declared.type)
+        elif (default := default_of(declared)) is not Undefined:
+            canonical = _canonical_default(default, declared.type)
         elif isinstance(declared.type, GraphQLNonNull):
             return None
         else:
@@ -1061,7 +1061,7 @@ def _canonical_default(value: Any, type_: GraphQLInputType) -> str | None:
     round_tripped = value_from_ast(node, type_)
     if round_tripped is Undefined or not _exact_match(round_tripped, value):
         return None
-    return print_ast(node)
+    return print_value(node)
 
 
 def _exact_match(a: Any, b: Any) -> bool:
@@ -1307,13 +1307,13 @@ def _canonical_leaf(node: ValueNode, type_: GraphQLInputType) -> str | None:
     if coerced is Undefined:
         return None
     rendered = ast_from_value(coerced, type_)
-    return None if rendered is None else print_ast(rendered)
+    return None if rendered is None else print_value(rendered)
 
 
 def _written_literal(node: ValueNode, type_: GraphQLInputType) -> str:
     """The canonical form of a written literal, or the literal as written."""
     canonical = _canonical_literal(node, type_)
-    return print_ast(node) if canonical is None else canonical
+    return print_value(node) if canonical is None else canonical
 
 
 def _python_literal(value: Any, type_: GraphQLInputType) -> str:
@@ -1420,7 +1420,7 @@ def _ast_args_signature(
     for argument in arguments:
         declared = definition.args.get(argument.name.value)
         if declared is None:
-            rendered.append(print_ast(argument))
+            rendered.append(f"{argument.name.value}: {print_value(argument.value)}")
             continue
         rendered.append(
             f"{argument.name.value}: " + _written_literal(argument.value, declared.type)

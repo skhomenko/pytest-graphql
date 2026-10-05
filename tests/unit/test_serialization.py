@@ -21,6 +21,7 @@ from pytest_graphql._core.errors import ArgumentError
 from pytest_graphql._core.factory import ScalarRegistry, ScalarSpec
 from pytest_graphql._core.validation import coerce_variables
 from tests.factory.schemas import SCHEMA
+from tests.schema.scalar_hooks import set_scalar_parser
 
 
 def money() -> ScalarSpec:
@@ -268,7 +269,7 @@ type Query {
 def transforming_schema() -> GraphQLSchema:
     """A schema whose scalar parser and enum values are Python-side values."""
     schema = build_schema(TRANSFORMING_SDL)
-    schema.type_map["Money"].parse_value = Decimal  # type: ignore[attr-defined]
+    set_scalar_parser(schema.type_map["Money"], Decimal)
     schema.type_map["Money"].parse_literal = (  # type: ignore[attr-defined]
         lambda node, _variables=None: Decimal(node.value)
     )
@@ -317,7 +318,7 @@ def test_a_scalar_with_no_spec_keeps_its_json_value_over_the_parser_output() -> 
 
 def test_the_parsed_value_still_has_to_pass_the_schema_parser() -> None:
     schema = transforming_schema()
-    schema.type_map["Money"].parse_value = lambda _v: int("x")  # type: ignore[attr-defined]
+    set_scalar_parser(schema.type_map["Money"], lambda _v: int("x"))
     with pytest.raises(ArgumentError, match="invalid value for argument 'v'"):
         wire_in(schema, "Money", Decimal("1"), registry())
 
