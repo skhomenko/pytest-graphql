@@ -177,6 +177,14 @@ Every gate runs the same steps. Steps 1 to 6 are the contributor's. Steps 7 and
    Nothing is rebuilt between the two indexes, because a rebuild is a different
    artifact.
 
+The README links the documentation site. The `docs` workflow deploys it only
+after a release run has uploaded to PyPI, so the first release would publish a
+README whose links do not work yet. Before the maintainer approves step 7, the
+site must be live: enable GitHub Pages with GitHub Actions as the source, run the
+`docs` workflow by hand from `main`, which deploys the head of `main`, and open
+every link of the README. The README is the long description of the version, so a
+link that fails is a defect of that version.
+
 Two properties of the indexes shape this checklist. A version can be uploaded
 once per index and cannot be replaced, only yanked, so a failed check burns that
 version number and the next attempt increments it. Before `0.1.0` exists, no

@@ -119,34 +119,14 @@ def test_every_published_page_is_in_the_nav_and_has_its_title() -> None:
         assert first == f"# {title}", name
 
 
-#: The guide pages that are written. Every other page after the Quickstart is
-#: still a one-line stub that says what it will cover. A page moves from the
-#: stub test to the guide test below when it is written, so a stub cannot
-#: hide a page that was written and never listed, and a written page cannot
-#: slip back to a stub.
-WRITTEN_PAGES = (
-    "configuration.md",
-    "selections.md",
-    "responses.md",
-    "assertions.md",
-    "errors.md",
-    "factory.md",
-    "authentication.md",
-)
+#: Every page after the Quickstart is a guide page, and it opens by saying what the
+#: reader can do after it. A page that is still a one-line stub fails here, so a
+#: page cannot be added to the site and left unwritten.
+GUIDE_PAGES = tuple(name for name, _ in SPEC_PAGES[1:])
 
 
-def test_every_unwritten_page_says_what_it_will_cover() -> None:
-    stubs = [name for name, _ in SPEC_PAGES[1:] if name not in WRITTEN_PAGES]
-    assert stubs, "every page is written, so this test has nothing left to guard"
-    for name in stubs:
-        lines = (ROOT / "docs" / name).read_text(encoding="utf-8").splitlines()
-        body = [line for line in lines[1:] if line.strip()]
-        assert len(body) == 1, name
-        assert body[0].startswith("This page will cover: "), name
-
-
-@pytest.mark.parametrize("name", WRITTEN_PAGES)
-def test_a_written_page_is_no_stub_and_opens_with_what_the_reader_can_do(
+@pytest.mark.parametrize("name", GUIDE_PAGES)
+def test_a_guide_page_is_no_stub_and_opens_with_what_the_reader_can_do(
     name: str,
 ) -> None:
     text = (ROOT / "docs" / name).read_text(encoding="utf-8")
@@ -155,6 +135,7 @@ def test_a_written_page_is_no_stub_and_opens_with_what_the_reader_can_do(
     assert paragraphs[0].startswith("# "), name
     opening = paragraphs[1] if not paragraphs[1].startswith("#") else ""
     assert opening.startswith("After this page you can "), name
+    assert len(paragraphs) > 3, f"{name} has too little in it to be a guide page"
 
 
 def test_a_broken_link_or_anchor_fails_the_strict_build() -> None:
