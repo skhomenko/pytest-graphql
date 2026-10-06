@@ -1,0 +1,71 @@
+name: Bug report
+description: Something in pytest-graphql does not work as documented.
+title: "Bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Before you paste anything, remove tokens,
+        passwords, cookies, private URLs and personal data. Failure reports
+        redact known secrets, but check the text yourself.
+
+        For a security problem, do not open an issue. Report it privately:
+        https://github.com/skhomenko/pytest-graphql/security/advisories/new
+  - type: input
+    id: version
+    attributes:
+      label: pytest-graphql version
+      description: "Output of: python -c \"import pytest_graphql; print(pytest_graphql.__version__)\""
+      placeholder: 0.1.0rc1
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Python, pytest, graphql-core and httpx versions, and the operating system.
+      placeholder: |
+        Python 3.12.4
+        pytest 8.3.3
+        graphql-core 3.3.0
+        httpx 0.28.1
+        macOS 15
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, and what went wrong.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: example
+    attributes:
+      label: Minimal example
+      description: The smallest test or script that shows the problem. Include the part of the schema it needs, if you can.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: The full error or the failure report, after you removed any secrets.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I removed tokens, passwords, cookies, private URLs and personal data from this report.
+          required: true
+        - label: I searched the existing issues for this problem.
+          required: true

@@ -1,5 +1,11 @@
 # Contributing
 
+## Reporting bugs and requesting features
+
+Open an issue and choose the bug report or the feature request form. Report a
+security problem privately instead, as `SECURITY.md` describes, and never in a
+public issue.
+
 ## Development setup
 
 ```bash

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://skhomenko.github.io/pytest-graphql/
+    about: Guides and the API reference. Many questions are answered there.
+  - name: Report a security vulnerability
+    url: https://github.com/skhomenko/pytest-graphql/security/advisories/new
+    about: Report it privately. Do not open a public issue for a security problem.
