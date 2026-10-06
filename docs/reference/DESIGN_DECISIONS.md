@@ -2332,8 +2332,9 @@ A runner that skipped unmarked blocks or ignored a failure would fail those test
 **The built site.** `tests/docs/test_site.py` builds the site with `mkdocs build --strict` in
 a subprocess and checks that:
 
-- the nav is the fifteen pages of `docs/reference/SPEC.md` section 13 in its order, then the
-  API reference, and every file under `docs/` is in it;
+- the nav is the fifteen pages of `docs/reference/SPEC.md` section 13 in its order, with a
+  "Why pytest-graphql?" page (`docs/why.md`) after the Quickstart, then the API reference,
+  and every file under `docs/` is in it;
 - the output holds no page, sitemap entry or search entry from `docs/reference/`;
 - no page or stylesheet loads anything from a third-party host;
 - the build publishes only the files in `SITE_FILES`, no Lunr language pack, and no file that

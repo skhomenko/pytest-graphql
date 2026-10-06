@@ -29,10 +29,12 @@ from packaging.requirements import Requirement
 import pytest_graphql
 from tests.docs.blocks import ROOT, blocks_of
 
-#: The fifteen pages of SPEC section 13, in its order: file, then nav title.
-#: ``index.md`` is the Quickstart, so the site root is its first page.
+#: The fifteen pages of SPEC section 13 in its order, with the "Why" page after
+#: the Quickstart: file, then nav title. ``index.md`` is the Quickstart, so the
+#: site root is its first page.
 SPEC_PAGES = (
     ("index.md", "Quickstart"),
+    ("why.md", "Why pytest-graphql?"),
     ("configuration.md", "Configuration"),
     ("selections.md", "Selections"),
     ("responses.md", "Responses"),
@@ -102,7 +104,7 @@ def _nav_pages(items: list[object]) -> list[tuple[str, str]]:
     return found
 
 
-def test_the_nav_is_the_fifteen_spec_pages_then_the_api_reference() -> None:
+def test_the_nav_is_the_spec_pages_and_the_why_page_then_the_api_reference() -> None:
     config = load_config(str(ROOT / "mkdocs.yml"))
     assert _nav_pages(config.nav) == [*SPEC_PAGES, API_PAGE]
 

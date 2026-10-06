@@ -24,3 +24,6 @@ def test_user_has_a_name(gql):
 
 Run `pytest`. The client chooses the fields to ask for, so the test contains no
 query text.
+
+To learn what the package changes in your tests, read
+[Why pytest-graphql?](why.md).
