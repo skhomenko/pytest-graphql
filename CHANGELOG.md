@@ -10,13 +10,22 @@ cycle is promised.
 
 ## [Unreleased]
 
+## [0.1.0rc1] - 2026-10-06
+
+Release candidate for `0.1.0`. It adds the documentation site at
+https://skhomenko.github.io/pytest-graphql/, exports the whole exception
+hierarchy and the two types a custom transport needs, and supports graphql-core
+3.3 alongside 3.2. The API may still change before `0.1.0` if this candidate
+shows a defect.
+
 ### Added
 
-- The documentation site is set up, and it is not published yet. `mkdocs.yml`
-  builds it with MkDocs Material and `mkdocstrings`. `pip install
-  "pytest-graphql[docs]"` installs the tools, and none of them is a runtime
-  dependency. The site has the fifteen pages that the specification names, with
-  the Quickstart written in full, and an API reference generated from
+- The documentation site, published at
+  https://skhomenko.github.io/pytest-graphql/. `mkdocs.yml` builds it with
+  MkDocs Material and `mkdocstrings`. `pip install "pytest-graphql[docs]"`
+  installs the tools, and none of them is a runtime dependency. The site has
+  the fifteen pages that the specification names, with the Quickstart written
+  in full, and an API reference generated from
   `pytest_graphql.__all__`. A `docs` workflow builds and checks it with
   `--strict` on every pull request. It deploys the site to GitHub Pages only
   after a release run has uploaded to PyPI, or by a manual run from `main`.
@@ -312,6 +321,7 @@ dependency is declared as `>=3.2,<3.3` so that an install never selects it.
   build backend and its dependencies, used both as build constraints for the
   release build and as the environment for the sdist install-back.
 
-[Unreleased]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.0b1...HEAD
+[Unreleased]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.0rc1...HEAD
+[0.1.0rc1]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.0b1...v0.1.0rc1
 [0.1.0b1]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.0a1...v0.1.0b1
 [0.1.0a1]: https://github.com/skhomenko/pytest-graphql/releases/tag/v0.1.0a1
