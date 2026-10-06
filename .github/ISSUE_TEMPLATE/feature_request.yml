@@ -1,0 +1,54 @@
+name: Feature request
+description: Suggest a new feature or a change to an existing one.
+title: "Feature: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea. Describe the problem first: a clear problem is
+        easier to solve well than a fixed design.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to test, and what makes it hard today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: How you would like it to work. A short example of the test you want to write helps most.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: Other ways to solve it, including what you do now.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Client and queries
+        - Selections
+        - Responses and matching
+        - Errors and polling
+        - Fake data
+        - pytest plugin and configuration
+        - Transport, auth and middleware
+        - Diagnostics and reports
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched the existing issues and the documentation for this feature.
+          required: true
