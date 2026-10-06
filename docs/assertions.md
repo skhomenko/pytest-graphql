@@ -45,13 +45,15 @@ A name works in its exact spelling and in snake_case.
 ```python {.exec}
 import pytest
 
-with pytest.raises(Exception, match="no field 'frist_name' on User"):
+from pytest_graphql import SchemaError, SelectionError
+
+with pytest.raises(SelectionError, match="no field 'frist_name' on User"):
     gql.expect.User(frist_name="Ada")
 
-with pytest.raises(Exception, match="no type named 'Usr'"):
+with pytest.raises(SchemaError, match="no type named 'Usr'"):
     gql.expect.Usr(name="Ada")
 
-with pytest.raises(Exception, match="an enum, which has no fields to match"):
+with pytest.raises(SchemaError, match="an enum, which has no fields to match"):
     gql.expect.PyKeyword
 ```
 

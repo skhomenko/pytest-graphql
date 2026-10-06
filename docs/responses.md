@@ -292,11 +292,13 @@ fields or none.
 ```python {.exec}
 import pytest
 
+from pytest_graphql import GraphQLTestError
+
 response = gql.execute('{ user(id: "u1") { name } team(id: "t1") { name } }')
 
 assert response.data.user.name == "Ada Lovelace"
 assert response.data.team.name == "Core"
-with pytest.raises(Exception, match="needs exactly one top-level field"):
+with pytest.raises(GraphQLTestError, match="needs exactly one top-level field"):
     response.unwrap()
 ```
 
