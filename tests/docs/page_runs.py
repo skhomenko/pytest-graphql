@@ -43,6 +43,9 @@ VARYING = (
     (re.compile(r"loaded in \d+(?:\.\d+)?s"), "loaded in Ns"),
     (re.compile(r"run id [0-9a-f]{32}"), "run id ID"),
 )
+#: A section heading of pytest is padded with dashes or equal signs up to the
+#: width of the terminal, and that width is one less on Windows.
+HEADING = re.compile(r"^([-=_])\1{2,} (.+?) \1{3,}$")
 ELLIPSIS = "..."
 
 
@@ -84,6 +87,7 @@ def runs(page: Path) -> list[Run]:
 
 
 def normalise(line: str) -> str:
+    line = HEADING.sub(r"\1\1\1 \2 \1\1\1", line)
     for pattern, replacement in VARYING:
         line = pattern.sub(replacement, line)
     return line.rstrip()
