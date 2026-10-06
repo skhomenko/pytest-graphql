@@ -32,13 +32,15 @@ the type fails, and so does giving one field in two spellings.
 ```python {.exec}
 import pytest
 
+from pytest_graphql import SelectionError
+
 payload = gql.fake.CreatePostInput(title="Hello", author_id="u1")
 assert payload == {"title": "Hello", "authorId": "u1"}
 
-with pytest.raises(Exception, match="no field 'nme' on CreatePostInput"):
+with pytest.raises(SelectionError, match="no field 'nme' on CreatePostInput"):
     gql.fake.CreatePostInput(nme="x")
 
-with pytest.raises(Exception, match="was given twice"):
+with pytest.raises(SelectionError, match="was given twice"):
     gql.fake.CreatePostInput(authorId="u1", author_id="u2")
 ```
 
