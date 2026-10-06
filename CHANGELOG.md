@@ -68,6 +68,10 @@ shows a defect.
   lines, the timeout message, the delay table and the hook section that the pages
   quote are compared with real output, so a change to one of them fails CI until
   the page says the same. Migration: none.
+- A "Why pytest-graphql?" page follows the Quickstart on the documentation
+  site. It shows the cost of tests built on query strings, the same test without
+  them, how the package compares with other approaches, and when it does not
+  fit. The Quickstart and the README link to it. Migration: none.
 
 ### Changed
 
@@ -91,6 +95,9 @@ shows a defect.
   characters. It no longer repeats graphql-core's text, which included the
   value and differed between 3.2 and 3.3. Migration: a test that matched
   graphql-core's wording must match the new text.
+- The guide examples that expect an error name its class, `SelectionError`,
+  `SchemaError` or `GraphQLTestError`, instead of catching `Exception`.
+  Migration: none.
 
 ### Differences between graphql-core 3.2 and 3.3
 
