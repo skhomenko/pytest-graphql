@@ -12,6 +12,7 @@ exclude_docs: |
 # reference. The first page is index.md so the site root is the Quickstart.
 nav:
   - Quickstart: index.md
+  - Why pytest-graphql?: why.md
   - Configuration: configuration.md
   - Selections: selections.md
   - Responses: responses.md

@@ -2,9 +2,10 @@
 
 Schema-aware GraphQL API testing for pytest.
 
-The client reads your server's schema, chooses the fields to ask for, checks each
+The client reads your schema, chooses the fields to ask for, checks each
 call before it sends anything, and returns responses that read like Python
-objects. A test has no query text in it.
+objects. A test has no query text in it, so it is easy to read, and a schema
+change does not mean editing query strings by hand.
 
 Documentation: https://skhomenko.github.io/pytest-graphql/
 
@@ -72,6 +73,8 @@ query text.
 
 ## More documentation
 
+- [Why pytest-graphql?](https://skhomenko.github.io/pytest-graphql/why/):
+  what the package changes, and how it compares with other approaches.
 - [Configuration](https://skhomenko.github.io/pytest-graphql/configuration/):
   every option, flag and environment variable, and which one wins.
 - [Migrating from a hand-rolled client](https://skhomenko.github.io/pytest-graphql/migrating/)
