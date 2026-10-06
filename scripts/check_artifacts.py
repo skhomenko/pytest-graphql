@@ -60,9 +60,11 @@ REQUIRED_WHEEL_PATHS = (
 )
 
 # Paths every sdist must carry, relative to its single top-level directory.
+# SECURITY.md is here because CONTRIBUTING.md sends security reporters to it.
 REQUIRED_SDIST_PATHS = (
     "pyproject.toml",
     "README.md",
+    "SECURITY.md",
     "LICENSE",
     "CHANGELOG.md",
     "src/pytest_graphql/__init__.py",
