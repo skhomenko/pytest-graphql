@@ -10,13 +10,22 @@ cycle is promised.
 
 ## [Unreleased]
 
+## [0.1.0rc1] - 2026-10-06
+
+Release candidate for `0.1.0`. It adds the documentation site at
+https://skhomenko.github.io/pytest-graphql/, exports the whole exception
+hierarchy and the two types a custom transport needs, and supports graphql-core
+3.3 alongside 3.2. The API may still change before `0.1.0` if this candidate
+shows a defect.
+
 ### Added
 
-- The documentation site is set up, and it is not published yet. `mkdocs.yml`
-  builds it with MkDocs Material and `mkdocstrings`. `pip install
-  "pytest-graphql[docs]"` installs the tools, and none of them is a runtime
-  dependency. The site has the fifteen pages that the specification names, with
-  the Quickstart written in full, and an API reference generated from
+- The documentation site, published at
+  https://skhomenko.github.io/pytest-graphql/. `mkdocs.yml` builds it with
+  MkDocs Material and `mkdocstrings`. `pip install "pytest-graphql[docs]"`
+  installs the tools, and none of them is a runtime dependency. The site has
+  the fifteen pages that the specification names, with the Quickstart written
+  in full, and an API reference generated from
   `pytest_graphql.__all__`. A `docs` workflow builds and checks it with
   `--strict` on every pull request. It deploys the site to GitHub Pages only
   after a release run has uploaded to PyPI, or by a manual run from `main`.
@@ -59,6 +68,10 @@ cycle is promised.
   lines, the timeout message, the delay table and the hook section that the pages
   quote are compared with real output, so a change to one of them fails CI until
   the page says the same. Migration: none.
+- A "Why pytest-graphql?" page follows the Quickstart on the documentation
+  site. It shows the cost of tests built on query strings, the same test without
+  them, how the package compares with other approaches, and when it does not
+  fit. The Quickstart and the README link to it. Migration: none.
 
 ### Changed
 
@@ -82,6 +95,9 @@ cycle is promised.
   characters. It no longer repeats graphql-core's text, which included the
   value and differed between 3.2 and 3.3. Migration: a test that matched
   graphql-core's wording must match the new text.
+- The guide examples that expect an error name its class, `SelectionError`,
+  `SchemaError` or `GraphQLTestError`, instead of catching `Exception`.
+  Migration: none.
 
 ### Differences between graphql-core 3.2 and 3.3
 
@@ -312,6 +328,7 @@ dependency is declared as `>=3.2,<3.3` so that an install never selects it.
   build backend and its dependencies, used both as build constraints for the
   release build and as the environment for the sdist install-back.
 
-[Unreleased]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.0b1...HEAD
+[Unreleased]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.0rc1...HEAD
+[0.1.0rc1]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.0b1...v0.1.0rc1
 [0.1.0b1]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.0a1...v0.1.0b1
 [0.1.0a1]: https://github.com/skhomenko/pytest-graphql/releases/tag/v0.1.0a1
