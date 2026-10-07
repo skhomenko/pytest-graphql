@@ -10,6 +10,22 @@ cycle is promised.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-07
+
+First stable `0.1.0` release. The library code is the same as `0.1.0rc1`. The
+candidate was tested against a real product, covering authentication and the
+create, read, update and delete calls of one object type, and no defect was
+found. The API may still change between minor versions while the version is
+`0.x`.
+
+### Added
+
+- Issue forms and a security policy. A bug report form asks for the versions, a
+  minimal example and the output, and warns against pasting secrets. A feature
+  request form asks for the problem before the proposal. `SECURITY.md` states
+  the supported versions and how to report a vulnerability privately. Migration:
+  none.
+
 ## [0.1.0rc1] - 2026-10-06
 
 Release candidate for `0.1.0`. It adds the documentation site at
@@ -328,7 +344,8 @@ dependency is declared as `>=3.2,<3.3` so that an install never selects it.
   build backend and its dependencies, used both as build constraints for the
   release build and as the environment for the sdist install-back.
 
-[Unreleased]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.0rc1...HEAD
+[Unreleased]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.0rc1...v0.1.0
 [0.1.0rc1]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.0b1...v0.1.0rc1
 [0.1.0b1]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.0a1...v0.1.0b1
 [0.1.0a1]: https://github.com/skhomenko/pytest-graphql/releases/tag/v0.1.0a1
