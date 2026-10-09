@@ -10,6 +10,23 @@ cycle is promised.
 
 ## [Unreleased]
 
+### Added
+
+- A "Using with coding agents" page. It holds rules to paste into `AGENTS.md` or
+  `CLAUDE.md`, the same rules as a skill file, and one real message of a wrong
+  argument name. The documentation site now also publishes `llms.txt` and
+  `llms-full.txt` at its root. Migration: none.
+
+### Changed
+
+- The README and the documentation now open with one statement of what the package
+  is: the GraphQL test client for Python whose calls are built from the schema and
+  checked against it before they are sent. The README adds "Use it when" and "Do
+  not use it when" lists, a fuller example, a table of the public calls and a
+  comparison with other tools. The comparison table of "Why pytest-graphql?" gains
+  a row for a property-based API fuzzer. The package `description` is the same
+  statement, and the keywords add six search terms. Migration: none.
+
 ## [0.1.0] - 2026-10-07
 
 First stable `0.1.0` release. The library code is the same as `0.1.0rc1`. The

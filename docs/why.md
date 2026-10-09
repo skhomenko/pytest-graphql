@@ -108,11 +108,12 @@ with a `curl` line that repeats the failed call ([Diagnostics](diagnostics.md)).
 
 ## Compared with other approaches
 
-| Approach | When it fits | What this package adds |
+| Approach | Use it when | What this package adds |
 |---|---|---|
 | Query strings sent with an HTTP library | A few tests, or a suite that is not expected to grow. | Queries built from the schema, checked before they are sent, and responses with attribute access. See [Migrating from a hand-rolled client](migrating.md). |
 | A general GraphQL client library | Code that calls a GraphQL API from an application. | A design built for tests: auto-selection, matchers with a diff, errors that raise, seeded test input and failure reports. |
 | The test client of your server framework | Fast tests of resolvers, in the same process as the server. | Tests over HTTP against any running server, in any language, through the same path that real clients use. |
+| A property-based API fuzzer, such as Schemathesis | You want generated cases for every operation of an API. | Tests that you write for the behavior of one operation, with calls built from the schema and checked before they are sent. It does not generate cases for a whole API. |
 
 These approaches can live together. A suite can test resolvers with the test
 client of its framework, and test the deployed API with this package.
