@@ -151,7 +151,7 @@ __all__ = [
     "unordered",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 """The installed version of `pytest-graphql`, as a string.
 
 Examples:

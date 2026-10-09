@@ -57,7 +57,7 @@ by default. See [Selections](selections.md).
 A round trip test makes a record, reads it back, changes it, reads it again,
 removes it, and checks that it is gone. Data comes from the factory, so the test
 needs no hand-written payload. See [Factory](factory.md). This page leaves out file
-uploads, which `0.1.0` does not send.
+uploads, which `0.1.x` does not send.
 
 The demo schema stores nothing, so the parts that read a record back need your
 server. First, what the demo can show: the answer to a mutation holds the new

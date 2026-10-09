@@ -123,7 +123,7 @@ client of its framework, and test the deployed API with this package.
 - **You cannot get the schema.** The package needs it, from introspection or from
   a file. See [Extending](extending.md).
 - **You need subscriptions, file uploads or an async client.** These are not part
-  of `0.1.0`.
+  of `0.1.x`.
 - **You want to record responses and replay them.** The package always tests the
   server that you have. See the [FAQ](faq.md).
 

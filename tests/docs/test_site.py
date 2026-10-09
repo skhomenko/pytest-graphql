@@ -396,6 +396,22 @@ def test_a_published_page_cites_no_contributor_document(
     assert not found, found
 
 
+#: A released patch version in backticks, such as ``0.1.0``. The line it belongs
+#: to is ``0.1.x``.
+PATCH_VERSION = re.compile(r"`\d+\.\d+\.\d+`")
+
+
+def test_published_text_names_the_release_line_and_no_patch_version() -> None:
+    """A limit stated for one patch version is wrong in the next one."""
+    pages = [ROOT / "README.md"] + [
+        ROOT / "docs" / name for name, _ in [*SPEC_PAGES, API_PAGE]
+    ]
+    found = {
+        path.name: PATCH_VERSION.findall(path.read_text("utf-8")) for path in pages
+    }
+    assert not {name: hits for name, hits in found.items() if hits}
+
+
 def test_the_api_page_renders_every_name_in_all(site: Path) -> None:
     html = (site / "api" / "index.html").read_text("utf-8")
     headings = set(re.findall(r'<h2 id="([^"]+)"', html))
