@@ -45,6 +45,31 @@ published site, along with the rest of `docs/reference/`.
   request hook available to a standalone user. The plugin installs one hook-delivering
   middleware into the core chain, so there is one mechanism exposed twice.
 
+### Product position
+
+The package is the GraphQL test client for Python whose calls are built from the schema and
+checked against it before they are sent. Every public text that describes the package leads
+with that one statement: the README, the distribution `description`, the first page of the
+site, `llms.txt`, and the agent instructions of "Agent and index discoverability" in
+section 13.
+
+The position is also what makes the package fit agent-written tests. An agent that writes a
+query string can name a field or an argument that does not exist. A call through this
+package names an operation, and the schema refuses a wrong name before any request, with a
+message that names the closest correct one. A feature that weakens that property, such as
+accepting an unchecked document by default, is out of position.
+
+How the non-goals of `docs/reference/SPEC.md` section 2 read for the features of section 13:
+
+- An in-process transport drives the application through the WSGI or ASGI interface, which
+  are Python standards. It holds no code for one server library, so non-goal 6 still holds.
+  Cookbook pages may name server libraries, because a page is not integration code.
+- A property check (section 13) tests the behavior of one operation that a test names. It
+  is not a schema linter, which non-goal 2 excludes, and it is not a crawler of a whole API.
+  A project that wants every operation fuzzed is pointed to a dedicated tool such as
+  Schemathesis.
+- Subscriptions are delivered without the async client. Section 13 states how.
+
 ---
 
 ## 2. Configuration and call grammar
@@ -2333,7 +2358,8 @@ A runner that skipped unmarked blocks or ignored a failure would fail those test
 a subprocess and checks that:
 
 - the nav is the fifteen pages of `docs/reference/SPEC.md` section 13 in its order, with a
-  "Why pytest-graphql?" page (`docs/why.md`) after the Quickstart, then the API reference,
+  "Why pytest-graphql?" page (`docs/why.md`) after the Quickstart, then the pages that
+  section 13 of this document adds, in the place it gives each one, then the API reference,
   and every file under `docs/` is in it;
 - the output holds no page, sitemap entry or search entry from `docs/reference/`;
 - no page or stylesheet loads anything from a third-party host;
@@ -2597,6 +2623,489 @@ client is pure and free of I/O, so adding an async client means adding an async 
 protocol and an async client class that reuse the same core, with no change to the existing
 public API.
 
+File uploads, the in-process transport and subscriptions are no longer deferred to the
+versions that `docs/reference/SPEC.md` section 14 names. Section 13 states their rules. Each
+ships in a 0.x minor version once it is implemented, so the version of each is the
+changelog's record, not this document's. Subscriptions do not wait for the async client.
+
+Not scheduled: whole-API fuzzing, schema drift reporting, query cost assertions and
+generated stubs. Section 13 covers only what is listed there.
+
 If standalone use later becomes a real audience, the reversible move is to publish the core
 as a second distribution and make `pytest-graphql` depend on it. Nothing in the current name
 blocks that.
+
+---
+
+## 13. Features after 0.1
+
+Each subsection is one unit of work: one branch, one pull request, one changelog entry.
+The number of a subsection identifies it and says nothing about priority. The build order is
+a planning decision, made from evidence about users and kept outside this document. A
+subsection states the rules of a feature that
+is not yet released. Until its pull request merges, no public text may describe it as
+available, and the README "Status" paragraph keeps naming it as not part of the release.
+
+Rules shared by every subsection:
+
+- Every rule of sections 1 to 11 holds unless a subsection replaces it by name. In particular
+  the redaction, scrub, escaping and withheld-notice rules of section 7 apply to every new
+  thing a feature renders, and the ownership rules of section 9 apply to every new thing a
+  feature opens.
+- A new public name gets a docstring with an `exec` example, under "Documentation examples"
+  in section 10, and is placed under "Top-level surface" in section 3 as the subsection says.
+- A new optional dependency is a new extra. The top-level package never imports it, and a
+  module that needs it raises `ImportError` with a message that names the install command,
+  such as `pip install "pytest-graphql[property]"`. The extra's package, its bound and its
+  licence, read from the metadata of the locked version, are added to a table in section
+  10 in the same pull request.
+- A rule that names another subsection of this section is a cross-feature rule. It applies
+  only once both subsections are released. The pull request that releases the second of the
+  two adds the cross-feature rule, with its tests and its text. Until then each feature works
+  as if the other did not exist, and no text mentions the unreleased one.
+- A new documentation page is placed in the nav where its subsection says. When the page it
+  should follow does not exist yet, the new page takes the place that page would have. Code
+  that needs a server library to run is a `no-exec` block. The suite tests the feature against a
+  project-authored server built from `graphql-core` and the standard library, never against
+  a third-party schema.
+
+### 13.1 Agent and index discoverability
+
+This subsection governs what a reader finds once it reaches the project: the PyPI page
+(which is the README), the documentation site, and `llms.txt`. It does not decide whether a
+search engine or an agent reaches the project at all. That depends on indexing, links and
+package-index search, which no file in this repository controls, and it is measured outside
+this document. `llms.txt` is a convenience for an agent that has already found the site, not
+a way to be found. Each of the three must let a reader decide whether to use the package and
+write a first test without opening another page.
+
+**README.** In this order:
+
+1. The title and the position statement of section 1, in one or two sentences.
+2. "Use it when" and "Do not use it when", three to five bullets each. The second list
+   names REST endpoints, production client code, a mock server, and fuzzing every
+   operation of an API, and says what to use instead in general terms.
+3. The Quickstart as it is now.
+4. "A fuller example": one `exec` block of at most 30 lines that shows `gql.query`, a
+   `gql.mutation` with a `gql.fake` payload, a matcher, `gql.expect_error`, and `fields=`.
+5. "API at a glance": a table of the public calls a test uses, one line each: the call and
+   what it does. It covers the `gql` fixture, `query`, `mutation`, `execute`, `fields=`,
+   `Selection`, `gql.expect`, `expect_error`, `gql.fake` and `unique()`, `as_` and
+   `with_headers`, `wait_until`, and `build_client`. A released feature of this section adds
+   its row in its own pull request.
+6. "Compared with other tools": the table of `docs/why.md` extended with one row for a
+   general GraphQL client library and one for a property-based API fuzzer, each with "use it
+   when". Other projects are named by their own name only, for identification. No logo, no
+   claim about their quality, and no claim of endorsement.
+7. The present Features, Install, Supported versions, Status and License sections.
+
+Every link is absolute, because PyPI does not resolve a relative one. No sentence promises an
+unreleased feature.
+
+**Metadata.** `description` is the position statement, at most 200 characters. `keywords`
+adds `graphql-testing`, `api-testing`, `schema`, `contract-testing`, `test-client` and
+`fixtures` to the present five. Every classifier is one that the published
+`trove-classifiers` list holds, because PyPI refuses an upload with an unknown one.
+
+**`llms.txt` and `llms-full.txt`.** The site publishes both at its root, in the format of
+llmstxt.org. `mkdocs_hooks.py` writes them at build time from the nav, with no new
+dependency.
+
+- `llms.txt`: an H1 `pytest-graphql`, a blockquote with the position statement, one short
+  paragraph with the install line and the smallest test, then a `## Docs` list with one link
+  and one line for each nav page, in nav order, and a `## Optional` list with the changelog.
+- `llms-full.txt`: the Markdown source of each nav page in nav order, each under a
+  `# <page title>` line and its URL. The API reference page is replaced by one entry for each
+  name in `pytest_graphql.__all__`: the name, its signature, and the first paragraph of its
+  docstring.
+- Neither holds text from `docs/reference/`. Both are in `SITE_FILES`, and
+  `tests/docs/test_site.py` checks their header lines, their page list against the nav, and
+  that they pass `scripts/check_publication_hygiene.py`.
+
+**Search-facing site facts.** `tests/docs/test_site.py` checks the built site for what an
+index needs from it: every published page has one `<link rel="canonical">` under `site_url`,
+a non-empty `<title>` and `<meta name="description">`, and no `noindex`; `sitemap.xml` lists
+every nav page and nothing from `docs/reference/`. The site is a GitHub Pages project site,
+so its `robots.txt` is the owner's root file, outside this repository; the deployed state of
+that file and of indexing is checked by the maintainer, not by the suite.
+
+**The agent page.** `docs/agents.md`, titled "Using with coding agents", sits in the nav
+after "Why pytest-graphql?". It holds:
+
+- A Markdown block that a project pastes into its own `AGENTS.md` or `CLAUDE.md`. It tells an
+  agent to use the `gql` fixture; to prefer `gql.query()` and `gql.mutation()` by operation
+  name with snake_case keywords; to use `fields=` only when the test needs exact fields; to
+  use `gql.execute()` for a document the project already has and for what a call by name
+  cannot express, such as a directive or several root fields, with every value in
+  variables and validation left on; to use `gql.fake` for input and `gql.expect_error` for
+  an expected error; and to read the `GraphQL calls` section of a failed test before
+  changing code. It never tells an agent to rewrite an existing `execute()` document into
+  calls by name.
+- The same rules as a skill file (`SKILL.md` front matter plus body) in a second block.
+- One real caller-mistake message, to show what the agent will see.
+
+The page names only released features. A later subsection adds its line to both blocks.
+
+**Legal surface.** Nominative naming of other tools only. No third-party text is copied into
+the comparison. The llms files hold project-authored text only.
+
+### 13.2 File uploads
+
+The client sends files by the GraphQL multipart request specification
+(`jaydenseric/graphql-multipart-request-spec`, version 2.1.0). `httpx` builds multipart
+bodies, so no extra is needed, and the `upload` extra that `docs/reference/SPEC.md` reserves
+is not created.
+
+**The value.** `UploadFile` is a top-level export: a frozen dataclass with `content: bytes`,
+`filename: str` and `content_type: str`, which defaults to `application/octet-stream`.
+`UploadFile.from_path(path, content_type=None)` reads the file once, when it is called, and
+guesses the type with `mimetypes`, falling back to the default. A file object is not
+accepted, because a retry after a connect failure must send the same bytes again. `repr()`
+shows the filename, the size and the type, never the content.
+
+**Where it is accepted.** `ClientConfig.upload_scalars`, default `("Upload",)`, names the
+scalars that carry a file. An `UploadFile` is accepted at a variable position whose named
+type is one of them, at any depth that the serialization rules of section 2 reach, lists
+included. Anywhere else it raises `ArgumentError` naming the path and the scalars that
+accept a file. A schema with none of the named scalars refuses every `UploadFile`, and the
+message names `upload_scalars`. The JSON check of section 2 skips an `UploadFile` at an
+accepted position, and a registered `ScalarSpec.serialize` for that scalar is not called on
+it.
+
+**The wire.** A request whose variables hold at least one `UploadFile` is a multipart POST.
+The parts are `operations` (the JSON body of section 6 with `null` at each file position),
+`map`, then one part per distinct file, named `"0"`, `"1"` and so on, in the order the files
+are first met in a depth-first walk of the variables. The same `UploadFile` object at two
+positions is sent once and mapped to both. The `Accept` header is that of section 6. No
+batching. No CSRF header is added by default: the uploads page shows how to add the header
+a server requires with `with_headers()`. The response is classified by section 6 unchanged.
+
+**Limits.** `ClientConfig.max_upload_bytes`, default 32 MiB, bounds the total of all file
+contents of one request. A request above it raises `ArgumentError` before any I/O.
+Retries follow section 6 unchanged.
+
+**Transports.** `RequestInfo.variables` holds each `UploadFile` at its position. A
+`Transport` receives the request as it is, and `HttpxTransport` does the encoding. A custom
+transport that does not support files raises its own error. The Extending page says so.
+
+**Diagnostics.** Every rendered view shows a file as `<upload "<filename>", <n> bytes,
+<content type>>`. The filename passes the value scrub. The content never enters a snapshot,
+a log record, a report or the JSON report of 13.6. `as_curl()` renders `-F` parts, with
+`operations` and `map` as rendered text and each file as `-F 0=@<filename>`, quoted by the
+same primitive as the rest of the line. The page states that the reader supplies the file.
+
+**Fake values.** For an upload scalar with no registered `ScalarSpec`, `gql.fake` makes an
+`UploadFile` with seeded content of 16 to 64 printable ASCII bytes, the filename
+`fake-<n>.txt`, and the type `text/plain`.
+
+**Documentation.** `docs/uploads.md`, titled "File uploads", after Polling.
+
+### 13.3 In-process transport
+
+A test can drive a WSGI or ASGI application in the same process, with no server. The
+transport is an `HttpxTransport` whose pool is the application, so classification, the size
+cap, cookies, derivation, redaction and reporting are the same code as over HTTP. Timeouts
+are not, and they differ by interface: for ASGI the call timeout limits how long the test
+waits for a response, and for WSGI it limits nothing. Neither interface can stop application
+code that is running. The two bullets below state exactly what each one enforces.
+
+**Construction.** `HttpxTransport.for_app(app, *, interface="auto", lifespan="auto",
+raise_app_errors=True, timeout=..., max_response_bytes=..., cookie_scope=...)`. The options
+that only a network uses (`proxy`, `verify`, `trust_env`, `http2`, `max_attempts`) are not
+parameters. The base URL is `http://testserver`, and the client URL is a full URL on that
+host or a path, which is joined to it. The default client URL is
+`http://testserver/graphql`.
+
+- `interface="auto"` picks ASGI when the application, or its `__call__`, is a coroutine
+  function, and WSGI otherwise. `"asgi"` and `"wsgi"` force one.
+- WSGI uses `httpx.WSGITransport`, which calls the application in the test's own thread.
+  The call timeout is not enforced for WSGI: a slow application delays the test, and a hung
+  one hangs it. This is deliberate. Moving the call to another thread would break an
+  application whose state is per thread, such as a Django test database connection, and a
+  thread that runs past a deadline cannot be stopped. The in-process page states this and
+  recommends `pytest-timeout` for a deadline on the whole test. A test covers a slow WSGI
+  application and shows the call completing after the configured timeout, so a later change
+  that claims a deadline must change this rule first.
+- ASGI uses a private bridge, an `httpx.BaseTransport` that owns one event loop on one daemon
+  thread for its lifetime and runs `httpx.ASGITransport` there. A request waits for its
+  result at most the call timeout of section 6. On a timeout the bridge cancels the request's
+  task and raises the same `GraphQLTransportError` as a read timeout over HTTP. Cancellation
+  only takes effect at an `await`, so an application that blocks the loop keeps it busy, and
+  each later request on the bridge times out the same way until it is free. The error message
+  says so. The lifespan startup and shutdown events each wait at most the connect timeout. The
+  bridge is the pool: derived transports share it, and only the root closes it, by the rules
+  of section 6 "Derivation" and section 9. `close()` does not wait for a task that ignored its
+  cancellation, because the thread is a daemon.
+- `lifespan="auto"` sends the ASGI lifespan startup event when the bridge starts and the
+  shutdown event when it closes, and continues without them when the application does not
+  support lifespan. `"on"` makes a lifespan failure raise. `"off"` sends neither. WSGI has no
+  lifespan, and a value other than `"auto"` for a WSGI application raises `ArgumentError`.
+- `raise_app_errors=True` lets an exception the application raises propagate unchanged, as
+  a framework test client does, because it is the test's own process. `False` turns it into
+  the 500 response `httpx` builds.
+
+**The plugin.** A `gql_app` fixture, session scoped, returns the application or `None`. By
+default it imports the `module:attribute` path of the ini option `gql_app` or the
+environment variable `PYTEST_GQL_APP`, when the first test needs it, under the same
+import rules as `gql_schema_source` in section 2. A project whose application comes from a
+factory overrides the fixture in `conftest.py`. When `gql_app` returns an application, the
+default `gql_transport` is `HttpxTransport.for_app(...)`, and the default URL becomes
+`http://testserver/graphql` when no source names one. Setting `gql_proxy`, `gql_verify`,
+`gql_trust_env` or `gql_http2` together with `gql_app` is a usage error that names both.
+
+**Not supported in process:** subscriptions (13.8 refuses them with a message).
+
+**Framework recipes.** A framework section of the in-process page is written only after its
+recipe has run against a project-authored application in that framework, at a recorded
+version, including the framework's application lifecycle and its test database handling where
+it has one. The page states the version it was checked with. That run is a release check
+outside the suite, which keeps no framework dependency. A framework whose recipe has not run
+is not named on the page.
+
+**Documentation.** `docs/in-process.md`, titled "Testing an app in process", after
+Configuration. It has one `no-exec` section for each framework that passed the recipe check
+above. The candidates are Strawberry with ASGI, Ariadne with ASGI, Graphene with Django over
+WSGI, and FastAPI with lifespan. `docs/why.md` changes its row for
+framework test clients to say this package can also run in process.
+
+### 13.4 Property checks
+
+`gql.check()` runs one operation many times with generated input that the schema accepts,
+and fails when a response breaks a rule that holds for every input. Hypothesis generates the
+input and shrinks a failure to a minimal example.
+
+**Packaging.** The extra `property` installs `hypothesis`, with the lower bound the
+implementation needs. Hypothesis is MPL-2.0. It is an optional dependency that is installed
+unmodified, and no Hypothesis file is copied into the wheel, the sdist or the site, so the
+licence's file-level duties do not reach this project's files. The module
+`pytest_graphql.property` imports Hypothesis and is the only module that does.
+`GraphQLClient.check` imports it when called. The module imports no pytest.
+
+**Generation.** `pytest_graphql.property.variables_for(client, operation, *, kind=None,
+overrides=None, max_string_size=256, max_list_size=5, max_input_depth=3)` returns a strategy
+of variable mappings, keyed by exact schema names, that pass the variable check of section
+2:
+
+- `Int` covers the signed 32-bit range with its bounds, `0` and `-1`. `Float` covers finite
+  values including `0.0` and `-0.0`. `String` is any Unicode text without surrogates, of
+  length 0 to `max_string_size`. `ID` is a `String` value or a string of digits. `Boolean`
+  and enums cover every value.
+- A nullable position is `None` or a value. An optional argument or input field is left out,
+  `None`, or a value. A list holds 0 to `max_list_size` items. A one-of input object holds
+  exactly one field.
+- Input objects nest to `max_input_depth`. A required field that cannot be built within that
+  depth raises `SchemaError` naming the type and the option.
+- A custom scalar uses `overrides[<scalar name>]` when given, else its `ScalarSpec.fake`
+  driven by a seed that Hypothesis draws, else it raises `ArgumentError` naming both ways to
+  supply one. Once 13.2 is released, an upload scalar without an override produces small
+  `UploadFile` values. Before that it is a custom scalar like any other.
+
+**Running.** `GraphQLClient.check(name, /, *, kind=None, fields=AUTO, checks=DEFAULT_CHECKS,
+max_examples=25, max_calls=100, overrides=None, **variables)`:
+
+- `kind=None` resolves the name on the query root and the mutation root, and a name on both
+  raises `ArgumentError` asking for `kind`. A subscription is refused.
+- The keyword variables follow the grammar of section 2 and are held fixed. Every other
+  argument is generated.
+- Each example is one call through the same client, so middleware, hooks, recording and
+  redaction apply. Exceptions are caught and given to the checks, never raised from inside
+  an example.
+- Hypothesis runs with `deadline=None` and the `too_slow` health check suppressed, because
+  each example is a network call, and with its seed set from `ClientConfig.seed`, so a run
+  is reproducible. Its example database stays on. The database key of each check is built
+  from the kind, the operation name, the node id of the client's `FakeContext` and the
+  schema fingerprint, so two checks never share saved examples. If Hypothesis offers no
+  public way to set the key, one function in the module holds the private access, a test
+  covers it, and the lower bound names the versions it was checked on.
+- Calling `check()` inside a test that Hypothesis already runs raises `ArgumentError`,
+  because Hypothesis does not nest.
+
+**Call budget.** `max_examples` limits only the examples Hypothesis generates. Replaying saved
+examples, shrinking a failure and the final replay of the minimal example each make more
+calls, so `max_examples` alone does not bound how often the server is called.
+`max_calls` does: it counts every call `check()` makes, in every phase, and `check()` never
+makes more.
+
+- `max_calls` must be greater than `max_examples`, else `ArgumentError` when `check()` is
+  called. One call is reserved for the final replay.
+- Once `max_calls - 1` calls have been made, every later example that is not the final
+  replay is rejected before it calls the server, through `assume(False)`. Hypothesis then
+  stops shrinking and reports the smallest failure it has found, which may be larger than a
+  full shrink would give. The final replay is recognized through the build context's
+  `is_final` flag. That flag is not documented API, so the rule for the database key
+  applies: one function holds the access, a test covers it, and the lower bound names the
+  versions it was checked on. Hypothesis runs with `report_multiple_bugs=False`, so there is exactly one
+  final replay, and with the `filter_too_much` health check suppressed.
+- When the budget ends generation before `max_examples` and no failure was found, `check()`
+  passes and emits a warning that names the number of examples that ran. An `Unsatisfiable`
+  from Hypothesis in that case is that warning, not an error.
+- A test counts the calls of a failing mutation check and asserts the total is at most
+  `max_calls`, for a budget that ends during shrinking and for one that does not.
+
+**Checks.** A check is a callable with a `name` that takes a `CheckOutcome` (the variables,
+and the `GraphQLResponse` or the exception) and returns `None` or a one-line reason.
+`DEFAULT_CHECKS` holds, in order:
+
+1. `no_server_error`: no `GraphQLHTTPStatusError` with a 5xx status and no
+   `GraphQLTransportError`.
+2. `well_formed`: no protocol violation, meaning no `GraphQLExecutionError` that carries
+   no errors.
+3. `non_null_respected`: no `null` in the data at a position whose type is non-null.
+4. `shape_matches_schema`: every value in the data has the JSON type of its field: an `Int`
+   is an integer in the 32-bit range, a `Float` a number, a `String` or `ID` a string, a
+   `Boolean` a boolean, an enum one of its value names, a list a list, and an object an
+   object with only the selected keys. Custom scalars are not checked.
+5. `no_internal_details`: no error message or extensions value contains a Python traceback
+   header, a `File "...", line <n>` frame, or one of a short documented list of database
+   markers (`SQLSTATE`, `psycopg`, `sqlalchemy`, `sqlite3.`, `ORA-`, and `SELECT` followed
+   by `FROM`).
+
+An execution error with a clean message passes every default check, because a schema-valid
+input can still be invalid for the application. A `GraphQLRequestError` also passes, because
+a depth or cost limit can reject a valid document. `no_request_error` ships beside the
+defaults and is not in them.
+
+**Failure.** After shrinking, Hypothesis replays the minimal example last, so the last
+recorded call is that example and the failure section marks it `FAILED HERE` with its
+`curl` line. `check()` then raises `PropertyCheckFailed`, a `GraphQLTestError` that is a
+top-level export, naming the operation, the check and its reason. Its message shows the
+variables through the redaction of section 7 and never quotes a server value that the
+section would withhold.
+
+**Mutations.** A mutation is allowed, because a test names it. Every call writes, shrinking
+included, and the page says so, names `max_calls` as the bound on writes, and recommends a
+disposable server, or the in-process transport of 13.3 once it is released.
+
+**Documentation.** `docs/property-checks.md`, titled "Property checks", after Factory. It
+states the scope: one operation that a test names, and a dedicated fuzzer for a whole API.
+
+### 13.5 Messages for a caller mistake
+
+An error a caller can fix tells the caller how, in a form an agent can act on without
+reading the documentation.
+
+- Each `ArgumentError`, `SchemaError` and `SelectionError` raised for a caller mistake, and
+  each plugin usage error, has a first line that states the problem and where it is (the
+  operation, the type, the variable path or the setting), then, when one exists, a
+  `  Did you mean: <name>?` line and a `  Fix: <one line>` line.
+- One function in `errors.py` builds these lines. The suggestion uses the existing
+  `difflib` primitive. No raise site formats its own suggestion.
+- A message never shows a value, under the rules of section 2 and section 7.
+- The fix line names code the caller can write, such as `use variables={"type": ...}`,
+  `pass kind="mutation"`, or `register a ScalarSpec for DateTime`.
+- A test covers each mistake class: unknown operation, unknown argument, unknown field in
+  `fields=`, unknown input field, a value of the wrong type, a missing required argument, a
+  subscription through `query()`, an argument that collides with an option, an unknown type
+  in `Selection.of`, and, once released, an upload at a wrong position.
+
+### 13.6 Machine-readable failure report
+
+`--gql-report=PATH` writes the failure sections of section 3 as JSON Lines, for a tool or an
+agent that reads results without parsing terminal text. It is a flag with no setting behind
+it, like `--gql-log`.
+
+- The file is created empty when the session starts, so a run with no failure leaves an empty
+  file. A relative path resolves against the directory pytest was started in.
+- One record per failed phase that has a calls section, written and flushed when the report
+  is made. Fields: `"format": "pytest-graphql/report/1"`, `nodeid`, `phase`, `seed`,
+  `run_id`, `worker`, and `calls`, a list with one object per call: `number`, `kind`,
+  `operation`, `status`, `duration_ms`, `failed_here`, `document`, `variables`, `skipped`
+  (reason to list of `Type.field`), `skipped_more`, `data`, `errors`, `errors_not_shown`,
+  `failure`, and `reproduce`. A field with no content is `null`.
+- Each value is the text the failure section shows for it, after the same scrub, escaping,
+  limits and withheld checks. A value the section withholds is the withheld notice here.
+  Nothing the section would not show is written.
+- Under xdist only the controller writes. A worker attaches the records to its test report,
+  which xdist sends to the controller.
+
+The Diagnostics page documents the format.
+
+### 13.7 The describe command
+
+A command that prints what a test needs to call an operation, so an agent can explore a
+schema without reading the SDL.
+
+- A console script `pytest-graphql` in `[project.scripts]`, and `python -m pytest_graphql`.
+  It uses `argparse` and imports no pytest.
+- `pytest-graphql operations` lists every query, mutation and subscription: the kind, the
+  snake form, the schema name, and the arguments in one line.
+- `pytest-graphql describe <name>` prints the kind, the arguments (snake form, schema name,
+  type, required or not, default), the return type, the document that auto-selection builds
+  with the default policy, and one sample call as a test writes it, using `gql.fake` for an
+  input object. A name on more than one root needs `--kind`.
+- `--json` prints the same as one JSON object with `"format": "pytest-graphql/describe/1"`.
+- The schema comes from `--schema PATH` (an SDL file) or `--app module:attribute` (13.3),
+  else from the endpoint in `PYTEST_GQL_URL`, or else from `PYTEST_GQL_APP`. It does not read
+  pytest ini files, and the message for a missing source names these flags and variables.
+- No credential is accepted as a command-line argument, because an argument is kept in shell
+  history and is visible to other processes. An endpoint URL can hold a credential in its
+  userinfo, its query string or its path, so there is no URL flag: the endpoint comes only
+  from `PYTEST_GQL_URL`. Headers come only from `PYTEST_GQL_HEADERS`, in the format of the
+  ini option `gql_headers`. There is no `--url` and no `--header` flag. A message never quotes
+  the URL or a header.
+- `--app` and `PYTEST_GQL_APP` exist only once 13.3 is released. Before that the command has
+  neither, so the command does not depend on 13.3.
+- A header value is never printed, and no error quotes one.
+- Exit status: 0 on success, 1 for an unknown name (with the message of 13.5), 2 for a usage
+  error, and 3 when the schema cannot be loaded.
+
+The "Using with coding agents" page adds the command to its agent rules. The Configuration
+page documents it.
+
+### 13.8 Subscriptions
+
+`gql.subscribe()` opens one subscription over WebSocket, synchronously, so a test can open
+it, trigger an event with a mutation, and read the event. It does not wait for the async
+client of section 12.
+
+**Protocol and packaging.** The `graphql-transport-ws` subprotocol only. The legacy
+`subscriptions-transport-ws` protocol and Server-Sent Events are not supported, and a server
+that offers only the legacy protocol gets a message that names it. The extra
+`subscriptions` installs `websockets`, at the lowest version whose synchronous client has
+the handshake-header and open-timeout parameters the implementation uses.
+
+**API.** `gql.subscribe(name, /, *, fields=AUTO, timeout=None, init_payload=None,
+**variables)` returns a `Subscription`, a context manager. Arguments follow section 2.
+
+- It returns after `connection_ack` and after the `subscribe` message is sent.
+- `next(timeout=None)` returns the next event, materialized as `query()` materializes its
+  field. `take(n, timeout=None)` returns a `NodeList` of `n` events. `expect_no_event(within)`
+  fails when an event arrives within that many seconds. Iteration yields events until the
+  server sends `complete`.
+- The default event timeout is the call timeout of section 6. A timeout raises
+  `SubscriptionTimeout`, a `GraphQLTestError` and a top-level export, naming the operation
+  and the seconds. `Subscription` is importable from its own module, like
+  `OperationNamespace`.
+- An `error` message, and a `next` payload with errors, raise by the rules of "Response
+  states and raising" in section 5, at the `next()` that reads them.
+- Leaving the block sends `complete` and closes the socket. The client owns each open
+  subscription: `close()` closes them, and the plugin closes any left open when the test's
+  client is torn down. No thread outlives its subscription.
+- The server's `ping` is answered with `pong`.
+
+**Connection.** `ClientConfig.subscription_url`, default `None`, which means the client URL
+with `http` changed to `ws` and `https` to `wss`. The ini option `gql_subscription_url` and its
+environment variable set it. The handshake carries the headers that `Auth.apply` and the
+middleware produce for a `RequestInfo` of kind `subscription`. `init_payload`, else
+`ClientConfig.subscription_init_payload`, else `{}`, is the `connection_init` payload. TLS
+uses the same verify settings as section 6. A proxy that would apply to the subscription
+URL is refused with a message, because the first version does not route WebSocket through
+one. The cookie jar is not sent.
+
+**Hooks.** `before_request` runs once, on the subscribe request. `after_response` runs once
+for each event, on its `GraphQLResponse`.
+
+**Diagnostics.** A subscription is one recorded call of kind `subscription`. Its status is
+`101` after a successful handshake. It shows `events: <n> received`, the excerpt of the last
+event as `data:`, and its errors. The init payload is never rendered: it shows as
+`<init payload, <n> keys>`, and its values join the secret set of the call. The `reproduce:`
+line reads `not available for a subscription`.
+
+**Not supported:** a custom `Transport` (subscriptions use their own connection), the
+in-process transport of 13.3, and batching. Each refusal is an `ArgumentError` with a fix
+line.
+
+**Testing.** The suite runs a project-authored server on loopback, built from `websockets`
+and `graphql-core`'s `subscribe`.
+
+**Documentation.** `docs/subscriptions.md`, titled "Subscriptions", after "File uploads".
