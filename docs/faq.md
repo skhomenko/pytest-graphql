@@ -35,7 +35,7 @@ once. The `GraphQL` section at the end of a run shows how long it took. See
 If your server turns introspection off, or the schema is a file in your
 repository, tell the client where to read it. Set `gql_schema_source`, or override
 the `gql_schema` fixture. See [Extending](extending.md). A schema cache on disk is
-not part of `0.1.0`.
+not part of `0.1.x`.
 
 ## Why is auto-selection the default?
 

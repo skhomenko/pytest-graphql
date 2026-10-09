@@ -17,7 +17,7 @@ body:
     attributes:
       label: pytest-graphql version
       description: "Output of: python -c \"import pytest_graphql; print(pytest_graphql.__version__)\""
-      placeholder: 0.1.0
+      placeholder: 0.1.1
     validations:
       required: true
   - type: textarea

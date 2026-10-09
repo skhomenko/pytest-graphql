@@ -67,7 +67,7 @@ client. See [Authentication](authentication.md).
 
 ## A `unittest` suite
 
-There is no built-in `unittest` base class in `0.1.0`. Build the client in
+There is no built-in `unittest` base class in `0.1.x`. Build the client in
 `setUpClass` and close it in `tearDownClass`. A client is made once for the class,
 because every `build_client()` without a `schema` makes one introspection request.
 

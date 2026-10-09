@@ -10,6 +10,12 @@ cycle is promised.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-09
+
+Documentation and metadata release. The library code is the same as `0.1.0`. It
+updates the PyPI page and the documentation site, which change only with a new
+version.
+
 ### Added
 
 - A "Using with coding agents" page. It holds rules to paste into `AGENTS.md` or
@@ -25,7 +31,9 @@ cycle is promised.
   not use it when" lists, a fuller example, a table of the public calls and a
   comparison with other tools. The comparison table of "Why pytest-graphql?" gains
   a row for a property-based API fuzzer. The package `description` is the same
-  statement, and the keywords add six search terms. Migration: none.
+  statement, and the keywords add six search terms. The statements of what is not
+  supported yet name the `0.1.x` line, and not the single version `0.1.0`.
+  Migration: none.
 
 ## [0.1.0] - 2026-10-07
 
@@ -361,7 +369,8 @@ dependency is declared as `>=3.2,<3.3` so that an install never selects it.
   build backend and its dependencies, used both as build constraints for the
   release build and as the environment for the sdist install-back.
 
-[Unreleased]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.0rc1...v0.1.0
 [0.1.0rc1]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.0b1...v0.1.0rc1
 [0.1.0b1]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.0a1...v0.1.0b1
