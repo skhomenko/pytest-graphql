@@ -1,5 +1,7 @@
 # Quickstart
 
+The GraphQL test client for Python whose calls are built from the schema and checked against it before they are sent.
+
 Install the package with its pytest extra:
 
 ```bash
@@ -22,8 +24,6 @@ def test_user_has_a_name(gql):
     assert user.name == "Ada Lovelace"
 ```
 
-Run `pytest`. The client chooses the fields to ask for, so the test contains no
-query text.
+Run `pytest`. The client chooses the fields to ask for, so the test contains no query text.
 
-To learn what the package changes in your tests, read
-[Why pytest-graphql?](why.md).
+To learn what the package changes in your tests, read [Why pytest-graphql?](why.md).

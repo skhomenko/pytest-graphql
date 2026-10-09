@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "pytest-graphql"
 dynamic = ["version"]
-description = "Schema-aware GraphQL API testing for pytest: a schema-driven client, response matchers, seeded fake data and pytest fixtures."
+description = "The GraphQL test client for Python whose calls are built from the schema and checked against it before they are sent."
 readme = "README.md"
 # The upper bound is the compatibility promise in the compatibility section of
 # docs/reference/DESIGN_DECISIONS.md, which is Python 3.10 through 3.14. An
@@ -15,7 +15,19 @@ requires-python = ">=3.10,<3.15"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Sergii Khomenko" }]
-keywords = ["pytest", "graphql", "testing", "api", "integration"]
+keywords = [
+    "pytest",
+    "graphql",
+    "testing",
+    "api",
+    "integration",
+    "graphql-testing",
+    "api-testing",
+    "schema",
+    "contract-testing",
+    "test-client",
+    "fixtures",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Framework :: Pytest",

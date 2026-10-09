@@ -1,5 +1,5 @@
 site_name: pytest-graphql
-site_description: Schema-aware GraphQL API testing for pytest.
+site_description: The GraphQL test client for Python whose calls are built from the schema and checked against it before they are sent.
 site_url: https://skhomenko.github.io/pytest-graphql/
 strict: true
 
@@ -8,11 +8,13 @@ strict: true
 exclude_docs: |
   reference/
 
-# The fifteen pages of SPEC section 13, in its order, then the generated API
-# reference. The first page is index.md so the site root is the Quickstart.
+# The pages of SPEC section 13 in its order, with the agent page after the Why
+# page, then the generated API reference. The first page is index.md so the
+# site root is the Quickstart.
 nav:
   - Quickstart: index.md
   - Why pytest-graphql?: why.md
+  - Using with coding agents: agents.md
   - Configuration: configuration.md
   - Selections: selections.md
   - Responses: responses.md
