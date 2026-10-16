@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from graphql import GraphQLSyntaxError, print_schema
+from graphql import print_schema
 
 from pytest_graphql._core.errors import SchemaError
 from pytest_graphql._core.schema.source import IntrospectionSource, SDLFileSource
@@ -108,4 +108,6 @@ def test_sdl_file_source_raises_schema_error_on_malformed_sdl(
     source = SDLFileSource(bad_sdl)
     with pytest.raises(SchemaError, match="not valid SDL") as excinfo:
         source.load()
-    assert isinstance(excinfo.value.__cause__, GraphQLSyntaxError)
+    # The cause of a graphql-core error quotes the source, so it is not chained.
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__suppress_context__

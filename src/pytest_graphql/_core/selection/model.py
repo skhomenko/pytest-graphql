@@ -21,7 +21,7 @@ from dataclasses import KW_ONLY, dataclass, field
 from types import MappingProxyType
 from typing import Any, Final, Union
 
-from pytest_graphql._core.errors import SelectionError
+from pytest_graphql._core.errors import SelectionError, caller_message
 
 #: The GraphQL Name grammar, from the specification's Name production.
 #: Matched with ``fullmatch``: ``$`` also matches just before a final
@@ -48,10 +48,14 @@ def check_graphql_name(value: str, what: str) -> None:
     """
     if not _GRAPHQL_NAME.fullmatch(value):
         raise SelectionError(
-            f"{what} {value!r} is not a GraphQL name.\n"
-            "  A name starts with a letter or an underscore, followed by "
-            "letters, digits or underscores.\n"
-            "  Rename it, or leave it out."
+            caller_message(
+                f"{what} {value!r} is not a GraphQL name.",
+                context=[
+                    "A name starts with a letter or an underscore, followed by "
+                    "letters, digits or underscores."
+                ],
+                fix=f"rename the {what}, or leave it out",
+            )
         )
 
 
@@ -250,10 +254,11 @@ class Field:
     def __post_init__(self) -> None:
         if self.directives:
             raise SelectionError(
-                f"directives are not supported in v0.1, and {self.name!r} "
-                f"uses {', '.join(sorted(self.directives))}.\n"
-                "  Send a document with directives through gql.execute(...) "
-                "instead."
+                caller_message(
+                    f"directives are not supported in v0.1, and {self.name!r} "
+                    f"uses {', '.join(sorted(self.directives))}.",
+                    fix="send a document with directives through gql.execute(...)",
+                )
             )
         if self.alias is not None:
             check_graphql_name(self.alias, "alias")

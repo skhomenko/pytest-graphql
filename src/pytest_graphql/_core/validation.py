@@ -31,12 +31,15 @@ from graphql import (
     GraphQLList,
     GraphQLNonNull,
     GraphQLSchema,
+    Node,
+    ValueNode,
+    VariableNode,
     is_required_input_field,
     validate,
 )
 from graphql.pyutils import is_iterable
 
-from pytest_graphql._core.errors import ArgumentError, SelectionError
+from pytest_graphql._core.errors import ArgumentError, SelectionError, position_of
 from pytest_graphql._core.factory.scalars import ScalarRegistry
 from pytest_graphql._core.graphql_compat import invalid_input_path
 from pytest_graphql._core.naming import field_signature, to_snake
@@ -123,11 +126,22 @@ def validate_document(schema: GraphQLSchema, document: DocumentNode) -> None:
 
     ``validate`` returns a list rather than raising, so an empty list is the
     success case. The first error becomes the message: SPEC 8.2 asks for
-    "the graphql-core message", singular, not a batch.
+    "the graphql-core message", singular, not a batch. DESIGN 13.5 adds that a
+    message never shows a value, so a message about a literal states its place
+    only.
     """
     errors = validate(schema, document)
     if errors:
-        raise SelectionError.from_validation(errors[0].message)
+        first = errors[0]
+        if any(_is_literal(node) for node in first.nodes or ()):
+            # graphql-core words the message of a bad literal with the literal.
+            raise SelectionError.invalid_literal(position=position_of(first.locations))
+        raise SelectionError.from_validation(first.message)
+
+
+def _is_literal(node: Node) -> bool:
+    """A value written in the document, as opposed to a variable that names one."""
+    return isinstance(node, ValueNode) and not isinstance(node, VariableNode)
 
 
 def coerce_variables(
@@ -165,15 +179,18 @@ def coerce_variables(
                 kind=kind,
                 operation_name=operation_name,
                 arg_name=name,
-                detail=str(error),
+                detail="\n".join([error.problem, *error.context]),
+                fix=error.fix,
             ) from None
         bad = invalid_input_path(serialized, type_)
         if bad is not None:
+            detail, fix = _describe(type_, serialized, (name, *bad))
             raise ArgumentError.invalid_value(
                 kind=kind,
                 operation_name=operation_name,
                 arg_name=name,
-                detail=_describe(type_, serialized, (name, *bad)),
+                detail=detail,
+                fix=fix,
             ) from None
         wire[name] = serialized
     return wire
@@ -194,8 +211,10 @@ def _clip(text: str) -> str:
     return text[:_MAX_NAME_LENGTH] + "..."
 
 
-def _describe(type_: GraphQLInputType, value: Any, path: Path) -> str:
-    """What is wrong at ``path``, in terms of the schema and never of the value.
+def _describe(type_: GraphQLInputType, value: Any, path: Path) -> tuple[str, str]:
+    """What is wrong at ``path``, and the fix, in terms of the schema only.
+
+    Returns the problem line and the fix line. Neither shows the value.
 
     ``path`` starts with the variable name. graphql-core reports a missing or
     an unknown input field at the enclosing object, so when the failure sits
@@ -222,8 +241,16 @@ def _describe(type_: GraphQLInputType, value: Any, path: Path) -> str:
         if unknown[1]:
             parts.append(f"has no {_fields(*unknown)}")
         if parts:
-            return f"{where} {' and '.join(parts)} on '{_clip(inner.name)}'."
-    return f"{where} is not a valid value of type '{_clip(str(declared))}'."
+            return (
+                f"{where} {' and '.join(parts)} on '{_clip(inner.name)}'.",
+                f"pass a mapping with every required field of '{_clip(inner.name)}' "
+                "and only fields that it declares",
+            )
+    shown = _clip(str(declared))
+    return (
+        f"{where} is not a valid value of type '{shown}'.",
+        f"pass a value of type '{shown}' for {where}",
+    )
 
 
 def _first_names(names: Iterable[str]) -> tuple[list[str], int]:

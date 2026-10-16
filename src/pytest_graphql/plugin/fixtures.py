@@ -51,7 +51,7 @@ from pytest_graphql._core.client import (
     _load_schema,
     _new_root_pool,
 )
-from pytest_graphql._core.errors import SchemaError
+from pytest_graphql._core.errors import SchemaError, caller_message
 from pytest_graphql._core.factory import FakeContext, ScalarRegistry, UniqueSource
 from pytest_graphql._core.headers import merge_headers
 from pytest_graphql._core.lifecycle import Closable, _close_all, _Owned, _report
@@ -63,10 +63,12 @@ from pytest_graphql.plugin.options import Settings, settings_of
 from pytest_graphql.plugin.session import run_id as _run_id
 from pytest_graphql.plugin.session import worker_id as _worker_id
 
-_NO_ENDPOINT = (
-    "pytest-graphql: no GraphQL endpoint. Pass --gql-url=URL, set the "
-    "PYTEST_GQL_URL environment variable or the gql_url ini option, or "
-    "override the gql_url fixture."
+_NO_ENDPOINT = caller_message(
+    "pytest-graphql: no GraphQL endpoint is set.",
+    fix=(
+        "pass --gql-url=URL, set the PYTEST_GQL_URL environment variable or "
+        "the gql_url ini option, or override the gql_url fixture"
+    ),
 )
 
 
@@ -138,8 +140,11 @@ def _gql_session_config(
     """
     if not isinstance(gql_config, ClientConfig):
         pytest.fail(
-            "pytest-graphql: the gql_config fixture must return a ClientConfig, "
-            f"not {type(gql_config).__name__}.",
+            caller_message(
+                "pytest-graphql: the gql_config fixture must return a "
+                f"ClientConfig, not {type(gql_config).__name__}.",
+                fix="return a ClientConfig, such as ClientConfig(url=...)",
+            ),
             pytrace=False,
         )
     config = settings_of(pytestconfig).apply_cli(
@@ -167,8 +172,10 @@ class EndpointIntrospection:
 
     def load(self) -> GraphQLSchema:
         raise SchemaError(
-            "the default schema source loads through the session transport. "
-            "Use the gql_schema fixture, or override gql_schema_source."
+            caller_message(
+                "the default schema source loads through the session transport.",
+                fix="use the gql_schema fixture, or override gql_schema_source",
+            )
         )
 
 
@@ -188,7 +195,13 @@ def _import_source(path: str, where: str) -> SchemaSource:
         owner = missing.name or ""
         if module_name == owner or module_name.startswith(owner + "."):
             pytest.fail(
-                f"{problem}, but there is no module named {module_name!r}.",
+                caller_message(
+                    f"{problem}, but there is no module named {module_name!r}.",
+                    fix=(
+                        "set gql_schema_source to package.module.attribute of "
+                        "a module that can be imported"
+                    ),
+                ),
                 pytrace=False,
             )
         raise
@@ -196,7 +209,14 @@ def _import_source(path: str, where: str) -> SchemaSource:
         source = getattr(module, attribute)
     except AttributeError:
         pytest.fail(
-            f"{problem}, but module {module_name!r} has no attribute {attribute!r}.",
+            caller_message(
+                f"{problem}, but module {module_name!r} has no attribute "
+                f"{attribute!r}.",
+                fix=(
+                    f"define {attribute} in {module_name}, or set "
+                    "gql_schema_source to an attribute that it has"
+                ),
+            ),
             pytrace=False,
         )
     loader = getattr(source, "load", None)
@@ -205,14 +225,19 @@ def _import_source(path: str, where: str) -> SchemaSource:
         or not callable(loader)
         or not isinstance(getattr(source, "fingerprint", None), str)
     ):
-        hint = (
-            " It is a class. Point at an instance of it."
-            if isinstance(source, type)
-            else ""
-        )
         pytest.fail(
-            f"{problem}, which is not a SchemaSource. A SchemaSource has a "
-            f"load() method and a fingerprint string.{hint}",
+            caller_message(
+                f"{problem}, which is not a SchemaSource.",
+                context=[
+                    "A SchemaSource has a load() method and a fingerprint string.",
+                ],
+                fix=(
+                    "point gql_schema_source at an instance, not the class"
+                    if isinstance(source, type)
+                    else "point gql_schema_source at an instance with a "
+                    "load() method and a fingerprint string"
+                ),
+            ),
             pytrace=False,
         )
     return cast("SchemaSource", source)
@@ -359,8 +384,11 @@ def _gql_ready_scalars(
     """The registry, after every ``pytest_graphql_register_scalars`` ran on it."""
     if not isinstance(gql_scalars, ScalarRegistry):
         pytest.fail(
-            "pytest-graphql: the gql_scalars fixture must return a "
-            f"ScalarRegistry, not {type(gql_scalars).__name__}.",
+            caller_message(
+                "pytest-graphql: the gql_scalars fixture must return a "
+                f"ScalarRegistry, not {type(gql_scalars).__name__}.",
+                fix="return a ScalarRegistry, such as ScalarRegistry()",
+            ),
             pytrace=False,
         )
     pytestconfig.hook.pytest_graphql_register_scalars(
@@ -411,8 +439,11 @@ def _seed_of(settings: Settings, fixture_value: object) -> int:
         return int(settings.cli_values["seed"])
     if isinstance(fixture_value, bool) or not isinstance(fixture_value, int):
         pytest.fail(
-            "pytest-graphql: the gql_seed fixture must return an int, not "
-            f"{type(fixture_value).__name__}.",
+            caller_message(
+                "pytest-graphql: the gql_seed fixture must return an int, not "
+                f"{type(fixture_value).__name__}.",
+                fix="return an int, such as 0",
+            ),
             pytrace=False,
         )
     return fixture_value
@@ -429,8 +460,11 @@ def _test_config(
     """
     if not isinstance(headers, Mapping):
         pytest.fail(
-            "pytest-graphql: the gql_headers fixture must return a mapping of "
-            f"header names to values, not {type(headers).__name__}.",
+            caller_message(
+                "pytest-graphql: the gql_headers fixture must return a mapping "
+                f"of header names to values, not {type(headers).__name__}.",
+                fix='return a dict, such as {"X-Request-Id": "1"}',
+            ),
             pytrace=False,
         )
     schema_headers = (

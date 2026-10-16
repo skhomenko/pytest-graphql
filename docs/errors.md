@@ -393,6 +393,29 @@ with pytest.raises(SelectionError, match="no field 'nme' on User"):
 This is useful for a helper of your own that builds calls. It is not needed for
 every test, because a wrong call already fails the test that makes it.
 
+### Read the message of a bad call
+
+A mistake that you can fix has a message of one shape. The first line says what is
+wrong and where. A `Did you mean:` line follows when a name is close. The last line
+starts with `Fix:` and says what to write instead. The message never shows a value
+that you passed.
+
+```python {.exec}
+import pytest
+
+from pytest_graphql import SelectionError
+
+with pytest.raises(SelectionError) as raised:
+    gql.query("user", id="u1", fields=["nme"])
+
+lines = str(raised.value).splitlines()
+assert lines[0] == "no field 'nme' on User."
+assert lines[-2:] == [
+    "  Did you mean: name?",
+    '  Fix: use a field of User, such as fields=["name"]',
+]
+```
+
 ### Check that a server refuses an action
 
 Use `expect_error()` with the code, the path or the message that you expect. Then

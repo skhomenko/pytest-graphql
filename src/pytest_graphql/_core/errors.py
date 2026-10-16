@@ -9,6 +9,10 @@ a required dependency. Every ``GraphQLClientError`` message states three
 things: what was wrong, what was expected, and what to do about it.
 Suggestions come from ``difflib.get_close_matches``, the standard library
 fuzzy matcher, per SPEC 8.3: no third-party fuzzy matching dependency.
+``caller_message`` builds the message of every error that a caller can fix
+(DESIGN_DECISIONS.md section 13.5): the problem and where it is, a
+``Did you mean`` line when a name is close, and a ``Fix`` line. No raise site
+formats a suggestion of its own.
 
 ``GraphQLTransportError`` and its leaves, plus ``GraphQLRequestError``, carry
 the real shape M5a's transport layer raises (C3, C13).
@@ -22,7 +26,7 @@ raised (DESIGN_DECISIONS.md section 7, "Boundary").
 from __future__ import annotations
 
 import difflib
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -36,9 +40,61 @@ if TYPE_CHECKING:
     from pytest_graphql._core.response.types import GraphQLErrorInfo
 
 
+def _close_matches(name: str, candidates: Sequence[str]) -> list[str]:
+    return difflib.get_close_matches(name, candidates)
+
+
 def _best_match(name: str, candidates: Sequence[str]) -> str | None:
     matches = difflib.get_close_matches(name, candidates, n=1)
     return matches[0] if matches else None
+
+
+def caller_message(
+    problem: str,
+    *,
+    fix: str | Callable[[str | None], str],
+    context: Sequence[str] = (),
+    wrong: str | None = None,
+    known: Sequence[str] = (),
+) -> str:
+    """Build the message of an error that the caller can fix (DESIGN 13.5).
+
+    Every raise site for a caller mistake goes through this function, so the
+    shape is written once: a first line that states the problem and where it
+    is, any lines of context, a ``  Did you mean: <name>?`` line when ``wrong``
+    is close to one of ``known``, and a ``  Fix: <one line>`` line.
+
+    ``fix`` is the text of the fix line. It can also be a function that takes an
+    example name and returns that text, for a fix that shows code. The example
+    is the closest match to ``wrong``, else the first of ``known``, else
+    ``None``. A message never shows a value (DESIGN 2 and 7), so ``problem``,
+    ``context`` and ``fix`` hold names, types and paths only.
+    """
+    lines = [problem]
+    for item in context:
+        lines.extend(f"  {line}" for line in item.splitlines())
+    matches = _close_matches(wrong, known) if wrong is not None else []
+    if matches:
+        lines.append(f"  Did you mean: {', '.join(matches)}?")
+    example = matches[0] if matches else (known[0] if known else None)
+    lines.append(f"  Fix: {fix(example) if callable(fix) else fix}")
+    return "\n".join(lines)
+
+
+def position_of(locations: Sequence[Any] | None, *, column_offset: int = 0) -> str:
+    """Where graphql-core found a problem in GraphQL text, as ``line 1, column 5``.
+
+    A message that comes from GraphQL text states the place and never quotes the
+    text, because the text holds the values of the caller (DESIGN 2 and 7).
+    ``column_offset`` is the number of characters the library put before the
+    caller's text on its first line. The result is empty when graphql-core gave
+    no location.
+    """
+    if not locations:
+        return ""
+    first = locations[0]
+    column = first.column - (column_offset if first.line == 1 else 0)
+    return f"line {first.line}, column {column}"
 
 
 def _and_join(words: Sequence[str]) -> str:
@@ -226,16 +282,17 @@ class OperationNotFoundError(GraphQLClientError):
         super().__init__(self._render())
 
     def _render(self) -> str:
-        lines = [f"no {self.kind} named {self.name!r}."]
-        matches = difflib.get_close_matches(self.name, self.available)
-        if matches:
-            lines.append(f"  Did you mean: {', '.join(matches)}?")
         plural = _pluralize(self.kind)
-        lines.append(
-            f"  This schema has {self.total_count} {plural}. "
-            "Run with --gql-show-schema-stats to list them."
+        return caller_message(
+            f"no {self.kind} named {self.name!r}.",
+            context=[f"This schema has {self.total_count} {plural}."],
+            wrong=self.name,
+            known=self.available,
+            fix=(
+                f"pass the name of a {self.kind} of the schema, or run with "
+                "--gql-show-schema-stats to list them"
+            ),
         )
-        return "\n".join(lines)
 
 
 class ArgumentError(GraphQLClientError):
@@ -249,7 +306,9 @@ class ArgumentError(GraphQLClientError):
     - A required argument was not given.
     - One argument was given twice, for example as `user_id` and `userId`.
     - A value does not fit the declared type of its argument.
-    - `wait_until()` was given a mutation. Only queries can be polled.
+    - `wait_until()` was given a mutation or a subscription. Only queries can
+      be polled.
+    - `query()` or `mutation()` was given the name of a subscription.
     - A call or `build_client()` got a keyword that is neither an argument nor
       a configuration option.
 
@@ -274,7 +333,7 @@ class ArgumentError(GraphQLClientError):
         except ArgumentError as error:
             assert error.bad_name == "idd"
             assert error.signature == "user(id: ID!): User"
-            assert "Did you mean 'id'?" in str(error)
+            assert "Did you mean: id?" in str(error)
         else:
             raise AssertionError("expected an error")
         ```
@@ -411,18 +470,30 @@ class ArgumentError(GraphQLClientError):
         super().__init__(self._render())
 
     def _render(self) -> str:
-        lines = [
-            f"{self.kind} {self.operation_name!r} has no argument {self.bad_name!r}.",
-            f"  Signature: {self.signature}",
-        ]
+        context = [f"Signature: {self.signature}"]
         if self.input_type_name is not None and self.input_fields is not None:
-            lines.append(
-                f"  {self.input_type_name} fields: {', '.join(self.input_fields)}"
+            context.append(
+                f"{self.input_type_name} fields: {', '.join(self.input_fields)}"
             )
-        match = _best_match(self.bad_name, self.candidates)
-        if match:
-            lines.append(f"  Did you mean {match!r}?")
-        return "\n".join(lines)
+        return caller_message(
+            f"{self.kind} {self.operation_name!r} has no argument {self.bad_name!r}.",
+            context=context,
+            wrong=self.bad_name,
+            known=self.candidates,
+            fix=self._fix_for_unknown,
+        )
+
+    def _fix_for_unknown(self, example: str | None) -> str:
+        if example is None:
+            return f"remove {self.bad_name!r} from the call"
+        if self.kind == "field":
+            return (
+                f'use an argument from the signature, such as args={{"{example}": ...}}'
+            )
+        return (
+            "use an argument from the signature, such as "
+            f'gql.{self.kind}("{self.operation_name}", {example}=...)'
+        )
 
     @classmethod
     def _from_message(
@@ -480,9 +551,13 @@ class ArgumentError(GraphQLClientError):
             assert "missing required argument 'id'" in str(error)
             ```
         """
-        message = (
-            f"{kind} {operation_name!r} is missing required argument {arg_name!r}.\n"
-            f"  Signature: {signature}"
+        message = caller_message(
+            f"{kind} {operation_name!r} is missing required argument {arg_name!r}.",
+            context=[f"Signature: {signature}"],
+            fix=(
+                "pass it as a keyword, such as "
+                f'gql.{kind}("{operation_name}", {arg_name}=...)'
+            ),
         )
         error = cls._from_message(
             message, kind=kind, operation_name=operation_name, bad_name=arg_name
@@ -524,11 +599,11 @@ class ArgumentError(GraphQLClientError):
             assert "variables=" in str(error)
             ```
         """
-        message = (
-            f"{kind} {operation_name!r} has a required argument {arg_name!r} "
-            "that collides with a reserved per-call option name.\n"
-            f"  Pass it through variables={{{arg_name!r}: ...}} instead.\n"
-            f"  Signature: {signature}"
+        message = caller_message(
+            f"{kind} {operation_name!r} has an argument {arg_name!r} "
+            "that collides with a call option.",
+            context=[f"Signature: {signature}"],
+            fix=f'use variables={{"{arg_name}": ...}}',
         )
         error = cls._from_message(
             message, kind=kind, operation_name=operation_name, bad_name=arg_name
@@ -581,10 +656,13 @@ class ArgumentError(GraphQLClientError):
             assert "received argument 'userId' twice" in str(error)
             ```
         """
-        message = (
+        message = caller_message(
             f"{kind} {operation_name!r} received argument {resolved_name!r} twice, "
-            f"as both {first_key!r} and {second_key!r}.\n"
-            f"  Signature: {signature}"
+            f"as both {first_key!r} and {second_key!r}.",
+            context=[f"Signature: {signature}"],
+            fix=(
+                f'pass it once, as gql.{kind}("{operation_name}", {resolved_name}=...)'
+            ),
         )
         error = cls._from_message(
             message, kind=kind, operation_name=operation_name, bad_name=resolved_name
@@ -594,7 +672,13 @@ class ArgumentError(GraphQLClientError):
 
     @classmethod
     def invalid_value(
-        cls, *, kind: str, operation_name: str, arg_name: str, detail: str
+        cls,
+        *,
+        kind: str,
+        operation_name: str,
+        arg_name: str,
+        detail: str,
+        fix: str | None = None,
     ) -> ArgumentError:
         """Build the error for a value that does not fit the type of its argument.
 
@@ -605,7 +689,10 @@ class ArgumentError(GraphQLClientError):
             kind: `"query"` or `"mutation"`.
             operation_name: The name of the operation.
             arg_name: The name of the argument.
-            detail: What was wrong with the value.
+            detail: What was wrong with the value. It names the place and the
+                type, and never shows the value.
+            fix: The text of the fix line. Leave it out for a general line that
+                asks for a value of the declared type.
 
         Returns:
             The error, ready to raise.
@@ -630,10 +717,15 @@ class ArgumentError(GraphQLClientError):
             assert error.bad_name == "id"
             ```
         """
-        message = (
+        message = caller_message(
             f"{kind} {operation_name!r} received an invalid value for argument "
-            f"{arg_name!r}.\n"
-            f"  {detail}"
+            f"{arg_name!r}.",
+            context=[detail],
+            fix=fix
+            or (
+                f"pass a value of the declared type, as in "
+                f'gql.{kind}("{operation_name}", {arg_name}=...)'
+            ),
         )
         return cls._from_message(
             message, kind=kind, operation_name=operation_name, bad_name=arg_name
@@ -665,10 +757,53 @@ class ArgumentError(GraphQLClientError):
                 raise AssertionError("expected an error")
             ```
         """
-        message = (
-            f"wait_until polls queries only, and {name!r} is a {kind}.\n"
-            "  Polling would repeat its side effect on every attempt.\n"
-            f"  Poll a query that reads the result, or call {kind}({name!r}) once."
+        if kind == "subscription":
+            message = caller_message(
+                f"wait_until polls queries only, and {name!r} is a subscription.",
+                fix="poll a query that reads the same data",
+            )
+        else:
+            message = caller_message(
+                f"wait_until polls queries only, and {name!r} is a {kind}.",
+                context=["Polling would repeat its side effect on every attempt."],
+                fix=(
+                    "poll a query that reads the result, or call "
+                    f'gql.{kind}("{name}") once'
+                ),
+            )
+        return cls._from_message(message, kind=kind, operation_name=name, bad_name=name)
+
+    @classmethod
+    def is_a_subscription(cls, *, kind: str, name: str) -> ArgumentError:
+        """Build the error for a subscription that was called as a query or mutation.
+
+        `query()` and `mutation()` send one request and read one response, so
+        they cannot run a subscription. The library calls this when the name
+        exists in the schema only as a subscription. You rarely need it
+        yourself.
+
+        Args:
+            kind: What the caller used, `"query"` or `"mutation"`.
+            name: The name of the subscription.
+
+        Returns:
+            The error, ready to raise.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import ArgumentError
+
+            error = ArgumentError.is_a_subscription(kind="query", name="onUserAdded")
+            assert "is a subscription" in str(error)
+            assert "Fix:" in str(error)
+            ```
+        """
+        message = caller_message(
+            f"{kind} {name!r} is a subscription, and {kind}() cannot run one.",
+            fix=(
+                "subscriptions are not available in this release; call a query "
+                "that reads the same data"
+            ),
         )
         return cls._from_message(message, kind=kind, operation_name=name, bad_name=name)
 
@@ -704,19 +839,23 @@ class ArgumentError(GraphQLClientError):
                 )
             except ArgumentError as error:
                 assert error.bad_name == "timout"
-                assert "Did you mean 'timeout'?" in str(error)
+                assert "Did you mean: timeout?" in str(error)
             else:
                 raise AssertionError("expected an error")
             ```
         """
         names = ", ".join(sorted(candidates))
-        message = (
-            f"{callable_name} has no configuration option {bad_name!r}.\n"
-            f"  Options: {names}"
+        message = caller_message(
+            f"{callable_name} has no configuration option {bad_name!r}.",
+            context=[f"Options: {names}"],
+            wrong=bad_name,
+            known=tuple(candidates),
+            fix=lambda example: (
+                "use one of the options listed above"
+                if example is None
+                else f"use one of the options listed above, such as {example}=..."
+            ),
         )
-        match = _best_match(bad_name, tuple(candidates))
-        if match:
-            message += f"\n  Did you mean {match!r}?"
         error = cls._from_message(
             message, kind="call", operation_name=callable_name, bad_name=bad_name
         )
@@ -745,7 +884,7 @@ class SelectionError(GraphQLClientError):
             gql.query("user", id="u1", fields=["nme"])
         except SelectionError as error:
             assert "no field 'nme' on User" in str(error)
-            assert "Did you mean 'name'?" in str(error)
+            assert "Did you mean: name?" in str(error)
         else:
             raise AssertionError("expected an error")
         ```
@@ -753,7 +892,12 @@ class SelectionError(GraphQLClientError):
 
     @classmethod
     def unknown_field(
-        cls, type_name: str, bad_name: str, available: Sequence[str]
+        cls,
+        type_name: str,
+        bad_name: str,
+        available: Sequence[str],
+        *,
+        use_in: str = 'fields=["{}"]',
     ) -> SelectionError:
         """Build the error for a field that the type does not have.
 
@@ -765,6 +909,8 @@ class SelectionError(GraphQLClientError):
             bad_name: The field name that was written.
             available: The field names of the type. The message lists them and
                 suggests the closest one.
+            use_in: The code that the fix line shows, with `{}` where the
+                example field goes. The default shows `fields=["name"]`.
 
         Returns:
             The error, ready to raise.
@@ -774,19 +920,31 @@ class SelectionError(GraphQLClientError):
             from pytest_graphql import SelectionError
 
             error = SelectionError.unknown_field("User", "nme", ["id", "name"])
-            assert "Did you mean 'name'?" in str(error)
+            assert "Did you mean: name?" in str(error)
             ```
         """
-        lines = [f"no field {bad_name!r} on {type_name}."]
-        lines.append(f"  Available fields: {', '.join(available)}")
-        match = _best_match(bad_name, available)
-        if match:
-            lines.append(f"  Did you mean {match!r}?")
-        return cls("\n".join(lines))
+        return cls(
+            caller_message(
+                f"no field {bad_name!r} on {type_name}.",
+                context=[f"Available fields: {', '.join(available)}"],
+                wrong=bad_name,
+                known=available,
+                fix=lambda example: (
+                    f"use a field of {type_name}, such as {use_in.format(example)}"
+                    if example is not None
+                    else f"use a field of {type_name}"
+                ),
+            )
+        )
 
     @classmethod
     def ambiguous_field(
-        cls, type_name: str, bad_name: str, spellings: Sequence[str]
+        cls,
+        type_name: str,
+        bad_name: str,
+        spellings: Sequence[str],
+        *,
+        use_in: str = 'fields=["{}"]',
     ) -> SelectionError:
         """Build the error for a snake_case name that two or more fields share.
 
@@ -797,6 +955,8 @@ class SelectionError(GraphQLClientError):
             type_name: The name of the type.
             bad_name: The snake_case name that was written.
             spellings: The exact field names that have this snake_case form.
+            use_in: The code that the fix line shows, with `{}` where the
+                example field goes. The default shows `fields=["userId"]`.
 
         Returns:
             The error, ready to raise.
@@ -812,17 +972,26 @@ class SelectionError(GraphQLClientError):
             ```
         """
         return cls(
-            f"{bad_name!r} is ambiguous on {type_name}: it matches "
-            f"{', '.join(spellings)}.\n"
-            "  Use the exact field name."
+            caller_message(
+                f"{bad_name!r} is ambiguous on {type_name}: it matches "
+                f"{', '.join(spellings)}.",
+                known=spellings,
+                fix=lambda example: (
+                    "write the exact field name"
+                    if example is None
+                    else f"write the exact field name, such as {use_in.format(example)}"
+                ),
+            )
         )
 
     @classmethod
     def from_validation(cls, message: str) -> SelectionError:
         """Build the error for a document that fails validation.
 
-        The text of graphql-core is kept as it is. The library calls this. You
-        rarely need it yourself.
+        The first line is the text of graphql-core, kept as it is. It shows
+        names and types only: a message that would hold a literal goes through
+        `invalid_literal` instead. A fix line follows it. The library calls this.
+        You rarely need it yourself.
 
         Args:
             message: The validation message.
@@ -842,10 +1011,56 @@ class SelectionError(GraphQLClientError):
                 raise AssertionError("expected an error")
 
             error = SelectionError.from_validation("Cannot query field 'nope'.")
-            assert str(error) == "Cannot query field 'nope'."
+            assert str(error).splitlines()[0] == "Cannot query field 'nope'."
             ```
         """
-        return cls(message)
+        return cls(
+            caller_message(
+                message,
+                fix=(
+                    "change the document to use only the fields, arguments and "
+                    "types that the schema defines"
+                ),
+            )
+        )
+
+    @classmethod
+    def invalid_literal(cls, *, position: str = "") -> SelectionError:
+        """Build the error for a document with a literal value that the schema refuses.
+
+        graphql-core words such a message with the literal in it, so the message
+        states the place and leaves the literal out. The library calls this. You
+        rarely need it yourself.
+
+        Args:
+            position: Where the literal is, such as `"line 1, column 9"`. Empty
+                when graphql-core gave no location.
+
+        Returns:
+            The error, ready to raise.
+
+        Examples:
+            ```python {.exec}
+            from pytest_graphql import SelectionError
+
+            error = SelectionError.invalid_literal(position="line 1, column 9")
+            assert str(error).splitlines()[0] == (
+                "a literal value in the document is not valid for its place "
+                "(line 1, column 9)."
+            )
+            assert str(error).splitlines()[-1].startswith("  Fix: ")
+            ```
+        """
+        where = f" ({position})" if position else ""
+        return cls(
+            caller_message(
+                f"a literal value in the document is not valid for its place{where}.",
+                fix=(
+                    "write the value as a variable and pass it in variables, "
+                    'as in gql.execute(document, {"name": ...})'
+                ),
+            )
+        )
 
     @classmethod
     def on_leaf_type(cls, *, field_name: str, type_name: str) -> SelectionError:
@@ -870,9 +1085,11 @@ class SelectionError(GraphQLClientError):
             ```
         """
         return cls(
-            f"{field_name!r} returns {type_name}, a scalar or enum, which has "
-            "no fields to select.\n"
-            "  Leave fields unset, or pass fields=AUTO."
+            caller_message(
+                f"{field_name!r} returns {type_name}, a scalar or enum, which has "
+                "no fields to select.",
+                fix="remove fields= from the call, or pass fields=AUTO",
+            )
         )
 
     @classmethod
@@ -898,14 +1115,17 @@ class SelectionError(GraphQLClientError):
             ```
         """
         return cls(
-            f"auto-selection of {type_name!r} produced no fields.\n"
-            "  Every field was removed by the policy, needs an argument, or "
-            "sits past the depth limit.\n"
-            "  Widen it by one of:\n"
-            "    max_depth=4\n"
-            "    include_deprecated=True\n"
-            "    exclude=[]\n"
-            '    fields=["id"]'
+            caller_message(
+                f"auto-selection of {type_name!r} produced no fields.",
+                context=[
+                    "Every field was removed by the policy, needs an argument, "
+                    "or sits past the depth limit."
+                ],
+                fix=(
+                    "widen it with max_depth=4, include_deprecated=True, exclude=[] "
+                    'or fields=["id"]'
+                ),
+            )
         )
 
 
@@ -1023,7 +1243,13 @@ class SchemaError(GraphQLClientError):
     """
 
     @classmethod
-    def unknown_type(cls, name: str, available: Sequence[str]) -> SchemaError:
+    def unknown_type(
+        cls,
+        name: str,
+        available: Sequence[str],
+        *,
+        use_in: str = 'Selection.of("{}")',
+    ) -> SchemaError:
         """Build the error for a type that the schema does not have.
 
         The library calls this. You rarely need it yourself.
@@ -1032,6 +1258,8 @@ class SchemaError(GraphQLClientError):
             name: The type name that was used.
             available: The type names of the schema. The message suggests the
                 closest one.
+            use_in: The code that the fix line shows, with `{}` where the
+                example type goes. The default shows `Selection.of("User")`.
 
         Returns:
             The error, ready to raise.
@@ -1041,14 +1269,24 @@ class SchemaError(GraphQLClientError):
             from pytest_graphql import SchemaError
 
             error = SchemaError.unknown_type("Usr", ["User", "Team"])
-            assert "Did you mean 'User'?" in str(error)
+            assert "Did you mean: User?" in str(error)
             ```
         """
-        lines = [f"no type named {name!r}."]
-        match = _best_match(name, available)
-        if match:
-            lines.append(f"  Did you mean {match!r}?")
-        return cls("\n".join(lines))
+        return cls(
+            caller_message(
+                f"no type named {name!r}.",
+                wrong=name,
+                known=available,
+                fix=lambda example: (
+                    "use the name of a type of the schema"
+                    if example is None
+                    else (
+                        "use the name of a type of the schema, such as "
+                        f"{use_in.format(example)}"
+                    )
+                ),
+            )
+        )
 
     @classmethod
     def not_a_possible_type(cls, name: str, parent_name: str) -> SchemaError:
@@ -1071,7 +1309,15 @@ class SchemaError(GraphQLClientError):
             assert "not a possible type of 'User'" in str(error)
             ```
         """
-        return cls(f"{name!r} is not a possible type of {parent_name!r}.")
+        return cls(
+            caller_message(
+                f"{name!r} is not a possible type of {parent_name!r}.",
+                fix=(
+                    f"use a type that {parent_name!r} can return, or select its "
+                    "fields without a fragment"
+                ),
+            )
+        )
 
 
 class ScalarNotRegisteredError(GraphQLClientError):

@@ -161,7 +161,7 @@ def test_an_unknown_field_names_the_close_match() -> None:
         run(["nmae"])
     message = str(caught.value)
     assert "no field 'nmae' on User" in message
-    assert "Did you mean 'name'?" in message
+    assert "Did you mean: name?" in message
 
 
 def test_an_ambiguous_snake_name_is_an_error_and_not_a_guess() -> None:
@@ -260,7 +260,7 @@ def test_an_unknown_argument_names_the_signature_and_the_close_match() -> None:
     message = str(caught.value)
     assert "has no argument 'frist'" in message
     assert "Signature: posts(first: Int!): [Post!]!" in message
-    assert "Did you mean 'first'?" in message
+    assert "Did you mean: first?" in message
 
 
 def test_a_raw_string_keeps_the_arguments_the_user_typed() -> None:
@@ -293,7 +293,7 @@ def test_two_fields_sharing_a_key_with_different_arguments_conflict() -> None:
         )
     message = str(caught.value)
     assert "share the response key 'posts'" in message
-    assert "Give one of them an alias." in message
+    assert "Fix: give one of them an alias" in message
 
 
 def test_two_different_fields_sharing_an_alias_conflict() -> None:
@@ -381,7 +381,7 @@ def test_a_fragment_on_an_unknown_type_suggests_a_name() -> None:
         run(Selection.of("Usre", "id"), "Node")
     message = str(caught.value)
     assert "no type named 'Usre'" in message
-    assert "Did you mean 'User'?" in message
+    assert "Did you mean: User?" in message
 
 
 def test_a_fragment_on_a_type_that_cannot_appear_here_raises() -> None:

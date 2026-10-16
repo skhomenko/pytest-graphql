@@ -56,6 +56,7 @@ from graphql import (
     GraphQLNonNull,
     GraphQLObjectType,
     GraphQLSchema,
+    GraphQLSyntaxError,
     GraphQLUnionType,
     InlineFragmentNode,
     ListValueNode,
@@ -83,6 +84,8 @@ from pytest_graphql._core.errors import (
     SchemaError,
     SelectionError,
     SelectionTooLargeError,
+    caller_message,
+    position_of,
 )
 from pytest_graphql._core.graphql_compat import ast_tuple, default_of, print_value
 from pytest_graphql._core.naming import NameMap, field_signature
@@ -216,8 +219,10 @@ def normalize(
     level = collector.level(fields, parent_type, path=())
     if level.is_empty():
         raise SelectionError(
-            f"the selection for {parent_type.name} is empty.\n"
-            "  List at least one field, or pass fields=AUTO."
+            caller_message(
+                f"the selection for {parent_type.name} is empty.",
+                fix="list at least one field, or pass fields=AUTO",
+            )
         )
     emitter = _Emitter(
         schema=schema, policy=policy, builder=builder, root_name=parent_type.name
@@ -259,9 +264,10 @@ class _Collector:
     ) -> None:
         if isinstance(input_, _Auto):
             raise SelectionError(
-                "AUTO is a whole selection, not one item in a list.\n"
-                "  Write fields=AUTO, or Field(name, fields=AUTO) for one "
-                "field."
+                caller_message(
+                    "AUTO is a whole selection, not one item in a list.",
+                    fix="write fields=AUTO, or Field(name, fields=AUTO) for one field",
+                )
             )
         if isinstance(input_, str):
             self._merge_raw(level, input_, parent_type, path=path)
@@ -288,9 +294,13 @@ class _Collector:
                 self._merge_into(level, item, parent_type, path=path)
             return
         raise SelectionError(
-            f"{type(input_).__name__} is not a selection.\n"
-            "  Use AUTO, a list of field names, Field objects, a Selection, "
-            "or a GraphQL selection string."
+            caller_message(
+                f"{type(input_).__name__} is not a selection.",
+                fix=(
+                    "use AUTO, a list of field names, Field objects, a "
+                    "Selection, or a GraphQL selection string"
+                ),
+            )
         )
 
     def _merge_selection(
@@ -362,9 +372,11 @@ class _Collector:
         if field_.fields is not None:
             if not is_composite_type(child_type):
                 raise SelectionError(
-                    f"{parent_type.name}.{name} returns {child_type.name}, "
-                    "which has no fields to select.\n"
-                    f"  Write {name!r} on its own."
+                    caller_message(
+                        f"{parent_type.name}.{name} returns {child_type.name}, "
+                        "which has no fields to select.",
+                        fix=f'write "{name}" on its own, as in fields=["{name}"]',
+                    )
                 )
             composite = _as_composite(child_type)
             if isinstance(field_.fields, _Auto):
@@ -405,10 +417,18 @@ class _Collector:
         """Form 4: a GraphQL selection string, parsed and then resolved."""
         try:
             document = parse("{" + text + "}")
-        except Exception as error:  # graphql-core raises GraphQLSyntaxError
+        except GraphQLSyntaxError as error:
+            # The text holds the values of the caller, so the message states the
+            # place and quotes neither the text nor graphql-core's excerpt. The
+            # error is not chained either, because a traceback prints its cause.
+            where = position_of(error.locations, column_offset=1)
             raise SelectionError(
-                f"could not parse the selection {text!r}.\n  {error}"
-            ) from error
+                caller_message(
+                    f"could not parse the fields= text of {parent_type.name}"
+                    + (f" at {where}." if where else "."),
+                    fix='write field names as GraphQL text, as in fields="id name"',
+                )
+            ) from None
         definition = document.definitions[0]
         assert hasattr(definition, "selection_set")
         self._merge_ast(level, definition.selection_set, parent_type, path=path)
@@ -424,15 +444,20 @@ class _Collector:
         for selection in selection_set.selections:
             if selection.directives:
                 raise SelectionError(
-                    "directives are not supported in v0.1.\n"
-                    "  Send a document with directives through gql.execute(...) "
-                    "instead."
+                    caller_message(
+                        "directives are not supported in v0.1.",
+                        fix=(
+                            "send a document with directives through gql.execute(...)"
+                        ),
+                    )
                 )
             if isinstance(selection, FragmentSpreadNode):
                 raise SelectionError(
-                    f"named fragment {selection.name.value!r} cannot be used "
-                    "here, because v0.1 sends no fragment definitions.\n"
-                    "  Inline it, or use Selection.of(TypeName)."
+                    caller_message(
+                        f"named fragment {selection.name.value!r} cannot be used "
+                        "here, because v0.1 sends no fragment definitions.",
+                        fix="inline it, or use Selection.of(TypeName)",
+                    )
                 )
             if isinstance(selection, InlineFragmentNode):
                 self._merge_ast_fragment(level, selection, parent_type, path=path)
@@ -501,9 +526,11 @@ class _Collector:
             child_type = get_named_type(definition.type)
             if not is_composite_type(child_type):
                 raise SelectionError(
-                    f"{parent_type.name}.{name} returns {child_type.name}, "
-                    "which has no fields to select.\n"
-                    f"  Write {name!r} on its own."
+                    caller_message(
+                        f"{parent_type.name}.{name} returns {child_type.name}, "
+                        "which has no fields to select.",
+                        fix=f'write "{name}" on its own, as in fields=["{name}"]',
+                    )
                 )
             entry.children = _Level()
             self._merge_ast(
@@ -519,10 +546,17 @@ class _Collector:
     ) -> tuple[str, GraphQLField]:
         if isinstance(parent_type, GraphQLUnionType):
             raise SelectionError(
-                f"{parent_type.name} is a union, so it has no field "
-                f"{written!r}.\n"
-                "  Select __typename, or use Selection.of(TypeName) for one "
-                "of its members."
+                caller_message(
+                    f"{parent_type.name} is a union, so it has no field {written!r}.",
+                    known=[member.name for member in parent_type.types],
+                    fix=lambda example: (
+                        "select __typename, or use Selection.of(TypeName) for "
+                        "one of its members"
+                        if example is None
+                        else "select __typename, or use "
+                        f'Selection.of("{example}") for one of its members'
+                    ),
+                )
             )
         available = list(parent_type.fields)
         resolved = NameMap.build(available).get(written)
@@ -666,11 +700,15 @@ class _Emitter:
             # considered. A caller-supplied page size chooses the value; it
             # cannot make an argument of the wrong shape into a row bound.
             raise SelectionError(
-                f"{entry.name!r} returns the connection {child_type.name}, and "
-                f"it has no {PAGE_SIZE_ARGUMENT!r} argument of type Int or "
-                "Int!, so the number of rows it returns cannot be bounded.\n"
-                "  List the fields you need instead of asking for AUTO, or set "
-                "relay_aware=False on the policy."
+                caller_message(
+                    f"{entry.name!r} returns the connection {child_type.name}, "
+                    f"and it has no {PAGE_SIZE_ARGUMENT!r} argument of type Int "
+                    "or Int!, so the number of rows it returns cannot be bounded.",
+                    fix=(
+                        "list the fields you need instead of asking for AUTO, "
+                        "or set relay_aware=False on the policy"
+                    ),
+                )
             )
         if any(argument.name.value == PAGE_SIZE_ARGUMENT for argument in arguments):
             return arguments
@@ -696,10 +734,14 @@ class _Emitter:
             )
         if entry.children is None or entry.children.is_empty():
             raise SelectionError(
-                f"{entry.name!r} returns {child_type.name}, so it needs a "
-                "sub-selection.\n"
-                f'  Write {{"{entry.name}": ["id"]}}, or '
-                f"Field({entry.name!r}, fields=AUTO)."
+                caller_message(
+                    f"{entry.name!r} returns {child_type.name}, so it needs a "
+                    "sub-selection.",
+                    fix=(
+                        f'write {{"{entry.name}": ["id"]}}, or '
+                        f"Field({entry.name!r}, fields=AUTO)"
+                    ),
+                )
             )
         return SelectionSetNode(
             selections=tuple(self.level(entry.children, child_type, path=path))
@@ -824,24 +866,34 @@ def _merge_entry(level: _Level, entry: _Entry, parent_type_name: str) -> None:
         # that carries one cannot appear twice. This is checked before the
         # difference checks below, whose advice is to add an alias.
         raise SelectionError(
-            f"the response key {entry.key!r} is written twice in this "
-            f"selection of {parent_type_name}, and at least one of the two is "
-            "an alias.\n"
-            f"  One is {_describe(existing)}, the other is {_describe(entry)}.\n"
-            "  An alias names one result, so it can be used only once. Remove "
-            "one of them, or give them different aliases."
+            caller_message(
+                f"the response key {entry.key!r} is written twice in this "
+                f"selection of {parent_type_name}, and at least one of the two "
+                "is an alias.",
+                context=[
+                    f"One is {_describe(existing)}, the other is {_describe(entry)}.",
+                    "An alias names one result, so it can be used only once.",
+                ],
+                fix="remove one of them, or give them different aliases",
+            )
         )
     if existing.name != entry.name or existing.signature != entry.signature:
         raise SelectionError(
-            f"two selections of {parent_type_name} share the response key "
-            f"{entry.key!r} but differ.\n"
-            f"  One is {_describe(existing)}, the other is {_describe(entry)}.\n"
-            "  Give one of them an alias."
+            caller_message(
+                f"two selections of {parent_type_name} share the response key "
+                f"{entry.key!r} but differ.",
+                context=[
+                    f"One is {_describe(existing)}, the other is {_describe(entry)}."
+                ],
+                fix='give one of them an alias, as in Field(name, alias="other")',
+            )
         )
     if existing.auto != entry.auto:
         raise SelectionError(
-            f"{entry.key!r} is selected both automatically and explicitly.\n"
-            "  Keep one of them."
+            caller_message(
+                f"{entry.key!r} is selected both automatically and explicitly.",
+                fix="keep one of them, either fields=AUTO or the listed fields",
+            )
         )
     if existing.children is not None and entry.children is not None:
         _merge_levels(existing.children, entry.children)
@@ -870,9 +922,11 @@ def _merge_fragment_into(level: _Level, fragment: _Fragment) -> None:
         return
     if existing.auto != fragment.auto:
         raise SelectionError(
-            f"the fragment on {fragment.type_name} is written twice, once "
-            "automatically and once explicitly.\n"
-            "  Keep one of them."
+            caller_message(
+                f"the fragment on {fragment.type_name} is written twice, once "
+                "automatically and once explicitly.",
+                fix="keep one of them, either fields=AUTO or the listed fields",
+            )
         )
     if existing.children is not None and fragment.children is not None:
         _merge_levels(existing.children, fragment.children)
@@ -884,18 +938,28 @@ def _remove_path(level: _Level, removal: str, parent_type_name: str) -> None:
     entry = level.fields.get(head)
     if entry is None:
         raise SelectionError(
-            f"cannot remove {removal!r}: {head!r} is not in this selection of "
-            f"{parent_type_name}.\n"
-            f"  It holds: {', '.join(level.fields) or 'nothing'}"
+            caller_message(
+                f"cannot remove {removal!r}: {head!r} is not in this selection "
+                f"of {parent_type_name}.",
+                context=[f"It holds: {', '.join(level.fields) or 'nothing'}"],
+                wrong=head,
+                known=list(level.fields),
+                fix="remove a response key that is in the selection",
+            )
         )
     if not tail:
         del level.fields[head]
         return
     if entry.children is None:
         raise SelectionError(
-            f"cannot remove {removal!r}: {head!r} has no listed sub-selection "
-            "to remove from.\n"
-            "  Remove the whole field, or list its sub-fields first."
+            caller_message(
+                f"cannot remove {removal!r}: {head!r} has no listed "
+                "sub-selection to remove from.",
+                fix=(
+                    f"remove the whole field by writing {head!r} alone, or "
+                    "list its sub-fields first"
+                ),
+            )
         )
     _remove_path(entry.children, tail, entry.name)
 

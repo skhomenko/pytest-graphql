@@ -1352,7 +1352,7 @@ def test_an_unknown_factory_option_names_the_options_that_exist(
         )
 
     assert "max_dpeth" in str(raised.value)
-    assert "Did you mean 'max_depth'?" in str(raised.value)
+    assert "Did you mean: max_depth?" in str(raised.value)
 
 
 def test_the_factory_still_records_the_url_over_a_supplied_option(

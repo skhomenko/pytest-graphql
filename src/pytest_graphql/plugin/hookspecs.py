@@ -33,6 +33,7 @@ from pluggy import HookCaller, HookspecMarker
 
 from pytest_graphql._core.client import ClientConfig
 from pytest_graphql._core.diagnostics import RequestInfo
+from pytest_graphql._core.errors import caller_message
 from pytest_graphql._core.factory import ScalarRegistry, ScalarSpec
 from pytest_graphql._core.response import GraphQLResponse
 from pytest_graphql._core.schema.source import SchemaSource
@@ -117,10 +118,18 @@ def fold(caller: HookCaller, name: str, value: T) -> T:
         # ``wrapper`` exists from pluggy 1.2. Older pluggy has ``hookwrapper`` only.
         if getattr(implementation, "wrapper", False) or implementation.hookwrapper:
             raise pytest.UsageError(
-                f"pytest-graphql: {caller.name} does not support hook wrappers, "
-                f"because each implementation must receive the result of the "
-                f"one before it. Remove the wrapper from "
-                f"{implementation.plugin_name}."
+                caller_message(
+                    f"pytest-graphql: {caller.name} does not support hook "
+                    f"wrappers, and {implementation.plugin_name} wraps it.",
+                    context=[
+                        "Each implementation must receive the result of the "
+                        "one before it."
+                    ],
+                    fix=(
+                        f"turn the wrapper of {implementation.plugin_name} "
+                        f"into a plain {caller.name} implementation"
+                    ),
+                )
             )
         arguments = {name: value} if name in implementation.argnames else {}
         replacement = implementation.function(**arguments)

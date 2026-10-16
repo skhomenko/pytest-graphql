@@ -87,7 +87,8 @@ schema and checked against it before they are sent.
 ## What the agent sees when it is wrong
 
 An argument name that the schema does not have fails in the client, before any
-request. The agent gets the signature of the operation and the closest name:
+request. The agent gets the signature of the operation, the closest name and a
+line of code that fixes the call:
 
 ```python {.exec}
 import pytest
@@ -100,7 +101,8 @@ with pytest.raises(ArgumentError) as raised:
 assert str(raised.value) == (
     "query 'user' has no argument 'idd'.\n"
     "  Signature: user(id: ID!): User\n"
-    "  Did you mean 'id'?"
+    "  Did you mean: id?\n"
+    '  Fix: use an argument from the signature, such as gql.query("user", id=...)'
 )
 ```
 
@@ -109,7 +111,8 @@ The message is:
 ```text
 query 'user' has no argument 'idd'.
   Signature: user(id: ID!): User
-  Did you mean 'id'?
+  Did you mean: id?
+  Fix: use an argument from the signature, such as gql.query("user", id=...)
 ```
 
 A wrong operation name or a wrong field name in `fields=` fails the same way, with

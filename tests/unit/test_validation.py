@@ -96,7 +96,7 @@ class TestCheckNoReservedCollision:
             )
         message = str(excinfo.value)
         assert "'timeout'" in message
-        assert "collides with a reserved per-call option name" in message
+        assert "collides with a call option" in message
 
     def test_passes_when_supplied_through_the_variables_escape_hatch(self) -> None:
         check_no_reserved_collision(

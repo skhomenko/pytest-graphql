@@ -130,7 +130,7 @@ def test_unknown_argument_raises_with_signature_and_candidates() -> None:
     message = str(excinfo.value)
     assert "query 'user' has no argument 'id2'" in message
     assert "Signature: user(id: ID!): User" in message
-    assert "Did you mean 'id'?" in message
+    assert "Did you mean: id?" in message
 
 
 def test_missing_required_argument_raises() -> None:
@@ -472,8 +472,8 @@ def test_reserved_name_collision_raises_when_not_supplied_explicitly() -> None:
             builder=SelectionBuilder(_COLLISION_SCHEMA),
         )
     message = str(excinfo.value)
-    assert "collides with a reserved per-call option name" in message
-    assert "variables={'timeout': ...}" in message
+    assert "collides with a call option" in message
+    assert 'variables={"timeout": ...}' in message
 
 
 def test_reserved_name_collision_is_avoided_through_variables_dict() -> None:

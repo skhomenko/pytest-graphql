@@ -140,14 +140,18 @@ the setting and the source. It never shows the value, because a header or a URL
 can hold a secret.
 
 ```text
-ERROR: pytest-graphql: invalid value for gql_max_depth, set by the ini option gql_max_depth. Expected a whole number of at least 1. The value is not shown.
+ERROR: pytest-graphql: invalid value for gql_max_depth, set by the ini option gql_max_depth.
+  Expected a whole number of at least 1.
+  The value is not shown.
+  Fix: change the ini option gql_max_depth to a whole number of at least 1
 ```
 
 With no URL in any source, a test that uses `gql` fails at setup. The message
 names the four places to set one:
 
 ```text
-pytest-graphql: no GraphQL endpoint. Pass --gql-url=URL, set the PYTEST_GQL_URL environment variable or the gql_url ini option, or override the gql_url fixture.
+pytest-graphql: no GraphQL endpoint is set.
+  Fix: pass --gql-url=URL, set the PYTEST_GQL_URL environment variable or the gql_url ini option, or override the gql_url fixture
 ```
 
 ## TLS and relative paths

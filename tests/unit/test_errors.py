@@ -51,9 +51,10 @@ def test_operation_not_found_matches_the_spec_shape() -> None:
     )
     assert str(error) == (
         "no query named 'useres'.\n"
+        "  This schema has 84 queries.\n"
         "  Did you mean: users, user, userSettings?\n"
-        "  This schema has 84 queries. "
-        "Run with --gql-show-schema-stats to list them."
+        "  Fix: pass the name of a query of the schema, or run with "
+        "--gql-show-schema-stats to list them"
     )
 
 
@@ -71,7 +72,9 @@ def test_argument_error_matches_the_spec_example() -> None:
         "mutation 'createUser' has no argument 'emial'.\n"
         "  Signature: createUser(input: CreateUserInput!): User!\n"
         "  CreateUserInput fields: email, name, role, settings\n"
-        "  Did you mean 'email'?"
+        "  Did you mean: email?\n"
+        "  Fix: use an argument from the signature, such as "
+        'gql.mutation("createUser", email=...)'
     )
 
 
@@ -118,7 +121,9 @@ def test_argument_error_omits_input_fields_line_when_not_wrapped() -> None:
     assert str(error) == (
         "query 'user' has no argument 'ide'.\n"
         "  Signature: user(id: ID!): User\n"
-        "  Did you mean 'id'?"
+        "  Did you mean: id?\n"
+        "  Fix: use an argument from the signature, such as "
+        'gql.query("user", id=...)'
     )
 
 
@@ -127,23 +132,29 @@ def test_selection_error_unknown_field_reports_valid_names() -> None:
     text = str(error)
     assert "no field 'naem' on User." in text
     assert "Available fields: id, name" in text
-    assert "Did you mean 'name'?" in text
+    assert "Did you mean: name?" in text
+    assert text.endswith('Fix: use a field of User, such as fields=["name"]')
 
 
 def test_selection_error_from_validation_is_verbatim() -> None:
     error = SelectionError.from_validation("Cannot query field 'x' on type 'Y'.")
-    assert str(error) == "Cannot query field 'x' on type 'Y'."
+    assert str(error).splitlines()[0] == "Cannot query field 'x' on type 'Y'."
+    assert str(error).splitlines()[-1].startswith("  Fix: ")
 
 
 def test_schema_error_unknown_type_suggests_a_close_match() -> None:
     error = SchemaError.unknown_type("Usre", ["User", "Team", "Post"])
     assert "no type named 'Usre'." in str(error)
-    assert "Did you mean 'User'?" in str(error)
+    assert "Did you mean: User?" in str(error)
 
 
 def test_schema_error_not_a_possible_type() -> None:
     error = SchemaError.not_a_possible_type("Team", "SearchResult")
-    assert str(error) == "'Team' is not a possible type of 'SearchResult'."
+    assert str(error) == (
+        "'Team' is not a possible type of 'SearchResult'.\n"
+        "  Fix: use a type that 'SearchResult' can return, or select its "
+        "fields without a fragment"
+    )
 
 
 def test_scalar_not_registered_message_is_exact_without_a_location() -> None:

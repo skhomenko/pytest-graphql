@@ -10,6 +10,36 @@ cycle is promised.
 
 ## [Unreleased]
 
+### Changed
+
+- Every error that a caller can fix now has the same shape. The first line states
+  the problem and where it is. A `  Did you mean: <name>?` line follows when a name
+  is close, and a `  Fix: <one line>` line names the code to write instead. This
+  covers `OperationNotFoundError`, `ArgumentError`, `SelectionError`, `SchemaError`
+  and the usage errors of the pytest plugin. One function builds these lines, so no
+  raise site formats its own suggestion. A message never shows a value. The
+  `Did you mean` line of `ArgumentError`, `SelectionError` and `SchemaError` used
+  the form `Did you mean 'name'?` before. A test that matches that text must match
+  `Did you mean: name` now. Migration: update such a match.
+- A name that exists in the schema only as a subscription, passed to `query()` or
+  `mutation()`, raises `ArgumentError` with a fix line. It raised
+  `OperationNotFoundError` before. `wait_until()` also gives a fix line for a
+  subscription name. Migration: catch `ArgumentError` for this case.
+- When keywords of an operation with a single input object match none of its
+  fields, the `Did you mean` line suggests a field of the input object. It suggested
+  an argument of the operation before. Migration: none.
+- A `fields=` text that does not parse, and an `execute()` document with a literal
+  value that the schema refuses, now give a message that states the place (for
+  example `line 1, column 16`). They no longer quote the text or the literal, which
+  held the values of the call. A schema file with a syntax error does the same.
+  These errors no longer chain the error of graphql-core as their cause, because
+  a traceback prints that cause with the text.
+  The `Did you mean` line no longer offers a field of an input object when the call
+  passes an argument of the operation, such as `input=`, because that argument
+  turns the wrapping of input fields off. A `variables=` that is not a mapping, on
+  an operation with no arguments, now says to remove `variables=`. Migration: a
+  test that matches the old quoted text must match the new first line.
+
 ## [0.1.1] - 2026-10-09
 
 Documentation and metadata release. The library code is the same as `0.1.0`. It

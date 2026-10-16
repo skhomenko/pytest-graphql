@@ -29,7 +29,7 @@ from graphql import (
     GraphQLUnionType,
 )
 
-from pytest_graphql._core.errors import SchemaError, SelectionError
+from pytest_graphql._core.errors import SchemaError, SelectionError, caller_message
 from pytest_graphql._core.factory.generate import Context, fake_input
 from pytest_graphql._core.factory.scalars import ScalarRegistry
 from pytest_graphql._core.factory.seed import derive_seed
@@ -94,16 +94,26 @@ class TypeFactory:
             if exact is None:
                 if self._names.is_ambiguous(written):
                     raise SelectionError.ambiguous_field(
-                        self._type.name, written, self._names.ambiguous_names(written)
+                        self._type.name,
+                        written,
+                        self._names.ambiguous_names(written),
+                        use_in="gql.fake." + self._type.name + "({}=...)",
                     )
                 raise SelectionError.unknown_field(
-                    self._type.name, written, list(self._type.fields)
+                    self._type.name,
+                    written,
+                    list(self._type.fields),
+                    use_in="gql.fake." + self._type.name + "({}=...)",
                 )
             if exact in resolved:
                 raise SelectionError(
-                    f"{exact!r} was given twice on {self._type.name}, as both "
-                    f"{written_as[exact]!r} and {written!r}.\n"
-                    "  Use one spelling."
+                    caller_message(
+                        f"{exact!r} was given twice on {self._type.name}, as "
+                        f"both {written_as[exact]!r} and {written!r}.",
+                        fix=(
+                            f"write it once, as gql.fake.{self._type.name}({exact}=...)"
+                        ),
+                    )
                 )
             resolved[exact] = value
             written_as[exact] = written
@@ -135,11 +145,23 @@ class _State:
     def input_type(self, name: str) -> GraphQLInputObjectType:
         found = self.schema.type_map.get(name)
         if found is None:
-            raise SchemaError.unknown_type(name, self.names())
+            raise SchemaError.unknown_type(name, self.names(), use_in="gql.fake.{}")
         if not isinstance(found, GraphQLInputObjectType):
             raise SchemaError(
-                f"{name!r} is {_describe_kind(found)}, not an input object.\n"
-                "  fake builds input objects only."
+                caller_message(
+                    f"{name!r} is {_describe_kind(found)}, not an input object.",
+                    context=["fake builds input objects only."],
+                    wrong=name,
+                    known=self.names(),
+                    fix=lambda example: (
+                        "use the name of an input object"
+                        if example is None
+                        else (
+                            "use the name of an input object, such as "
+                            f"gql.fake.{example}"
+                        )
+                    ),
+                )
             )
         return found
 

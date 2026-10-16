@@ -366,7 +366,7 @@ def test_an_unknown_override_raises_with_the_available_fields() -> None:
     message = str(caught.value)
     assert "no field 'nmae' on CreateUserInput" in message
     assert "Available fields:" in message
-    assert "Did you mean 'name'?" in message
+    assert "Did you mean: name?" in message
 
 
 def test_the_exact_and_snake_spelling_of_one_field_together_are_refused() -> None:
@@ -471,7 +471,7 @@ def test_the_rest_of_the_payload_does_not_change_when_unique_is_used() -> None:
 
 
 def test_an_unknown_type_raises_with_a_suggestion() -> None:
-    with pytest.raises(SchemaError, match="Did you mean 'CreateUserInput'"):
+    with pytest.raises(SchemaError, match="Did you mean: CreateUserInput"):
         namespace().CreateUserInpt  # noqa: B018
 
 
