@@ -10,6 +10,17 @@ cycle is promised.
 
 ## [Unreleased]
 
+### Added
+
+- `--gql-report=PATH` writes the `GraphQL calls` section of each failed phase to
+  `PATH` as JSON Lines, one record per line, for a tool or an agent that reads
+  results without parsing terminal text. The file is created empty when the
+  session starts. Each record has the format name `pytest-graphql/report/1`, and
+  each value is the text the section shows, after the same redaction and checks.
+  Under pytest-xdist only the controller writes. A fault in writing the file
+  does not change the run, and the summary says the file is incomplete. The
+  format is documented on the Diagnostics page. Migration: none, the flag is new.
+
 ## [0.2.0] - 2026-10-16
 
 Caller-mistake messages. Every error a caller can fix now states the problem,
