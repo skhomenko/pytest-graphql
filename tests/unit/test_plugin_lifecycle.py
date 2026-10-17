@@ -330,7 +330,7 @@ def test_query(gql):
     )
     result = pytester.runpytest()
     result.assert_outcomes(errors=1)
-    result.stdout.fnmatch_lines(["*no GraphQL endpoint*--gql-url=URL*"])
+    result.stdout.fnmatch_lines(["*no GraphQL endpoint*", "*--gql-url=URL*"])
 
 
 def test_an_overridden_plain_transport_is_shared_and_never_closed(

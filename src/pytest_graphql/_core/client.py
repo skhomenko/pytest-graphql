@@ -57,6 +57,7 @@ from pytest_graphql._core.errors import (
     GraphQLExecutionError,
     GraphQLPartialDataError,
     SelectionError,
+    caller_message,
 )
 from pytest_graphql._core.excerpt import render_data_excerpt
 from pytest_graphql._core.expect_error import (
@@ -1924,15 +1925,35 @@ def _operation_definition(
         for node in definitions:
             if node.name is not None and node.name.value == operation_name:
                 return node
+        declared = [n.name.value for n in definitions if n.name]
         raise SelectionError(
-            f"the document declares no operation named {operation_name!r}.\n"
-            f"  It declares: "
-            f"{', '.join(n.name.value for n in definitions if n.name) or 'none'}."
+            caller_message(
+                f"the document declares no operation named {operation_name!r}.",
+                context=[f"It declares: {', '.join(declared) or 'none'}."],
+                wrong=operation_name,
+                known=declared,
+                fix=lambda example: (
+                    "write an operation with that name in the document"
+                    if example is None
+                    else f'pass operation_name="{example}"'
+                ),
+            )
         )
     if len(definitions) != 1:
+        declared = [n.name.value for n in definitions if n.name]
         raise SelectionError(
-            f"the document declares {len(definitions)} operations, so one has "
-            "to be chosen.\n  Pass operation_name= to name it."
+            caller_message(
+                f"the document declares {len(definitions)} operations, so one "
+                "has to be chosen.",
+                known=declared,
+                fix=lambda example: (
+                    "write one operation in the document"
+                    if not definitions
+                    else "name the operations, then pass operation_name="
+                    if example is None
+                    else f'pass operation_name="{example}"'
+                ),
+            )
         )
     return definitions[0]
 
@@ -1951,7 +1972,11 @@ def _declared_variables(
         type_ = type_from_ast(schema, node.type)
         if type_ is None:
             raise SelectionError(
-                f"variable ${name} is declared with a type the schema does not define."
+                caller_message(
+                    f"variable ${name} is declared with a type the schema does "
+                    "not define.",
+                    fix=f"declare ${name} with a type of the schema",
+                )
             )
         declared.append((name, cast("GraphQLInputType", type_), values[name]))
     return declared

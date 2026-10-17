@@ -219,3 +219,6 @@ __marimo__/
 
 # Local agent coordination state (review handoff logs), repository root only
 /tmp/
+
+# macOS Finder metadata
+.DS_Store

@@ -65,7 +65,18 @@ Path = tuple[str | int, ...]
 
 
 class SerializationError(ValueError):
-    """A variable value cannot be put on the wire as JSON."""
+    """A variable value cannot be put on the wire as JSON.
+
+    ``problem`` names the place and the type, ``context`` adds lines about it,
+    and ``fix`` is the one line the caller can act on. None of them shows the
+    value.
+    """
+
+    def __init__(self, problem: str, *, fix: str, context: Sequence[str] = ()) -> None:
+        super().__init__(problem)
+        self.problem = problem
+        self.context = tuple(context)
+        self.fix = fix
 
 
 def render_path(path: Path) -> str:
@@ -137,10 +148,16 @@ def _custom(value: Any, scalar: str, scalars: ScalarRegistry | None, path: Path)
         serialized = spec.serialize(value)
     except Exception as error:
         raise SerializationError(
-            f"{render_path(path)} could not be serialized.\n"
-            f"  The serialize function of ScalarSpec {scalar!r} raised "
-            f"{type(error).__name__}.\n"
-            "  It receives the Python value you supplied for the variable."
+            f"{render_path(path)} could not be serialized.",
+            context=[
+                f"The serialize function of ScalarSpec {scalar!r} raised "
+                f"{type(error).__name__}.",
+                "It receives the Python value you supplied for the variable.",
+            ],
+            fix=(
+                f"pass a value that the serialize function of ScalarSpec "
+                f"{scalar!r} accepts"
+            ),
         ) from None
     return _json(serialized, scalar, True, path, 0)
 
@@ -149,8 +166,9 @@ def _json(value: Any, scalar: str, registered: bool, path: Path, depth: int) -> 
     """``value`` as plain JSON, or a ``SerializationError`` naming where it is not."""
     if depth > MAX_JSON_DEPTH:
         raise SerializationError(
-            f"{render_path(path)} is nested too deeply for the scalar {scalar!r}.\n"
-            f"  JSON values may nest up to {MAX_JSON_DEPTH} levels."
+            f"{render_path(path)} is nested too deeply for the scalar {scalar!r}.",
+            context=[f"JSON values may nest up to {MAX_JSON_DEPTH} levels."],
+            fix=f"pass a value that nests at most {MAX_JSON_DEPTH} levels",
         )
     if value is None or isinstance(value, (bool, int, str)):
         return value
@@ -185,17 +203,26 @@ def _refusal(
     where = render_path(path)
     if registered:
         return SerializationError(
-            f"{where} is not JSON after serialize.\n"
-            f"  The serialize function of ScalarSpec {scalar!r} returned {found}, "
-            "which is not JSON.\n"
-            "  It must return None, a bool, an int, a finite float, a str, a "
-            "list or a dict with str keys."
+            f"{where} is not JSON after serialize.",
+            context=[
+                f"The serialize function of ScalarSpec {scalar!r} returned "
+                f"{found}, which is not JSON."
+            ],
+            fix=(
+                f"make the serialize function of ScalarSpec {scalar!r} return "
+                "None, a bool, an int, a finite float, a str, a list or a dict "
+                "with str keys"
+            ),
         )
     return SerializationError(
-        f"{where} holds {found}, which is not JSON.\n"
-        f"  The scalar {scalar!r} has no registered ScalarSpec, so the value is "
-        "sent as it is.\n"
-        "  Register one whose serialize returns JSON:\n"
-        f'    registry.register(ScalarSpec(name="{scalar}", serialize=str, '
-        "fake=lambda rng: ...))"
+        f"{where} holds {found}, which is not JSON.",
+        context=[
+            f"The scalar {scalar!r} has no registered ScalarSpec, so the value "
+            "is sent as it is."
+        ],
+        fix=(
+            f"register a ScalarSpec for {scalar}, such as "
+            f'registry.register(ScalarSpec(name="{scalar}", serialize=str, '
+            "fake=lambda rng: ...))"
+        ),
     )

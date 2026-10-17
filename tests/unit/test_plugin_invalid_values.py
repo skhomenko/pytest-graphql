@@ -34,6 +34,7 @@ def test_an_invalid_ini_value_names_the_setting_and_the_ini_option(
     output = _assert_refused(result)
     assert "invalid value for gql_max_depth" in output
     assert "the ini option gql_max_depth" in output
+    assert "  Fix: change the ini option gql_max_depth to a whole number" in output
     assert "deep" not in output.replace("gql_max_depth", "")
 
 

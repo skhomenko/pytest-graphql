@@ -226,7 +226,7 @@ def test_with_no_url_anywhere_the_run_names_every_place_to_set_one(
     result = _run(pytester, monkeypatch, BY_NAME["url"], [])
     result.assert_outcomes(errors=1)
     result.stdout.fnmatch_lines(
-        ["*no GraphQL endpoint*--gql-url=URL*PYTEST_GQL_URL*gql_url ini option*"]
+        ["*no GraphQL endpoint*", "*--gql-url=URL*PYTEST_GQL_URL*gql_url ini option*"]
     )
 
 

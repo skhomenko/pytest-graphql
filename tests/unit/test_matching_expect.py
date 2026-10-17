@@ -32,7 +32,7 @@ def test_the_available_fields_are_the_schema_names() -> None:
 
 
 def test_an_unknown_type_raises_with_a_suggestion() -> None:
-    with pytest.raises(SchemaError, match="Did you mean 'User'"):
+    with pytest.raises(SchemaError, match="Did you mean: User"):
         expect.Usr  # noqa: B018
 
 

@@ -134,6 +134,18 @@ def resolve_operation(
     return resolved, type_.fields[resolved]
 
 
+def _variables_fix(operation_name: str, field_def: GraphQLField) -> str:
+    """The fix line for a ``variables=`` that is not a mapping.
+
+    It names an argument of the operation, so the code it shows is valid. An
+    operation with no argument has none to name, so the fix removes ``variables=``.
+    """
+    first = next(iter(field_def.args), None)
+    if first is None:
+        return f"remove variables=, because {operation_name!r} takes no arguments"
+    return f'pass variables={{"{first}": ...}}'
+
+
 def _unwrap_non_null(type_: GraphQLInputType) -> GraphQLInputType:
     return type_.of_type if isinstance(type_, GraphQLNonNull) else type_
 
@@ -242,7 +254,7 @@ def resolve_root_arguments(
                 kind=kind,
                 operation_name=operation_name,
                 signature=signature,
-                unknown_candidates=list(field_def.args),
+                unknown_candidates=list(input_type.fields),
                 input_type_name=input_type.name,
                 input_fields=list(input_type.fields),
             )
@@ -250,13 +262,18 @@ def resolve_root_arguments(
 
     input_type_name = wrap_target[1].name if wrap_target is not None else None
     input_fields = list(wrap_target[1].fields) if wrap_target is not None else None
+    # The message lists both name sets (DESIGN "Auto-wrap"), but it suggests an
+    # input field only where wrapping can still apply. A keyword that names an
+    # argument of the operation switches wrapping off (rule 2), and a suggested
+    # input field would then fail the same way.
+    suggested_fields = [] if direct_hit else (input_fields or [])
     return _resolve_candidates(
         candidates,
         arg_names,
         kind=kind,
         operation_name=operation_name,
         signature=signature,
-        unknown_candidates=list(field_def.args),
+        unknown_candidates=[*field_def.args, *suggested_fields],
         input_type_name=input_type_name,
         input_fields=input_fields,
     )
@@ -336,7 +353,12 @@ def assemble_operation(
     and every candidate GraphQL variable, together, because that is how they
     genuinely arrive. This function is where the two are told apart.
     """
-    resolved_field_name, field_def = resolve_operation(schema, kind, name)
+    try:
+        resolved_field_name, field_def = resolve_operation(schema, kind, name)
+    except OperationNotFoundError:
+        if NameMap.build(operation_names(schema, "subscription")).get(name):
+            raise ArgumentError.is_a_subscription(kind=kind, name=name) from None
+        raise
     raw_variables = kwargs.get("variables")
     if raw_variables is not None and not isinstance(raw_variables, Mapping):
         raise ArgumentError.invalid_value(
@@ -347,6 +369,7 @@ def assemble_operation(
                 "the variables= escape hatch must be a mapping, got "
                 f"{type(raw_variables).__name__}."
             ),
+            fix=_variables_fix(resolved_field_name, field_def),
         )
     explicit_variables: Mapping[str, Any] = raw_variables or {}
     check_no_reserved_collision(

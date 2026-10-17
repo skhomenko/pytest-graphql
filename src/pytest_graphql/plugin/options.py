@@ -44,6 +44,7 @@ import pytest
 
 from pytest_graphql._core.client import ClientConfig
 from pytest_graphql._core.diagnostics import DEFAULT_REDACT_HEADERS
+from pytest_graphql._core.errors import caller_message
 from pytest_graphql._core.selection.policy import SelectionPolicy
 from pytest_graphql._core.transport.httpx_transport import checked_seconds
 
@@ -501,8 +502,12 @@ class Source:
 
 def _refuse(option: Option, source: Source, expected: str) -> pytest.UsageError:
     return pytest.UsageError(
-        f"pytest-graphql: invalid value for {option.ini}, set by "
-        f"{source.describe()}. Expected {expected}. The value is not shown."
+        caller_message(
+            f"pytest-graphql: invalid value for {option.ini}, set by "
+            f"{source.describe()}.",
+            context=[f"Expected {expected}.", "The value is not shown."],
+            fix=f"change {source.describe()} to {expected}",
+        )
     )
 
 

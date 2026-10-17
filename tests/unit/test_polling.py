@@ -562,7 +562,8 @@ def test_a_mutation_name_is_refused_before_any_call(schema: GraphQLSchema) -> No
     assert str(caught.value) == (
         "wait_until polls queries only, and 'updateUser' is a mutation.\n"
         "  Polling would repeat its side effect on every attempt.\n"
-        "  Poll a query that reads the result, or call mutation('updateUser') once."
+        "  Fix: poll a query that reads the result, or call "
+        'gql.mutation("updateUser") once'
     )
 
 

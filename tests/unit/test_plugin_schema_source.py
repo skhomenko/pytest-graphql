@@ -247,7 +247,7 @@ def test_a_missing_attribute_is_a_clear_error(
         ("SOURCE = object()", "not a SchemaSource"),
         (
             "class SOURCE:\n    fingerprint = 'x'\n    def load(self): ...\n",
-            "It is a class. Point at an instance of it.",
+            "point gql_schema_source at an instance, not the class",
         ),
         (
             "class _S:\n    fingerprint = 'x'\nSOURCE = _S()\n",

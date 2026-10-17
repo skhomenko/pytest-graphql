@@ -213,13 +213,24 @@ def _text_blocks() -> list[str]:
     ]
 
 
+def _message_at(lines: list[str], first: int) -> str:
+    """The line at ``first`` and the indented lines that belong to it."""
+    block = [lines[first]]
+    for line in lines[first + 1 :]:
+        if not line.startswith("  "):
+            break
+        block.append(line)
+    return "\n".join(block)
+
+
 def test_the_shown_usage_error_is_what_pytest_prints(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     result = run_inner(pytester, monkeypatch, ini="gql_max_depth = 0\n")
     lines = [line for line in result.stderr.lines if "pytest-graphql" in line]
     assert len(lines) == 1, result.stderr.str()
-    assert lines[0] in _text_blocks()
+    shown = _message_at(result.stderr.lines, result.stderr.lines.index(lines[0]))
+    assert shown in _text_blocks()
 
 
 def test_the_shown_missing_endpoint_message_is_what_pytest_prints(
@@ -232,10 +243,12 @@ def test_the_shown_missing_endpoint_message_is_what_pytest_prints(
         test="def test_a(gql):\n    pass\n",
         url=False,
     )
-    message = next(
-        line for line in result.outlines if line.startswith("pytest-graphql: no")
+    first = next(
+        index
+        for index, line in enumerate(result.outlines)
+        if line.startswith("pytest-graphql: no")
     )
-    assert message in _text_blocks()
+    assert _message_at(result.outlines, first) in _text_blocks()
 
 
 # -- the words a boolean takes ------------------------------------------------

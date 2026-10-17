@@ -23,13 +23,15 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from graphql import (
+    GraphQLError,
     GraphQLSchema,
+    GraphQLSyntaxError,
     build_client_schema,
     build_schema,
     get_introspection_query,
 )
 
-from pytest_graphql._core.errors import SchemaError
+from pytest_graphql._core.errors import SchemaError, caller_message, position_of
 
 
 class SchemaSource(Protocol):
@@ -167,6 +169,22 @@ class IntrospectionSource:
         return f"introspection:{type(self._transport).__name__}"
 
 
+def _sdl_detail(error: Exception) -> str:
+    """What is wrong with the SDL, without the excerpt of the file.
+
+    ``str()`` of a graphql-core error prints the lines of the source around the
+    place, and its syntax message quotes the token it met. A default value in
+    the SDL is a value, so a syntax error states the place only, and any other
+    error of the SDL states its message and the place.
+    """
+    if not isinstance(error, GraphQLError):
+        return str(error)
+    where = position_of(error.locations)
+    if isinstance(error, GraphQLSyntaxError):
+        return f"syntax error at {where}" if where else "syntax error"
+    return f"{error.message} ({where})" if where else error.message
+
+
 class SDLFileSource:
     """Loads a schema from a local ``.graphql`` SDL file."""
 
@@ -178,14 +196,24 @@ class SDLFileSource:
             sdl = self._path.read_text(encoding="utf-8")
         except OSError as exc:
             raise SchemaError(
-                f"could not read schema file {self._path}: {exc}"
+                caller_message(
+                    f"could not read schema file {self._path}.",
+                    context=[str(exc)],
+                    fix="pass the path of a readable .graphql file to SDLFileSource",
+                )
             ) from exc
         try:
             return build_schema(sdl)
         except Exception as exc:
+            # A traceback prints the cause, and the cause of a graphql-core error
+            # quotes the source lines, so that error is not chained.
             raise SchemaError(
-                f"schema file {self._path} is not valid SDL: {exc}"
-            ) from exc
+                caller_message(
+                    f"schema file {self._path} is not valid SDL.",
+                    context=[_sdl_detail(exc)],
+                    fix="correct the file so that it holds a valid GraphQL schema",
+                )
+            ) from (None if isinstance(exc, GraphQLError) else exc)
 
     @property
     def fingerprint(self) -> str:

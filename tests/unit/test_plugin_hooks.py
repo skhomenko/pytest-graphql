@@ -764,6 +764,15 @@ def test_fold_names_the_plugin_that_holds_the_wrapper() -> None:
         hookspecs.fold(caller, "request", "r")  # type: ignore[arg-type]
 
 
+def test_fold_refusal_ends_with_a_fix_line() -> None:
+    caller = _Caller([_NewImpl("the-wrapping-plugin", [], wrapper=True)])
+    with pytest.raises(pytest.UsageError) as raised:
+        hookspecs.fold(caller, "request", "r")  # type: ignore[arg-type]
+    lines = str(raised.value).splitlines()
+    assert lines[0].startswith("pytest-graphql: ")
+    assert lines[-1].startswith("  Fix: turn the wrapper of the-wrapping-plugin")
+
+
 def test_fold_reads_no_pluggy_attribute_it_does_not_need() -> None:
     # An implementation that declares no argument is called without one.
     log: list[str] = []
