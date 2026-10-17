@@ -10,6 +10,11 @@ cycle is promised.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-16
+
+Caller-mistake messages. Every error a caller can fix now states the problem,
+suggests a name when one is close, and gives one line of code to write instead.
+
 ### Changed
 
 - Every error that a caller can fix now has the same shape. The first line states
@@ -399,7 +404,8 @@ dependency is declared as `>=3.2,<3.3` so that an install never selects it.
   build backend and its dependencies, used both as build constraints for the
   release build and as the environment for the sdist install-back.
 
-[Unreleased]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/skhomenko/pytest-graphql/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.0rc1...v0.1.0
 [0.1.0rc1]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.0b1...v0.1.0rc1
