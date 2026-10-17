@@ -39,6 +39,7 @@ FLAG_ONLY_FIELDS = {
     "gql_log": "log",
     "gql_log_level": "log_level",
     "gql_show_schema_stats": "show_schema_stats",
+    "gql_report": "report",
 }
 
 

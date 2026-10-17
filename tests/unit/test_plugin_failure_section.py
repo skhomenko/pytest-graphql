@@ -321,7 +321,7 @@ def test_a_fault_in_the_report_does_not_hide_the_failure(
     def explode(*args: object, **kwargs: object) -> str:  # noqa: ARG001
         raise RuntimeError("secret detail")
 
-    monkeypatch.setattr(reporting, "render_calls", explode)
+    monkeypatch.setattr(reporting, "_render_section", explode)
     result = run_scripted(pytester, monkeypatch, TWO_CALLS)
     result.assert_outcomes(failed=1)
     sections = sections_of("test_fails")

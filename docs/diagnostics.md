@@ -1,7 +1,8 @@
 # Diagnostics
 
 After this page you can read the report of a failed test, log every call of a
-passing run, keep secrets out of reports, and repeat a failed call with `curl`.
+passing run, write the failures to a JSON file, keep secrets out of reports,
+and repeat a failed call with `curl`.
 
 The examples on this page use this configuration. Every report below comes from a
 real run of the files that are shown above it.
@@ -144,6 +145,116 @@ section describes. The plugin sets the
 level of its logger for the session and restores it after. What pytest shows is
 decided by the logging options of pytest, so you can send it to a file with
 `--log-file` and `--log-file-level=INFO`.
+
+## Write a JSON report
+
+A tool or an agent that reads test results should not parse terminal text. Run
+pytest with `--gql-report=gql-report.jsonl`, and the plugin writes the failure
+sections to that file as JSON Lines: one JSON object on each line.
+
+- The file is created empty when the session starts. A run with no failure leaves
+  an empty file. A relative path is resolved against the directory where pytest
+  was started.
+- There is one record for each failed phase (setup, call or teardown) that has a
+  `GraphQL calls` section. The plugin writes and flushes each record when pytest
+  makes the report of that phase.
+- Under pytest-xdist, only the controller writes the file. Each worker attaches its
+  records to its test reports, and xdist sends them to the controller.
+- If the file cannot be opened, pytest stops with a usage error before any test
+  runs. If a later write fails, for example because the disk is full, the run goes
+  on with the same results, the plugin stops writing, and the `GraphQL` summary at
+  the end says that the file is incomplete. Neither message shows the path.
+
+For the failing test above, the record is:
+
+```json
+{
+  "format": "pytest-graphql/report/1",
+  "nodeid": "test_rename.py::test_rename_a_user_that_does_not_exist",
+  "phase": "call",
+  "seed": 0,
+  "run_id": "26b44a2033674338a9c90ab2ab71ba67",
+  "worker": "main",
+  "calls": [
+    {
+      "number": 1,
+      "kind": "query",
+      "operation": "user",
+      "status": 200,
+      "duration_ms": 1,
+      "failed_here": false,
+      "document": "query user($id: ID!) { user(id: $id) { id name } }",
+      "variables": "{\"id\": \"u1\"}",
+      "skipped": null,
+      "skipped_more": null,
+      "data": "{\"user\": {\"id\": \"u1\", \"name\": \"Ada Lovelace\"}}",
+      "errors": null,
+      "errors_not_shown": null,
+      "failure": null,
+      "reproduce": null
+    },
+    {
+      "number": 2,
+      "kind": "mutation",
+      "operation": "updateUser",
+      "status": 200,
+      "duration_ms": 1,
+      "failed_here": true,
+      "document": "mutation updateUser($id: ID!, $name: String) { updateUser(id: $id, name: $name) { id name } }",
+      "variables": "{\"id\": \"secret-PLACEHOLDER\", \"name\": \"Grace\"}",
+      "skipped": null,
+      "skipped_more": null,
+      "data": null,
+      "errors": [
+        "(no code) at [\"updateUser\"]: 'secret-PLACEHOLDER'"
+      ],
+      "errors_not_shown": null,
+      "failure": null,
+      "reproduce": "curl -sS -X POST http://localhost:8000/graphql -H 'X-Session: session-PLACEHOLDER' -H 'Authorization: '\"${PYTEST_GQL_HEADER_AUTHORIZATION}\" --data '{\"operationName\": \"updateUser\", \"query\": \"mutation updateUser($id: ID!, $name: String) {\\n  updateUser(id: $id, name: $name) {\\n    id\\n    name\\n  }\\n}\", \"variables\": {\"id\": \"secret-PLACEHOLDER\", \"name\": \"Grace\"}}'"
+    }
+  ]
+}
+```
+
+The file has each record on one line. It is shown here on several lines so that
+it is easy to read.
+
+The fields of a record:
+
+- **`format`** is always `pytest-graphql/report/1`. A new version of the format
+  gets a new name.
+- **`nodeid`** and **`phase`** name the test and the phase that failed.
+- **`seed`** is the seed of the test's client. **`run_id`** is the id that
+  `unique()` values carry. **`worker`** is the xdist worker id, or `main` outside
+  xdist.
+- **`calls`** is a list with one object for each call in the section, in the same
+  order.
+
+The fields of a call hold what the section shows:
+
+- **`number`**, **`kind`**, **`operation`**, **`status`** and **`duration_ms`**
+  come from the heading. `operation` is `null` for an unnamed operation, and
+  `status` is `null` when no answer came.
+- **`failed_here`** is `true` for the call that the section marks `FAILED HERE`.
+- **`document`**, **`variables`**, **`data`**, **`failure`** and **`reproduce`**
+  hold the text of their line. `variables` and `data` are JSON text, as the section
+  shows them, so a cut excerpt still reads as it does in the section, with
+  `(truncated, N fields)` at its end. Only the last call has `reproduce`.
+- **`skipped`** maps each reason to the list of `Type.field` names. **`skipped_more`**
+  counts the fields that are not listed.
+- **`errors`** is the list of error lines. A line keeps the indent that the section
+  gives a message with line breaks. **`errors_not_shown`** counts the errors past
+  the limit.
+
+A field with no content is `null`. A record never holds text that the section does
+not show: every value passes the same redaction and checks as the section, which
+the next section describes. A value that the section withholds is the withheld
+notice in the record too. No call produced `nodeid`, `seed`, `run_id` and
+`worker`, so each of them is checked the same way, and one that would show a
+redacted value is the withheld notice. The record is checked once more as a whole,
+because JSON escaping adds backslashes. If that check fails, every value of its
+calls is the withheld notice, then the four values above are too, and a record
+that still fails is not written.
 
 ## Keep secrets out of the report
 

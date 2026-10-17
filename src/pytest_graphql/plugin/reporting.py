@@ -2,8 +2,8 @@
 
 Everything the plugin prints about GraphQL sits here: the session header, the
 failure section, the sections that other plugins add, the matcher diff of a
-failed assertion, the call log, the schema summary, and what the xdist
-controller learns from its workers.
+failed assertion, the call log, the JSON report of ``--gql-report``, the
+schema summary, and what the xdist controller learns from its workers.
 
 The text of a call is built from a ``RecordedCall``, which holds a snapshot and
 finished text and nothing live (DESIGN section 7, "Boundary"). Each line is
@@ -22,13 +22,15 @@ calls in a session.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import time
 from collections import deque
 from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Final
+from pathlib import Path
+from typing import Any, Final, TextIO
 
 import pytest
 from graphql import (
@@ -57,12 +59,12 @@ from pytest_graphql._core.diagnostics import (
     text_tools,
     withhold_if_gapped,
 )
-from pytest_graphql._core.errors import DiagnosticRenderError
+from pytest_graphql._core.errors import DiagnosticRenderError, caller_message
 from pytest_graphql._core.matching import Matcher, RenderOptions
 from pytest_graphql._core.matching.render import DEFAULT_MAX_VALUE_BYTES, show_value
 from pytest_graphql._core.response import GraphQLResponse, Node
 from pytest_graphql._core.schema.source import SchemaSource
-from pytest_graphql.plugin.options import SEED_KEY, Settings, settings_of
+from pytest_graphql.plugin.options import REPORT_FLAG, SEED_KEY, Settings, settings_of
 from pytest_graphql.plugin.session import run_id, worker_id
 
 LOGGER_NAME: Final = "pytest_graphql.calls"
@@ -99,13 +101,67 @@ def _plural(count: int, singular: str, plural: str | None = None) -> str:
 Guards = Sequence[DiagnosticSnapshot]
 
 
+@dataclass(frozen=True)
+class _Entry:
+    """One line of a call in the failure section, with its value already checked.
+
+    ``label`` is the fixed text before the value, and ``value`` is the payload
+    as built, or the withheld notice when the line showed a secret. ``parts``
+    are the pieces a checked payload was joined from, and ``count`` the number a
+    fixed line states, so the JSON report takes them as they are and renders
+    nothing a second time. ``field`` names the value in that report, and is
+    empty for a line that only gives the layout its shape.
+    """
+
+    field: str
+    label: str
+    value: str = ""
+    withheld: bool = False
+    parts: tuple[str, ...] = ()
+    key: str = ""
+    count: int | None = None
+    suffix: str = ""
+    #: An error entry's continuation lines are lines of their own.
+    split: bool = False
+
+    def lines(self) -> list[str]:
+        text = self.label + self.value + self.suffix
+        return text.split("\n") if self.split else [text]
+
+
+def _checked(
+    guards: Guards,
+    field: str,
+    label: str,
+    payload: str,
+    *,
+    parts: tuple[str, ...] = (),
+    key: str = "",
+    suffix: str = "",
+    split: bool = False,
+) -> _Entry:
+    """``payload`` under ``label``, or the withheld notice if the line shows one."""
+    try:
+        require_safe_for_all(guards, label + payload, "failure section")
+    except DiagnosticRenderError:
+        return _Entry(
+            field,
+            label,
+            WITHHELD_TEXT,
+            withheld=True,
+            key=key,
+            suffix=suffix,
+            split=split,
+        )
+    return _Entry(
+        field, label, payload, parts=parts, key=key, suffix=suffix, split=split
+    )
+
+
 def _line(guards: Guards, label: str, payload: str) -> str:
     """``label + payload``, or ``label`` and the withheld notice if it shows one."""
-    text = label + payload
-    try:
-        return require_safe_for_all(guards, text, "failure section")
-    except DiagnosticRenderError:
-        return label + WITHHELD_TEXT
+    entry = _checked(guards, "", label, payload)
+    return entry.label + entry.value
 
 
 def _one_line(text: str) -> str:
@@ -121,21 +177,31 @@ def _variables_text(variables: Mapping[str, Any]) -> str:
     )
 
 
-def _skipped_lines(guards: Guards, snapshot: DiagnosticSnapshot) -> list[str]:
+def _skipped_entries(guards: Guards, snapshot: DiagnosticSnapshot) -> list[_Entry]:
     groups: dict[str, list[str]] = {}
     for record in snapshot.omissions:
         groups.setdefault(record.reason, []).append(_omitted_field(record))
-    lines = [
-        _line(
+    entries = [
+        _checked(
             guards,
+            "skipped",
             f"{_INDENT}skipped ({_reason_label(reason)}): ",
             ", ".join(names),
+            parts=tuple(names),
+            key=_reason_label(reason),
         )
         for reason, names in groups.items()
     ]
-    if snapshot.omissions_dropped:
-        lines.append(f"{_INDENT}skipped: {snapshot.omissions_dropped} more not listed")
-    return lines
+    dropped = snapshot.omissions_dropped
+    if dropped:
+        entries.append(
+            _Entry(
+                "skipped_more",
+                f"{_INDENT}skipped: {dropped} more not listed",
+                count=dropped,
+            )
+        )
+    return entries
 
 
 def _reason_label(reason: str) -> str:
@@ -147,22 +213,97 @@ def _omitted_field(record: OmissionRecord) -> str:
     return f"{record.parent_type}.{leaf}" if leaf else record.parent_type
 
 
-def _error_lines(guards: Guards, call: RecordedCall) -> list[str]:
-    lines = [f"{_INDENT}errors:"]
+def _error_entries(guards: Guards, call: RecordedCall) -> list[_Entry]:
+    entries = [_Entry("", f"{_INDENT}errors:")]
     for entry in call.errors:
         # A message with a newline continues under its own entry's indent, so
         # it cannot pass for another entry (DESIGN section 7, "Boundary").
         first, *rest = entry.split("\n")
         text = "\n".join([first, *(f"{_INDENT}    {more}" for more in rest)])
-        lines.extend(_line(guards, f"{_INDENT}  - ", text).split("\n"))
+        entries.append(_checked(guards, "errors", f"{_INDENT}  - ", text, split=True))
     hidden = call.error_count - len(call.errors)
     if hidden > 0:
-        lines.append(f"{_INDENT}  - ... {hidden} more not shown")
-    return lines
+        entries.append(
+            _Entry(
+                "errors_not_shown",
+                f"{_INDENT}  - ... {hidden} more not shown",
+                count=hidden,
+            )
+        )
+    return entries
 
 
 def _status_text(call: RecordedCall) -> str:
     return "-" if call.status_code is None else str(call.status_code)
+
+
+def _call_entries(
+    number: int,
+    call: RecordedCall,
+    *,
+    failed_here: bool,
+    reproduce: bool,
+    guards: Guards,
+) -> list[_Entry]:
+    """The checked lines of one call, in the SPEC 7.5 layout.
+
+    This is the one place the text of a call is built and checked. The failure
+    section joins these lines, and the JSON report reads their values.
+    """
+    snapshot = call.request
+    name = snapshot.operation or "<anonymous>"
+    status = _status_text(call)
+    duration = f"{call.duration_ms:.0f}"
+    entries = [
+        _checked(
+            guards,
+            "heading",
+            f"[{number}] ",
+            f"{snapshot.kind} {name}  {status}  {duration}ms",
+            parts=(snapshot.kind, snapshot.operation or "", status, duration),
+            suffix=_FAILED_HERE if failed_here else "",
+        )
+    ]
+    if snapshot.document:
+        entries.append(
+            _checked(guards, "document", _INDENT, _one_line(snapshot.document))
+        )
+    if snapshot.variables:
+        entries.append(
+            _checked(
+                guards,
+                "variables",
+                f"{_INDENT}variables: ",
+                _variables_text(snapshot.variables),
+            )
+        )
+    if snapshot.truncated:
+        entries.append(
+            _checked(
+                guards,
+                "truncated",
+                f"{_INDENT}truncated: ",
+                ", ".join(snapshot.truncated),
+            )
+        )
+    entries.extend(_skipped_entries(guards, snapshot))
+    if call.data not in (None, "null"):
+        suffix = (
+            f"   (truncated, {_plural(call.data_fields, 'field')})"
+            if call.data_cut
+            else ""
+        )
+        entries.append(
+            _checked(guards, "data", f"{_INDENT}data: ", f"{call.data}{suffix}")
+        )
+    if call.errors or call.error_count:
+        entries.extend(_error_entries(guards, call))
+    if call.failure:
+        entries.append(_checked(guards, "failure", f"{_INDENT}failure: ", call.failure))
+    if reproduce and call.curl:
+        entries.append(_Entry("", f"{_INDENT}reproduce:"))
+        entries.append(_checked(guards, "reproduce", f"{_INDENT}  ", call.curl))
+    return entries
 
 
 def render_call(
@@ -180,41 +321,14 @@ def render_call(
     are the snapshots every line is checked against, which default to this
     call's own.
     """
-    snapshot = call.request
-    checks = [snapshot] if guards is None else guards
-    name = snapshot.operation or "<anonymous>"
-    heading = _line(
-        checks,
-        f"[{number}] ",
-        f"{snapshot.kind} {name}  {_status_text(call)}  {call.duration_ms:.0f}ms",
+    entries = _call_entries(
+        number,
+        call,
+        failed_here=failed_here,
+        reproduce=reproduce,
+        guards=[call.request] if guards is None else guards,
     )
-    lines = [heading + (_FAILED_HERE if failed_here else "")]
-    if snapshot.document:
-        lines.append(_line(checks, _INDENT, _one_line(snapshot.document)))
-    if snapshot.variables:
-        lines.append(
-            _line(checks, f"{_INDENT}variables: ", _variables_text(snapshot.variables))
-        )
-    if snapshot.truncated:
-        lines.append(
-            _line(checks, f"{_INDENT}truncated: ", ", ".join(snapshot.truncated))
-        )
-    lines.extend(_skipped_lines(checks, snapshot))
-    if call.data not in (None, "null"):
-        suffix = (
-            f"   (truncated, {_plural(call.data_fields, 'field')})"
-            if call.data_cut
-            else ""
-        )
-        lines.append(_line(checks, f"{_INDENT}data: ", f"{call.data}{suffix}"))
-    if call.errors or call.error_count:
-        lines.extend(_error_lines(checks, call))
-    if call.failure:
-        lines.append(_line(checks, f"{_INDENT}failure: ", call.failure))
-    if reproduce and call.curl:
-        lines.append(f"{_INDENT}reproduce:")
-        lines.append(_line(checks, f"{_INDENT}  ", call.curl))
-    return lines
+    return [line for entry in entries for line in entry.lines()]
 
 
 def section_title(held: int, total: int) -> str:
@@ -222,6 +336,58 @@ def section_title(held: int, total: int) -> str:
     if total > held:
         return f"GraphQL calls (last {held} of {total})"
     return f"GraphQL calls ({held})"
+
+
+@dataclass(frozen=True)
+class _ShownCall:
+    number: int
+    failed_here: bool
+    entries: list[_Entry]
+
+
+@dataclass(frozen=True)
+class _Section:
+    """The failure section of one phase: its text and the checked lines behind it."""
+
+    text: str
+    calls: list[_ShownCall]
+    #: True when the finished text failed its check and shows only the notice.
+    withheld: bool
+    guards: list[DiagnosticSnapshot]
+
+
+def _render_section(
+    calls: Sequence[RecordedCall],
+    *,
+    total: int | None = None,
+    configured: Sequence[DiagnosticSnapshot] = (),
+) -> _Section:
+    held = len(calls)
+    first = (held if total is None else total) - held + 1
+    guards = distinct_secret_sets([*(call.request for call in calls), *configured])
+    shown = [
+        _ShownCall(
+            first + index,
+            index == held - 1,
+            _call_entries(
+                first + index,
+                call,
+                failed_here=index == held - 1,
+                reproduce=index == held - 1,
+                guards=guards,
+            ),
+        )
+        for index, call in enumerate(calls)
+    ]
+    text = "\n\n".join(
+        "\n".join(line for entry in each.entries for line in entry.lines())
+        for each in shown
+    )
+    try:
+        require_safe_for_all(guards, text, "failure section")
+    except DiagnosticRenderError:
+        return _Section(WITHHELD_TEXT, shown, True, guards)
+    return _Section(text, shown, False, guards)
 
 
 def render_calls(
@@ -237,26 +403,7 @@ def render_calls(
     of the configuration's own credentials, which every line is checked against
     as it is against the calls.
     """
-    held = len(calls)
-    first = (held if total is None else total) - held + 1
-    guards = distinct_secret_sets([*(call.request for call in calls), *configured])
-    blocks = [
-        "\n".join(
-            render_call(
-                first + index,
-                call,
-                failed_here=index == held - 1,
-                reproduce=index == held - 1,
-                guards=guards,
-            )
-        )
-        for index, call in enumerate(calls)
-    ]
-    text = "\n\n".join(blocks)
-    try:
-        return require_safe_for_all(guards, text, "failure section")
-    except DiagnosticRenderError:
-        return WITHHELD_TEXT
+    return _render_section(calls, total=total, configured=configured).text
 
 
 def log_message(
@@ -777,7 +924,9 @@ def pytest_report_header(config: pytest.Config) -> list[str]:
 
 
 def pytest_terminal_summary(terminalreporter: Any) -> None:
-    lines = summary_lines(terminalreporter.config)
+    config = terminalreporter.config
+    note = report_note(config)
+    lines = [*summary_lines(config), *([] if note is None else [note])]
     if not lines:
         return
     terminalreporter.write_sep("=", "GraphQL")
@@ -893,18 +1042,21 @@ def hook_sections(
 
 def failure_sections(item: pytest.Item, trace: CallTrace) -> list[tuple[str, str]]:
     """The report sections of one failed test, or none when it made no call."""
+    return _failure_report(item, trace)[0]
+
+
+def _failure_report(
+    item: pytest.Item, trace: CallTrace
+) -> tuple[list[tuple[str, str]], _Section | None]:
+    """The report sections of one failed phase, and the calls section behind them."""
     calls = trace.recorder.calls
     if not calls:
-        return []
+        return [], None
     total = trace.recorder.total
-    sections = [
-        (
-            section_title(len(calls), total),
-            render_calls(calls, total=total, configured=trace.configured()),
-        )
-    ]
+    section = _render_section(calls, total=total, configured=trace.configured())
+    sections = [(section_title(len(calls), total), section.text)]
     sections.extend(hook_sections(item, trace, calls))
-    return sections
+    return sections, section
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -917,12 +1069,23 @@ def pytest_runtest_makereport(item: pytest.Item) -> Generator[None, Any, None]:
     if trace is None or trace.nodeid != item.nodeid:
         return
     try:
-        report.sections.extend(failure_sections(item, trace))
+        sections, section = _failure_report(item, trace)
+        report.sections.extend(sections)
     except Exception as failure:
         # A fault in the report must not hide the failure it reports on.
         report.sections.append(
             ("GraphQL calls", f"the report failed with {type(failure).__name__}")
         )
+        return
+    if section is None or settings_of(item.config).report is None:
+        return
+    try:
+        line = report_line(item.config, item.nodeid, report.when, trace, section)
+    except Exception:
+        # The JSON report must not hide the failure either.
+        return
+    if line is not None:
+        setattr(report, REPORT_KEY, line)
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -933,6 +1096,253 @@ def pytest_runtest_protocol(item: pytest.Item) -> Generator[None, Any, None]:
     finally:
         if CURRENT in item.config.stash:
             del item.config.stash[CURRENT]
+
+
+# -- the JSON report (DESIGN section 13.6) ---------------------------------------
+
+#: The ``format`` of every record ``--gql-report`` writes.
+REPORT_FORMAT: Final = "pytest-graphql/report/1"
+
+#: The test report attribute a record rides on, which xdist sends to the controller.
+REPORT_KEY: Final = "pytest_graphql_report"
+
+#: The fields of one call in a record, in the order they are written.
+_CALL_FIELDS: Final = (
+    "number",
+    "kind",
+    "operation",
+    "status",
+    "duration_ms",
+    "failed_here",
+    "document",
+    "variables",
+    "skipped",
+    "skipped_more",
+    "data",
+    "errors",
+    "errors_not_shown",
+    "failure",
+    "reproduce",
+)
+
+#: The fields whose value is the checked text of one line, as the section shows it.
+_TEXT_FIELDS: Final = frozenset(
+    {"document", "variables", "data", "failure", "reproduce"}
+)
+
+
+def _call_record(shown: _ShownCall, *, withheld: bool) -> dict[str, Any]:
+    """One call of a record, read from the checked lines of the section.
+
+    ``withheld`` says the finished section showed only the notice. Every value
+    of the call is then the notice too, so the record shows no more than the
+    section did.
+    """
+    record: dict[str, Any] = dict.fromkeys(_CALL_FIELDS)
+    record["number"] = shown.number
+    record["failed_here"] = shown.failed_here
+    for entry in shown.entries:
+        if entry.field == "heading":
+            if entry.withheld:
+                for name in ("kind", "operation", "status", "duration_ms"):
+                    record[name] = WITHHELD_TEXT
+                continue
+            kind, operation, status, duration = entry.parts
+            record["kind"] = kind
+            record["operation"] = operation or None
+            record["status"] = None if status == "-" else int(status)
+            record["duration_ms"] = int(duration)
+        elif entry.field == "skipped":
+            skipped = record["skipped"] = record["skipped"] or {}
+            before = skipped.get(entry.key)
+            if entry.withheld or before == WITHHELD_TEXT:
+                skipped[entry.key] = WITHHELD_TEXT
+            else:
+                skipped[entry.key] = [*(before or []), *entry.parts]
+        elif entry.field == "errors":
+            record["errors"] = [*(record["errors"] or []), entry.value]
+        elif entry.field in ("skipped_more", "errors_not_shown"):
+            record[entry.field] = entry.count
+        elif entry.field in _TEXT_FIELDS:
+            record[entry.field] = entry.value
+    if withheld:
+        for name, value in record.items():
+            if name not in ("number", "failed_here") and value is not None:
+                record[name] = WITHHELD_TEXT
+    return record
+
+
+#: The record fields that name the test and the run, not a call.
+_HEAD_TEXT: Final = ("nodeid", "seed", "run_id", "worker")
+
+
+def _head(
+    config: pytest.Config, nodeid: str, phase: str, trace: CallTrace, guards: Guards
+) -> dict[str, Any]:
+    """The fields of a record that name the test and the run, each one checked.
+
+    No call produced them, so no line of the section vouches for them, and a
+    test id can hold any text a parameter gave it. Each value is checked as a
+    reader decodes it, before ``json.dumps`` escapes it, and a value that would
+    show a secret is the withheld notice.
+    """
+    head: dict[str, Any] = {
+        "format": REPORT_FORMAT,
+        "nodeid": escape_control_characters(nodeid),
+        "phase": phase,
+        "seed": trace.config.seed,
+        "run_id": escape_control_characters(run_id(config)),
+        "worker": escape_control_characters(worker_id(config)),
+    }
+    for name in _HEAD_TEXT:
+        if _checked(guards, name, "", str(head[name])).withheld:
+            head[name] = WITHHELD_TEXT
+    return head
+
+
+def report_line(
+    config: pytest.Config,
+    nodeid: str,
+    phase: str,
+    trace: CallTrace,
+    section: _Section,
+) -> str | None:
+    """The JSON Lines record of one failed phase, or ``None`` when none is safe.
+
+    Every value of a call is one the failure section showed, taken from its
+    checked lines, and every other value is checked the same way. ``json.dumps``
+    escapes quotes and backslashes after those checks ran, which can spell a
+    secret, so the finished line is checked again. A line that fails is written
+    with every value of its calls withheld, then with the values that name the
+    test and the run withheld too, and when that fails as well the record is not
+    written.
+    """
+    head = _head(config, nodeid, phase, trace, section.guards)
+    hidden = dict.fromkeys(_HEAD_TEXT, WITHHELD_TEXT)
+    attempts = [(head, section.withheld), (head, True), ({**head, **hidden}, True)]
+    for fields, withheld in attempts:
+        calls = [_call_record(each, withheld=withheld) for each in section.calls]
+        line = json.dumps({**fields, "calls": calls}, ensure_ascii=False)
+        try:
+            return require_safe_for_all(section.guards, line, "failure report")
+        except DiagnosticRenderError:
+            continue
+    return None
+
+
+class _ReportWriter:
+    """Writes the record of each failed phase to the ``--gql-report`` file.
+
+    It is registered only in the process that writes, which is the controller
+    under xdist and the one process outside it. A worker only attaches its
+    record to the test report, and xdist sends the report to the controller,
+    which logs it again here.
+
+    The report must never change how the run goes. The first fault in a write,
+    a flush or the close stops the writer for good and is kept by its class
+    name alone, because its message can name the path. The summary says the
+    file is incomplete.
+    """
+
+    def __init__(self, path: Path) -> None:
+        # The file is created empty when the session starts, so a run with no
+        # failure leaves an empty file.
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._handle: TextIO | None = path.open("w", encoding="utf-8")
+        #: The class name of the first exception the file raised, or ``None``.
+        self.fault: str | None = None
+
+    def _stop(self, failure: BaseException) -> None:
+        if self.fault is None:
+            self.fault = type(failure).__name__
+        handle, self._handle = self._handle, None
+        if handle is not None:
+            with contextlib.suppress(Exception):
+                handle.close()
+
+    def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
+        line = getattr(report, REPORT_KEY, None)
+        handle = self._handle
+        if handle is None or not _well_formed(line):
+            return
+        try:
+            handle.write(f"{line}\n")
+            handle.flush()
+        except Exception as failure:
+            self._stop(failure)
+
+    def pytest_sessionfinish(self) -> None:
+        """Close the file before the summary, so a fault in closing is shown."""
+        self.close()
+
+    def close(self) -> None:
+        handle, self._handle = self._handle, None
+        if handle is None:
+            return
+        try:
+            handle.close()
+        except Exception as failure:
+            self._stop(failure)
+
+
+#: The writer of this session, when this process writes the report.
+_WRITER: Final = pytest.StashKey[_ReportWriter]()
+
+
+def _well_formed(line: object) -> bool:
+    """True for one JSON object of this format on one line, as a worker sends it."""
+    if not isinstance(line, str) or "\n" in line or "\r" in line:
+        return False
+    try:
+        record = json.loads(line)
+    except ValueError:
+        return False
+    return isinstance(record, dict) and record.get("format") == REPORT_FORMAT
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Open the report file, in the controller or the one process outside xdist."""
+    config = session.config
+    path = settings_of(config).report
+    if path is None or getattr(config, "workerinput", None) is not None:
+        return
+    try:
+        writer = _ReportWriter(path)
+    except (OSError, ValueError) as failure:
+        # ValueError is a path the platform cannot name, such as one with a NUL.
+        # A path can hold a credential, so the message does not show it.
+        raise pytest.UsageError(
+            caller_message(
+                f"pytest-graphql: cannot write the file {REPORT_FLAG} names.",
+                context=[f"Opening it raised {type(failure).__name__}."],
+                fix=f"give {REPORT_FLAG} a path this process can write",
+            )
+        ) from None
+    config.stash[_WRITER] = writer
+    config.pluginmanager.register(writer, "pytest-graphql-report-writer")
+
+
+def _close_report(config: pytest.Config) -> None:
+    writer = config.stash.get(_WRITER, None)
+    if writer is None:
+        return
+    try:
+        if config.pluginmanager.is_registered(writer):
+            config.pluginmanager.unregister(writer)
+        writer.close()
+    finally:
+        del config.stash[_WRITER]
+
+
+def report_note(config: pytest.Config) -> str | None:
+    """The summary line that says the report file is incomplete, or ``None``."""
+    writer = config.stash.get(_WRITER, None)
+    if writer is None or writer.fault is None:
+        return None
+    return (
+        f"{REPORT_FLAG}: the file is incomplete, because writing it raised "
+        f"{escape_control_characters(writer.fault)}"
+    )
 
 
 # -- the matcher diff -----------------------------------------------------------
@@ -1045,7 +1455,10 @@ def configure(config: pytest.Config) -> None:
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:
-    previous = config.stash.get(_LOGGER_LEVEL, None)
-    if previous is not None:
-        logging.getLogger(LOGGER_NAME).setLevel(previous)
-        del config.stash[_LOGGER_LEVEL]
+    try:
+        _close_report(config)
+    finally:
+        previous = config.stash.get(_LOGGER_LEVEL, None)
+        if previous is not None:
+            logging.getLogger(LOGGER_NAME).setLevel(previous)
+            del config.stash[_LOGGER_LEVEL]

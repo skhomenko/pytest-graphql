@@ -7,9 +7,13 @@ look for the placeholder values of the page in the real output.
 
 from __future__ import annotations
 
+import dataclasses
+import json
+from typing import Any
+
 import pytest
 
-from tests.docs.blocks import ROOT
+from tests.docs.blocks import ROOT, blocks_of
 from tests.docs.page_runs import (
     Run,
     assert_shown_lines_are_real,
@@ -78,3 +82,22 @@ def test_the_second_report_hides_every_placeholder(
 def test_no_report_on_the_page_shows_the_bearer_token() -> None:
     for run in runs(PAGE):
         assert "token-PLACEHOLDER" not in "\n".join(run.shown), run.where
+
+
+def _steady(record: dict[str, Any]) -> dict[str, Any]:
+    """The record with the values that differ between runs replaced."""
+    calls = [{**call, "duration_ms": "N"} for call in record["calls"]]
+    return {**record, "run_id": "ID", "calls": calls}
+
+
+def test_the_json_report_on_the_page_is_what_the_flag_writes(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (shown,) = [block for block in blocks_of(PAGE) if block.language == "json"]
+    run = next(run for run in runs(PAGE) if "[1] query user" in run.shown[1])
+    run = dataclasses.replace(run, args=(*run.args, "--gql-report=gql-report.jsonl"))
+    run_project(pytester, monkeypatch, run)
+    lines = (pytester.path / "gql-report.jsonl").read_text().splitlines()
+    assert len(lines) == 1
+    assert _steady(json.loads(lines[0])) == _steady(json.loads(shown.source))
+    assert "token-PLACEHOLDER" not in lines[0]

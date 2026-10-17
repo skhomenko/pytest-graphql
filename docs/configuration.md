@@ -32,6 +32,7 @@ settings also have a command line flag.
 | `none` | `--gql-log` | `none` | `off` | A switch. It logs every request and response, not only failures. |
 | `none` | `--gql-log-level LEVEL` | `none` | `summary` | `summary` or `full`. It has an effect only with `--gql-log`. |
 | `none` | `--gql-show-schema-stats` | `none` | `off` | A switch. It prints the schema size, the operation counts and the load time. |
+| `none` | `--gql-report PATH` | `none` | `none` | A file path. It writes the GraphQL calls of each failed phase to the file as JSON Lines. See [Diagnostics](diagnostics.md#write-a-json-report). |
 
 A boolean is case-insensitive. `true`, `yes`, `y`, `on`, `t` and `1` mean true.
 `false`, `no`, `n`, `off`, `f` and `0` mean false.

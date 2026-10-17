@@ -14,9 +14,9 @@ The package is six modules:
 - :mod:`~pytest_graphql.plugin.fixtures` holds the fixtures and the ownership
   rules of section 9.
 - :mod:`~pytest_graphql.plugin.reporting` writes everything the plugin prints:
-  the header, the failure section, the matcher diff, the call log and the
-  summary, and it hands the xdist workers' facts to the controller (SPEC 7.5
-  and 7.6).
+  the header, the failure section, the matcher diff, the call log, the JSON
+  report and the summary, and it hands the xdist workers' facts to the
+  controller (SPEC 7.5 and 7.6).
 - :mod:`~pytest_graphql.plugin.session` holds the run id and the worker id.
 - This module is the entry point. It registers the options and the hooks, checks
   the settings once when pytest configures, and exposes the fixtures to pytest.
@@ -58,6 +58,7 @@ from pytest_graphql.plugin.reporting import (  # noqa: F401  (pytest reads these
     pytest_runtest_makereport,
     pytest_runtest_protocol,
     pytest_sessionfinish,
+    pytest_sessionstart,
     pytest_terminal_summary,
     pytest_testnodedown,
     pytest_unconfigure,

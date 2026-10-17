@@ -423,10 +423,12 @@ OPTIONS: Final[tuple[Option, ...]] = (
     ),
 )
 
-#: Flags with no setting behind them. They only choose what the reporting module prints.
+#: Flags with no setting behind them. They only choose what the reporting module
+#: prints or writes.
 LOG_FLAG: Final = "--gql-log"
 LOG_LEVEL_FLAG: Final = "--gql-log-level"
 SCHEMA_STATS_FLAG: Final = "--gql-show-schema-stats"
+REPORT_FLAG: Final = "--gql-report"
 
 
 #: ``--gql-log-level`` has no ini option or field. It is described as an option
@@ -479,6 +481,13 @@ def register(parser: pytest.Parser) -> None:
         dest="gql_show_schema_stats",
         action="store_true",
         help="Print schema size, operation counts and load time.",
+    )
+    group.addoption(
+        REPORT_FLAG,
+        dest="gql_report",
+        default=None,
+        metavar="PATH",
+        help="Write the GraphQL calls of each failed phase to PATH as JSON Lines.",
     )
 
 
@@ -541,6 +550,8 @@ class Settings:
     log: bool = False
     log_level: str = "summary"
     show_schema_stats: bool = False
+    #: Where ``--gql-report`` writes, resolved against the invocation directory.
+    report: Path | None = None
     #: True when ``--gql-seed=random`` chose the seed in ``cli_values``.
     seed_is_random: bool = False
 
@@ -676,8 +687,17 @@ def resolve(config: pytest.Config, environ: Mapping[str, str]) -> Settings:
         show_schema_stats=bool(
             config.getoption("gql_show_schema_stats", default=False)
         ),
+        report=_report_path(config, env_base),
         seed_is_random=seed_is_random,
     )
+
+
+def _report_path(config: pytest.Config, base: Path) -> Path | None:
+    """The ``--gql-report`` path. An empty value counts as not set, as elsewhere."""
+    given = config.getoption("gql_report", default=None)
+    if not isinstance(given, str) or not given.strip():
+        return None
+    return base / given
 
 
 #: Where the resolved settings are kept for the session.
