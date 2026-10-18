@@ -15,7 +15,10 @@ exists to prevent.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
+
+HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 
 
 def normalize_name(name: str) -> str:
@@ -38,3 +41,24 @@ def merge_headers(*sources: Mapping[str, str] | None) -> dict[str, str]:
         for name, value in source.items():
             entries[normalize_name(name)] = (name, value)
     return dict(entries.values())
+
+
+def parse_header_lines(text: str) -> dict[str, str]:
+    """``Name: value`` lines, the format of ``gql_headers`` and ``PYTEST_GQL_HEADERS``.
+
+    A later line replaces an earlier one of that name. A line that is not of the
+    form, or a value with a control character, raises ``ValueError``. The message
+    says what is accepted and which line, and never shows the line, because a
+    header value can be a credential.
+    """
+    found: dict[str, str] = {}
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for index, line in enumerate(lines, start=1):
+        name, separator, value = line.partition(":")
+        name, value = name.strip(), value.strip()
+        if not separator or not HEADER_NAME.fullmatch(name):
+            raise ValueError(f"lines of the form Name: value (line {index} is not)")
+        if any((ord(char) < 32 and char != "\t") or ord(char) == 127 for char in value):
+            raise ValueError(f"header values without control characters (line {index})")
+        found[name] = value
+    return found

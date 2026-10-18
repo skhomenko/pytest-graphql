@@ -45,6 +45,11 @@ schema and checked against it before they are sent.
   with errors raises in every other test.
 - When a test fails, read the `GraphQL calls` section of the failure report before
   you change code. The message of a wrong name suggests the closest correct one.
+- Before you write a call, run `pytest-graphql describe <operation> --schema
+  schema.graphql` to see its arguments, its return type and a sample call. Run
+  `pytest-graphql operations --schema schema.graphql` to list the operations. With
+  no SDL file, set `PYTEST_GQL_URL` and read the schema from the endpoint. Never
+  put a URL or a header on the command line: put headers in `PYTEST_GQL_HEADERS`.
 ```
 
 ## The same rules as a skill file
@@ -82,6 +87,11 @@ schema and checked against it before they are sent.
   with errors raises in every other test.
 - When a test fails, read the `GraphQL calls` section of the failure report before
   you change code. The message of a wrong name suggests the closest correct one.
+- Before you write a call, run `pytest-graphql describe <operation> --schema
+  schema.graphql` to see its arguments, its return type and a sample call. Run
+  `pytest-graphql operations --schema schema.graphql` to list the operations. With
+  no SDL file, set `PYTEST_GQL_URL` and read the schema from the endpoint. Never
+  put a URL or a header on the command line: put headers in `PYTEST_GQL_HEADERS`.
 ```
 
 ## What the agent sees when it is wrong
@@ -116,7 +126,8 @@ query 'user' has no argument 'idd'.
 ```
 
 A wrong operation name or a wrong field name in `fields=` fails the same way, with
-the closest name. See [Selections](selections.md) for how the client chooses
+the closest name. The `pytest-graphql` command lists the operations and describes
+one before you write the call. See [Configuration](configuration.md#the-command-line-tool). See [Selections](selections.md) for how the client chooses
 fields, and [Migrating from a hand-rolled client](migrating.md) for how to move an
 existing suite one test at a time. The [Errors](errors.md) page lists every
 exception, and [Diagnostics](diagnostics.md) explains the `GraphQL calls` section.

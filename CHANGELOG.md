@@ -12,6 +12,17 @@ cycle is promised.
 
 ### Added
 
+- The `pytest-graphql` command, also run as `python -m pytest_graphql`, shows what
+  a test needs to call an operation. `pytest-graphql operations` lists every
+  query, mutation and subscription. `pytest-graphql describe <name>` prints the
+  arguments, the return type, the document that auto-selection builds and a
+  sample call, and `--json` prints the same as one object with the format name
+  `pytest-graphql/describe/1` (`pytest-graphql/operations/1` for `operations`). The schema comes from `--schema PATH` or from the
+  endpoint in `PYTEST_GQL_URL`, with headers from `PYTEST_GQL_HEADERS`. The
+  command has no URL flag and no header flag, reads no other setting, and never
+  prints a URL or a header value. The exit status is 0, 1 for an unknown name, 2
+  for a usage error and 3 when the schema cannot be loaded. The command imports no
+  pytest. Migration: none, the command is new.
 - `--gql-report=PATH` writes the `GraphQL calls` section of each failed phase to
   `PATH` as JSON Lines, one record per line, for a tool or an agent that reads
   results without parsing terminal text. The file is created empty when the
@@ -20,6 +31,15 @@ cycle is promised.
   Under pytest-xdist only the controller writes. A fault in writing the file
   does not change the run, and the summary says the file is incomplete. The
   format is documented on the Diagnostics page. Migration: none, the flag is new.
+
+### Fixed
+
+- An operation argument that is not null, has a schema default and has a name
+  that is also an option of a call (such as `fields`) no longer makes the
+  call fail when the call leaves it out. The schema default answers the
+  missing value, so the argument is optional, like any other argument with a
+  default. A call that names it as a bare keyword still fails, and the
+  `variables={...}` escape hatch still works. Migration: none.
 
 ## [0.2.0] - 2026-10-16
 

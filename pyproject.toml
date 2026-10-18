@@ -74,6 +74,9 @@ docs = [
     "mkdocstrings-python>=1.12",
 ]
 
+[project.scripts]
+pytest-graphql = "pytest_graphql._cli:main"
+
 [project.urls]
 Documentation = "https://skhomenko.github.io/pytest-graphql/"
 Source = "https://github.com/skhomenko/pytest-graphql"

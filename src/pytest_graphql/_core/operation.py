@@ -64,6 +64,7 @@ from graphql import (
     VariableNode,
     get_named_type,
     is_leaf_type,
+    is_required_argument,
 )
 
 from pytest_graphql._core.diagnostics import OmissionRecord
@@ -333,32 +334,14 @@ def _variable_definitions(
     )
 
 
-def assemble_operation(
+def _resolve_supplied(
     *,
-    schema: GraphQLSchema,
     kind: OperationKind,
-    name: str,
+    resolved_field_name: str,
+    field_def: GraphQLField,
     kwargs: Mapping[str, Any],
-    fields: SelectionInput = AUTO,
-    policy: SelectionPolicy,
-    builder: SelectionBuilder,
-    operation_name: str | None = None,
-    validate: bool = True,
-    scalars: ScalarRegistry | None = None,
-) -> AssembledOperation:
-    """Build, and by default validate, one operation document.
-
-    ``kwargs`` is the raw keyword mapping as ``query()``/``mutation()``/
-    ``execute()`` received it (SPEC 3.2): every reserved option name (B23)
-    and every candidate GraphQL variable, together, because that is how they
-    genuinely arrive. This function is where the two are told apart.
-    """
-    try:
-        resolved_field_name, field_def = resolve_operation(schema, kind, name)
-    except OperationNotFoundError:
-        if NameMap.build(operation_names(schema, "subscription")).get(name):
-            raise ArgumentError.is_a_subscription(kind=kind, name=name) from None
-        raise
+) -> dict[str, Any]:
+    """Steps 2 to 5: the operation's own arguments the caller supplied, resolved."""
     raw_variables = kwargs.get("variables")
     if raw_variables is not None and not isinstance(raw_variables, Mapping):
         raise ArgumentError.invalid_value(
@@ -396,6 +379,52 @@ def assemble_operation(
         field_def=field_def,
         resolved=resolved_args,
     )
+    return resolved_args
+
+
+def assemble_operation(
+    *,
+    schema: GraphQLSchema,
+    kind: OperationKind,
+    name: str,
+    kwargs: Mapping[str, Any],
+    fields: SelectionInput = AUTO,
+    policy: SelectionPolicy,
+    builder: SelectionBuilder,
+    operation_name: str | None = None,
+    validate: bool = True,
+    scalars: ScalarRegistry | None = None,
+    declare_only: bool = False,
+) -> AssembledOperation:
+    """Build, and by default validate, one operation document.
+
+    ``kwargs`` is the raw keyword mapping as ``query()``/``mutation()``/
+    ``execute()`` received it (SPEC 3.2): every reserved option name (B23)
+    and every candidate GraphQL variable, together, because that is how they
+    genuinely arrive. This function is where the two are told apart.
+
+    ``declare_only`` builds the document of a call that supplies every required
+    argument (``is_required_argument``) and nothing else, without a value for
+    any of them. It declares the variables and returns no values. The describe
+    command uses it to show the document, and ``kwargs`` is not read.
+    """
+    try:
+        resolved_field_name, field_def = resolve_operation(schema, kind, name)
+    except OperationNotFoundError:
+        if NameMap.build(operation_names(schema, "subscription")).get(name):
+            raise ArgumentError.is_a_subscription(kind=kind, name=name) from None
+        raise
+    if declare_only:
+        resolved_args = dict.fromkeys(
+            name for name, arg in field_def.args.items() if is_required_argument(arg)
+        )
+    else:
+        resolved_args = _resolve_supplied(
+            kind=kind,
+            resolved_field_name=resolved_field_name,
+            field_def=field_def,
+            kwargs=kwargs,
+        )
 
     return_type = get_named_type(field_def.type)
     child_selection_set: SelectionSetNode | None
@@ -475,11 +504,18 @@ def assemble_operation(
     if validate:
         validate_document(schema, document)
 
-    variable_values = coerce_variables(
-        ((variable.name, variable.type_, variable.value) for variable in all_variables),
-        kind=kind,
-        operation_name=resolved_field_name,
-        scalars=scalars,
+    variable_values = (
+        {}
+        if declare_only
+        else coerce_variables(
+            (
+                (variable.name, variable.type_, variable.value)
+                for variable in all_variables
+            ),
+            kind=kind,
+            operation_name=resolved_field_name,
+            scalars=scalars,
+        )
     )
     return AssembledOperation(
         document=document,

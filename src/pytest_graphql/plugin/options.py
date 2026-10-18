@@ -45,6 +45,7 @@ import pytest
 from pytest_graphql._core.client import ClientConfig
 from pytest_graphql._core.diagnostics import DEFAULT_REDACT_HEADERS
 from pytest_graphql._core.errors import caller_message
+from pytest_graphql._core.headers import HEADER_NAME, parse_header_lines
 from pytest_graphql._core.selection.policy import SelectionPolicy
 from pytest_graphql._core.transport.httpx_transport import checked_seconds
 
@@ -65,7 +66,6 @@ _CYCLE_POLICIES: Final = ("stop", "shallow", "id_only")
 _LOG_LEVELS: Final = ("summary", "full")
 
 #: RFC 9110 token characters, which is what a header name is made of.
-_HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 _GRAPHQL_NAME = re.compile(r"[_A-Za-z][_0-9A-Za-z]*")
 _DOTTED_PATH = re.compile(r"[_A-Za-z][_0-9A-Za-z]*(\.[_A-Za-z][_0-9A-Za-z]*)+")
 
@@ -177,18 +177,10 @@ def _choice(*names: str) -> Parser:
 
 def _headers(text: str, _base: Path) -> dict[str, str]:
     """``Name: value`` lines. A later line replaces an earlier one of that name."""
-    found: dict[str, str] = {}
-    for index, line in enumerate(_lines(text), start=1):
-        name, separator, value = line.partition(":")
-        name, value = name.strip(), value.strip()
-        if not separator or not _HEADER_NAME.fullmatch(name):
-            raise _InvalidError(f"lines of the form Name: value (line {index} is not)")
-        if any((ord(char) < 32 and char != "\t") or ord(char) == 127 for char in value):
-            raise _InvalidError(
-                f"header values without control characters (line {index})"
-            )
-        found[name] = value
-    return found
+    try:
+        return parse_header_lines(text)
+    except ValueError as invalid:
+        raise _InvalidError(str(invalid)) from None
 
 
 def _depth_caps(text: str, _base: Path) -> dict[str, int]:
@@ -233,7 +225,7 @@ def _header_names(text: str, _base: Path) -> tuple[str, ...]:
         for name in line.split(",")
         if name.strip()
     ]
-    if not all(_HEADER_NAME.fullmatch(name) for name in listed):
+    if not all(HEADER_NAME.fullmatch(name) for name in listed):
         raise _InvalidError("header names, one per line")
     names = sorted(DEFAULT_REDACT_HEADERS)
     seen = set(names)

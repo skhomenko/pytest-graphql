@@ -32,6 +32,7 @@ from graphql import (
 )
 
 from pytest_graphql._core.errors import SchemaError, caller_message, position_of
+from pytest_graphql._core.graphql_compat import keep_introspected_defaults
 
 
 class SchemaSource(Protocol):
@@ -156,7 +157,9 @@ class IntrospectionSource:
         if data is None:
             raise SchemaError("introspection query returned no data")
         try:
-            return build_client_schema(data)
+            schema = build_client_schema(data)
+            keep_introspected_defaults(schema, data)
+            return schema
         except Exception as exc:
             raise SchemaError(
                 f"introspection data did not build a valid schema: {exc}"

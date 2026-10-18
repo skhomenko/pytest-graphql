@@ -32,19 +32,35 @@ input type, which is the one question the library asks of variable coercion.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any, TypeVar, cast
 
 import graphql.utilities
 from graphql import (
+    BooleanValueNode,
+    FloatValueNode,
     GraphQLArgument,
+    GraphQLError,
     GraphQLInputField,
+    GraphQLInputObjectType,
     GraphQLInputType,
+    GraphQLInterfaceType,
+    GraphQLObjectType,
     GraphQLScalarType,
+    GraphQLSchema,
+    InputValueDefinitionNode,
+    IntValueNode,
     ListValueNode,
+    NameNode,
+    NullValueNode,
+    ObjectFieldNode,
     ObjectValueNode,
+    StringValueNode,
     Undefined,
     ValueNode,
+    ast_from_value,
+    parse_type,
+    parse_value,
     print_ast,
 )
 
@@ -112,6 +128,123 @@ def default_of(item: GraphQLArgument | GraphQLInputField) -> Any:
         return _coerce_input_value(default.value, item.type)
     except Exception:
         return Undefined
+
+
+def keep_introspected_defaults(schema: GraphQLSchema, data: Mapping[str, Any]) -> None:
+    """Give each introspected default its literal back on graphql-core 3.2.
+
+    3.3 stores the literal of a default. 3.2 coerces the ``defaultValue`` text of
+    an introspection result and drops it, so an input-object default such as
+    ``{}`` comes back as its coerced form and an enum literal for a custom scalar
+    comes back as a string. A schema built from SDL does not lose them, because
+    it keeps its definition nodes.
+
+    So the text is parsed here, where the library still holds the result, and
+    attached as the ``ast_node`` of its argument or input field, which is where
+    :func:`default_literal` reads the literal of an SDL schema. The result is
+    best effort: a default that does not parse keeps the coerced reading, and
+    the load never fails because of it.
+    """
+    if LINE_3_3:
+        return
+    try:
+        types = data["__schema"]["types"]
+        for type_data in types:
+            type_ = schema.type_map.get(type_data["name"])
+            if isinstance(type_, GraphQLInputObjectType):
+                for wire in type_data.get("inputFields") or ():
+                    _keep_default(wire, type_.fields.get(wire["name"]))
+            elif isinstance(type_, (GraphQLObjectType, GraphQLInterfaceType)):
+                for field_data in type_data.get("fields") or ():
+                    field = type_.fields.get(field_data["name"])
+                    for wire in field_data.get("args") or ():
+                        _keep_default(
+                            wire, field.args.get(wire["name"]) if field else None
+                        )
+    except (KeyError, TypeError, AttributeError, RecursionError):
+        return
+
+
+def _keep_default(
+    wire: Mapping[str, Any], item: GraphQLArgument | GraphQLInputField | None
+) -> None:
+    text = wire.get("defaultValue")
+    if item is None or not isinstance(text, str) or item.ast_node is not None:
+        return
+    try:
+        item.ast_node = InputValueDefinitionNode(
+            name=NameNode(value=wire["name"]),
+            type=parse_type(str(item.type)),
+            default_value=cast("Any", parse_value(text)),
+        )
+    except GraphQLError:
+        return
+
+
+def default_literal(item: GraphQLArgument | GraphQLInputField) -> str | None:
+    """The default as the schema declares it, as literal text, or ``None``.
+
+    The text is the literal the SDL or the introspection result holds, printed
+    as :func:`print_value` prints it, so ``= {}`` stays ``{}`` and a custom
+    scalar's ``{limit: 10}`` stays as written. It is never rebuilt from the
+    coerced value, because coercion adds the defaults of nested input fields and
+    a custom scalar has no way to turn its value back into a literal.
+
+    3.3 keeps the literal in ``default``. 3.2 keeps it in the definition node of
+    a schema built from SDL, and :func:`keep_introspected_defaults` puts it there
+    for a schema built from introspection. A 3.2 schema built in code holds only
+    the coerced value, and the text is written from that value. A default that
+    cannot be written reads as no default.
+    """
+    if LINE_3_3:
+        default: Any = cast("Any", item).default
+        if default is not None and default.literal is not None:
+            return print_value(default.literal)
+        value = item.default_value if default is None else default.value
+    else:
+        node = item.ast_node.default_value if item.ast_node is not None else None
+        if node is not None:
+            return print_value(node)
+        value = item.default_value
+    if value is Undefined:
+        return None
+    try:
+        return print_value(_value_node(value, item.type))
+    except (TypeError, ValueError):
+        return None
+
+
+def _value_node(value: Any, type_: GraphQLInputType) -> ValueNode:
+    """A coerced default as a literal: by its type, else by its own shape."""
+    try:
+        typed = ast_from_value(value, type_)
+    except (TypeError, ValueError):
+        typed = None
+    return typed if typed is not None else _untyped_node(value)
+
+
+def _untyped_node(value: Any) -> ValueNode:
+    """A JSON-shaped value as a literal. Anything else raises ``TypeError``."""
+    if value is None:
+        return NullValueNode()
+    if isinstance(value, bool):
+        return BooleanValueNode(value=value)
+    if isinstance(value, int):
+        return IntValueNode(value=str(value))
+    if isinstance(value, float):
+        return FloatValueNode(value=repr(value))
+    if isinstance(value, str):
+        return StringValueNode(value=value)
+    if isinstance(value, Mapping):
+        return ObjectValueNode(
+            fields=tuple(
+                ObjectFieldNode(name=NameNode(value=str(key)), value=_untyped_node(v))
+                for key, v in value.items()
+            )
+        )
+    if isinstance(value, (list, tuple)):
+        return ListValueNode(values=tuple(_untyped_node(v) for v in value))
+    raise TypeError(f"no literal for a {type(value).__name__}")
 
 
 def print_value(node: ValueNode) -> str:

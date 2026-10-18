@@ -34,6 +34,7 @@ from graphql import (
     Node,
     ValueNode,
     VariableNode,
+    is_required_argument,
     is_required_input_field,
     validate,
 )
@@ -77,6 +78,16 @@ RESERVED_OPTIONS: frozenset[str] = frozenset(
 )
 
 
+def names_a_reserved_option(arg_name: str) -> bool:
+    """True when an argument's exact name or its snake form is a reserved option.
+
+    Such an argument is unreachable through a bare keyword (B23). This is the
+    one place the rule is written, for the check below and for any caller that
+    needs to know before it builds a call.
+    """
+    return arg_name in RESERVED_OPTIONS or to_snake(arg_name) in RESERVED_OPTIONS
+
+
 def check_no_reserved_collision(
     *,
     kind: str,
@@ -94,9 +105,10 @@ def check_no_reserved_collision(
     ``variables={...}`` escape hatch.
 
     Two shapes both need this, not only the obvious one. A *required*
-    argument shaped like this is refused unconditionally: leaving it unset
-    always fails, so there is no call this argument can ever answer for
-    without ``variables={...}``. An *optional* one raises only when the
+    argument (non-null with no default) shaped like this is refused
+    unconditionally: leaving it unset always fails, so there is no call this
+    argument can ever answer for without ``variables={...}``. An *optional*
+    one, nullable or with a default, raises only when the
     caller's own keywords actually named it: that value would otherwise be
     captured as the option and silently vanish, never reaching this
     argument at all, rather than surfacing as a "missing argument". An
@@ -107,9 +119,9 @@ def check_no_reserved_collision(
         if arg_name in explicit_variables:
             continue
         snake_name = to_snake(arg_name)
-        if arg_name not in RESERVED_OPTIONS and snake_name not in RESERVED_OPTIONS:
+        if not names_a_reserved_option(arg_name):
             continue
-        required = isinstance(argument.type, GraphQLNonNull)
+        required = is_required_argument(argument)
         attempted = arg_name in kwargs or snake_name in kwargs
         if not required and not attempted:
             continue

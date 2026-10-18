@@ -136,6 +136,37 @@ class TestCheckNoReservedCollision:
             )
         assert "'headers'" in str(excinfo.value)
 
+    def test_does_not_raise_for_a_non_null_colliding_argument_with_a_default(
+        self,
+    ) -> None:
+        # Not null, but the schema default answers an omitted value, so
+        # leaving it unset does not fail and the call needs no escape hatch.
+        field = build_sdl_schema(
+            'type Query { f(fields: String! = "a"): String }'
+        ).query_type.fields["f"]  # type: ignore[union-attr]
+        check_no_reserved_collision(
+            kind="query",
+            operation_name="f",
+            field_def=field,
+            kwargs={},
+            explicit_variables={},
+        )
+
+    def test_raises_for_a_non_null_colliding_argument_with_a_default_named_in_kwargs(
+        self,
+    ) -> None:
+        field = build_sdl_schema(
+            'type Query { f(fields: String! = "a"): String }'
+        ).query_type.fields["f"]  # type: ignore[union-attr]
+        with pytest.raises(ArgumentError):
+            check_no_reserved_collision(
+                kind="query",
+                operation_name="f",
+                field_def=field,
+                kwargs={"fields": "x"},
+                explicit_variables={},
+            )
+
     def test_does_not_raise_when_nothing_collides(self) -> None:
         user_field = SCHEMA.query_type.fields["user"]  # type: ignore[union-attr]
         check_no_reserved_collision(
