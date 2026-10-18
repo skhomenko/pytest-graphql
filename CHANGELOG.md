@@ -10,6 +10,11 @@ cycle is promised.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-18
+
+The `pytest-graphql` command, which shows what a test needs to call an
+operation, and a JSON Lines report of failed tests.
+
 ### Added
 
 - The `pytest-graphql` command, also run as `python -m pytest_graphql`, shows what
@@ -436,7 +441,8 @@ dependency is declared as `>=3.2,<3.3` so that an install never selects it.
   build backend and its dependencies, used both as build constraints for the
   release build and as the environment for the sdist install-back.
 
-[Unreleased]: https://github.com/skhomenko/pytest-graphql/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/skhomenko/pytest-graphql/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/skhomenko/pytest-graphql/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.0rc1...v0.1.0
