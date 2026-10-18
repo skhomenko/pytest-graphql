@@ -127,7 +127,9 @@ query 'user' has no argument 'idd'.
 
 A wrong operation name or a wrong field name in `fields=` fails the same way, with
 the closest name. The `pytest-graphql` command lists the operations and describes
-one before you write the call. See [Configuration](configuration.md#the-command-line-tool). See [Selections](selections.md) for how the client chooses
-fields, and [Migrating from a hand-rolled client](migrating.md) for how to move an
-existing suite one test at a time. The [Errors](errors.md) page lists every
-exception, and [Diagnostics](diagnostics.md) explains the `GraphQL calls` section.
+one before you write the call (see
+[Configuration](configuration.md#the-command-line-tool)). See
+[Selections](selections.md) for how the client chooses fields, and
+[Migrating from a hand-rolled client](migrating.md) for how to move an existing
+suite one test at a time. The [Errors](errors.md) page lists every exception, and
+[Diagnostics](diagnostics.md) explains the `GraphQL calls` section.

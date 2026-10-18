@@ -17,12 +17,13 @@ cycle is promised.
   query, mutation and subscription. `pytest-graphql describe <name>` prints the
   arguments, the return type, the document that auto-selection builds and a
   sample call, and `--json` prints the same as one object with the format name
-  `pytest-graphql/describe/1` (`pytest-graphql/operations/1` for `operations`). The schema comes from `--schema PATH` or from the
-  endpoint in `PYTEST_GQL_URL`, with headers from `PYTEST_GQL_HEADERS`. The
-  command has no URL flag and no header flag, reads no other setting, and never
-  prints a URL or a header value. The exit status is 0, 1 for an unknown name, 2
-  for a usage error and 3 when the schema cannot be loaded. The command imports no
-  pytest. Migration: none, the command is new.
+  `pytest-graphql/describe/1` (`pytest-graphql/operations/1` for `operations`).
+  The schema comes from `--schema PATH` or from the endpoint in `PYTEST_GQL_URL`,
+  with headers from `PYTEST_GQL_HEADERS`. The command has no URL flag and no
+  header flag, reads no other setting, and never prints a URL or a header value.
+  The exit status is 0, 1 for an unknown name, 2 for a usage error and 3 when the
+  schema cannot be loaded. The command imports no pytest. Migration: none, the
+  command is new.
 - `--gql-report=PATH` writes the `GraphQL calls` section of each failed phase to
   `PATH` as JSON Lines, one record per line, for a tool or an agent that reads
   results without parsing terminal text. The file is created empty when the
