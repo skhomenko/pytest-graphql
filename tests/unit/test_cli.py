@@ -9,6 +9,7 @@ of every path is searched for them.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import warnings
@@ -685,6 +686,17 @@ def test_every_error_path_keeps_the_header_sentinel_out(
 # -- entry points and purity ---------------------------------------------------
 
 
+def child_environment() -> dict[str, str]:
+    """The parent environment without any ``PYTEST_GQL_*`` setting.
+
+    Windows needs its own variables (``SYSTEMROOT``) to start Python with
+    sockets, so the child inherits the rest instead of getting a bare mapping.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_GQL_")}
+    env["PYTHONPATH"] = os.pathsep.join(sys.path)
+    return env
+
+
 def test_python_dash_m_runs_the_same_command(schema_file: Path) -> None:
     done = subprocess.run(
         [
@@ -698,7 +710,7 @@ def test_python_dash_m_runs_the_same_command(schema_file: Path) -> None:
         capture_output=True,
         text=True,
         check=False,
-        env={"PATH": "", "PYTHONPATH": ":".join(sys.path)},
+        env=child_environment(),
     )
     assert done.returncode == 0, done.stderr
     assert "create_user" in done.stdout
@@ -725,7 +737,7 @@ def test_the_command_imports_no_pytest() -> None:
         capture_output=True,
         text=True,
         check=False,
-        env={"PATH": "", "PYTHONPATH": ":".join(sys.path)},
+        env=child_environment(),
     )
     assert done.returncode == 0, done.stderr
 
