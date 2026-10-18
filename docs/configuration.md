@@ -167,3 +167,81 @@ is read from the directory where pytest was started.
 whole run. With pytest-xdist, the controller chooses it once and every worker
 uses the same number. The report header shows which seed was used, so you can
 repeat a run. See [Factory](factory.md).
+
+## The command line tool
+
+The package installs a command, `pytest-graphql`. `python -m pytest_graphql` runs
+the same command. It shows an agent or a person what a test needs to call an
+operation, without reading the SDL. It does not run pytest, and it does not need
+pytest to be installed.
+
+```bash
+pytest-graphql operations --schema schema.graphql
+pytest-graphql describe createUser --schema schema.graphql
+```
+
+`operations` lists every query, mutation and subscription. Each line has the kind,
+the snake_case name, the schema name and the arguments. `describe <name>` takes
+either spelling of the name and prints:
+
+- the kind, and each argument with its snake_case name, its schema name, its
+  type, whether it is required, and its default;
+- the return type;
+- the document that auto-selection builds with the default selection policy, for
+  a call that gives every required argument and nothing else;
+- one sample call as a test writes it. An input object is made with
+  `gql.fake.<InputType>()`. Any other required argument is written as `...`,
+  because the test chooses its value. The `...` means "replace this value": it is
+  a placeholder and not a value that the client accepts. The sample names the
+  operation and each argument only by a spelling that the client resolves to it.
+  When an argument cannot be written as a keyword, because its name is a Python
+  keyword, another argument shares its snake_case form, or its name (such as
+  `operationName`) is an option of the call, the sample passes all arguments in
+  `variables={...}` under their schema names. A subscription has no
+  sample call.
+
+A name that is on more than one root, such as a query and a mutation with the same
+name, needs `--kind query`, `--kind mutation` or `--kind subscription`.
+
+`--json` prints the same information as one JSON object. For `operations` the
+`format` is `pytest-graphql/operations/1`, and the object has an `operations`
+list. For `describe` the `format` is `pytest-graphql/describe/1`, and the object
+has the keys `kind`, `name`, `schema_name`, `arguments`, `returns`, `document`,
+`document_error` and `sample`. A key with no content is `null`.
+
+When auto-selection finds no field to select, `document` is `null` and
+`document_error` holds the message of the client: the problem, the closest name
+when there is one, and a `Fix:` line. The message never shows a value. The exit
+status is still `0`.
+
+### Where the schema comes from
+
+| Source | How |
+|---|---|
+| An SDL file | `--schema PATH`. This wins when both sources are set. |
+| The endpoint | The environment variable `PYTEST_GQL_URL`. The command asks the server for its schema by introspection. |
+
+The command takes no URL and no header on its command line, because a command
+line is kept in shell history and other processes can read it. There is no `--url`
+and no `--header` flag, and the command refuses both. Instead:
+
+- The endpoint is read only from `PYTEST_GQL_URL`.
+- Headers are read only from `PYTEST_GQL_HEADERS`, with one `Name: value` line per
+  header, as in the ini option `gql_headers`.
+- No other setting is read. The command does not read pytest ini files, and a
+  variable such as `PYTEST_GQL_PROXY`, `PYTEST_GQL_TIMEOUT` or
+  `PYTEST_GQL_MAX_DEPTH` has no effect. Every other setting has the default of
+  `ClientConfig`.
+
+No message and no output shows the URL or a header value. When the schema cannot
+be loaded from the endpoint, the message names the class of the failure and
+nothing else.
+
+### Exit status
+
+| Status | Meaning |
+|---|---|
+| `0` | Success. |
+| `1` | The name matches no operation. The message suggests the closest names. |
+| `2` | A usage error: no schema source, a name on two roots without `--kind`, an unknown option, or a value of `PYTEST_GQL_HEADERS` that is not valid. |
+| `3` | The schema could not be loaded. |
