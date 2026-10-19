@@ -68,6 +68,9 @@ _LOG_LEVELS: Final = ("summary", "full")
 #: RFC 9110 token characters, which is what a header name is made of.
 _GRAPHQL_NAME = re.compile(r"[_A-Za-z][_0-9A-Za-z]*")
 _DOTTED_PATH = re.compile(r"[_A-Za-z][_0-9A-Za-z]*(\.[_A-Za-z][_0-9A-Za-z]*)+")
+_APP_PATH = re.compile(
+    r"[_A-Za-z][_0-9A-Za-z]*(\.[_A-Za-z][_0-9A-Za-z]*)*:[_A-Za-z][_0-9A-Za-z]*"
+)
 
 
 class _InvalidError(Exception):
@@ -245,6 +248,13 @@ def _schema_source(text: str, _base: Path) -> str | None:
     return path
 
 
+def _app(text: str, _base: Path) -> str:
+    path = text.strip()
+    if not _APP_PATH.fullmatch(path):
+        raise _InvalidError("a path such as package.module:attribute")
+    return path
+
+
 # -- the table ----------------------------------------------------------------
 
 
@@ -413,6 +423,13 @@ OPTIONS: Final[tuple[Option, ...]] = (
         _schema_source,
         "Dotted path of a SchemaSource instance. Unset means introspection.",
     ),
+    Option(
+        "gql_app",
+        None,
+        "string",
+        _app,
+        "A WSGI or ASGI application to test in process, as package.module:attribute.",
+    ),
 )
 
 #: Flags with no setting behind them. They only choose what the reporting module
@@ -539,6 +556,9 @@ class Settings:
     #: The dotted path of the schema source, or ``None`` for introspection.
     schema_source: str | None = None
     schema_source_where: str | None = None
+    #: The ``module:attribute`` path of the application, or ``None`` for none.
+    app: str | None = None
+    app_where: str | None = None
     log: bool = False
     log_level: str = "summary"
     show_schema_stats: bool = False
@@ -609,8 +629,8 @@ def resolve(config: pytest.Config, environ: Mapping[str, str]) -> Settings:
     file_values: dict[str, Any] = {}
     cli_values: dict[str, Any] = {}
     where: dict[str, str] = {}
-    schema_source: str | None = None
-    schema_source_where: str | None = None
+    #: Each option that is not a ``ClientConfig`` field: its value and source.
+    paths: dict[str, tuple[str, str]] = {}
     seed_is_random = False
 
     for option in OPTIONS:
@@ -631,7 +651,7 @@ def resolve(config: pytest.Config, environ: Mapping[str, str]) -> Settings:
             )
         if chosen is not None and chosen[0] is not None:
             if option.field is None:
-                schema_source, schema_source_where = chosen
+                paths[option.ini] = chosen
             else:
                 file_values[option.field] = chosen[0]
                 where[option.field] = chosen[1]
@@ -668,12 +688,16 @@ def resolve(config: pytest.Config, environ: Mapping[str, str]) -> Settings:
             env_base,
         )
 
+    schema_source, schema_source_where = paths.get("gql_schema_source", (None, None))
+    app, app_where = paths.get("gql_app", (None, None))
     return Settings(
         file_values=MappingProxyType(file_values),
         cli_values=MappingProxyType(cli_values),
         where=MappingProxyType(where),
         schema_source=schema_source,
         schema_source_where=schema_source_where,
+        app=app,
+        app_where=app_where,
         log=bool(config.getoption("gql_log", default=False)),
         log_level=level,
         show_schema_stats=bool(

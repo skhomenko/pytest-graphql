@@ -42,6 +42,7 @@ SPEC_PAGES = (
     ("why.md", "Why pytest-graphql?"),
     ("agents.md", "Using with coding agents"),
     ("configuration.md", "Configuration"),
+    ("in-process.md", "Testing an app in process"),
     ("selections.md", "Selections"),
     ("responses.md", "Responses"),
     ("assertions.md", "Assertions"),

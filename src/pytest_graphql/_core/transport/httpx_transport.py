@@ -54,14 +54,23 @@ from pytest_graphql._core.diagnostics import (
     sanitize_text,
 )
 from pytest_graphql._core.errors import (
+    ArgumentError,
     GraphQLConnectionError,
     GraphQLHTTPStatusError,
     GraphQLRequestError,
     GraphQLTimeoutError,
     GraphQLTransportError,
+    caller_message,
 )
 from pytest_graphql._core.lifecycle import Closable, _close_all, _Owned, _report
 from pytest_graphql._core.transport.base import DerivableTransportBase, RawResponse
+from pytest_graphql._core.transport.in_process import (
+    AppInterface,
+    Lifespan,
+    app_pool,
+    is_asgi,
+    raised_by_app,
+)
 
 #: SPEC 5.6, C3: the fixed request Accept header, honored unless the caller's
 #: own ``RequestInfo.headers`` already names one.
@@ -86,6 +95,14 @@ DEFAULT_TIMEOUT_SECONDS = 30.0
 MAX_TIMEOUT_SECONDS = 1e6
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+
+#: 13.3: the host an in-process application is reached on, and the client URL
+#: a test uses when no source names one. A path is joined to the host.
+APP_BASE_URL = "http://testserver"
+DEFAULT_APP_URL = "http://testserver/graphql"
+
+_INTERFACES: tuple[AppInterface, ...] = ("auto", "asgi", "wsgi")
+_LIFESPANS: tuple[Lifespan, ...] = ("auto", "on", "off")
 
 #: C4/C17. Cookie isolation is a property of this transport, not of the
 #: client: an ``httpx.Client`` persists cookies by design, so the scope has
@@ -624,6 +641,28 @@ def _ceiling_timeout(configured: httpx.Timeout, call_timeout: float) -> httpx.Ti
     )
 
 
+def _connect_bound(timeout: float | httpx.Timeout) -> float | None:
+    """The connect phase of a checked timeout, or ``None`` for no limit."""
+    phase = timeout.connect if isinstance(timeout, httpx.Timeout) else timeout
+    return None if phase is None or phase == math.inf else phase
+
+
+def _checked_choice(value: str, *, name: str, choices: Sequence[str]) -> str:
+    """``value`` when it is one of ``choices``, else an ``ArgumentError``."""
+    if value in choices:
+        return value
+    message = caller_message(
+        f"HttpxTransport.for_app() got {reprlib.repr(value)} for {name}.",
+        context=[f"Accepted: {', '.join(choices)}"],
+        wrong=value if isinstance(value, str) else None,
+        known=choices,
+        fix=lambda example: f'pass {name}="{example or choices[0]}"',
+    )
+    raise ArgumentError._from_message(
+        message, kind="call", operation_name="HttpxTransport.for_app()", bad_name=name
+    )
+
+
 def _should_retry_connect_failure(request: RequestInfo) -> bool:
     """SPEC 5.6: a query always retries on connect failure; a mutation only
     when ``idempotent=True``."""
@@ -678,6 +717,7 @@ class HttpxTransport(DerivableTransportBase):
         cookie_scope: CookieScope = "none",
         _shared_pool: httpx.BaseTransport | None = None,
         _proxy_credentials: tuple[tuple[str, str], ...] = (),
+        _base_url: str = "",
     ) -> None:
         timeout = checked_timeout(timeout, source="timeout")
         if verify is False:
@@ -690,6 +730,7 @@ class HttpxTransport(DerivableTransportBase):
         self._max_response_bytes = max_response_bytes
         self._cookie_scope: CookieScope = cookie_scope
         self._trust_env = trust_env
+        self._base_url = _base_url
         self._pool: httpx.BaseTransport
         # The pools this call builds, and nothing it was given. They have no
         # other owner until the client below exists, so a failure before
@@ -704,6 +745,7 @@ class HttpxTransport(DerivableTransportBase):
                 self._pool, self._proxy_credentials = _shared_pool, _proxy_credentials
             self._client = httpx.Client(
                 transport=self._pool,
+                base_url=_base_url,
                 timeout=timeout,
                 trust_env=trust_env,
                 follow_redirects=False,
@@ -714,6 +756,140 @@ class HttpxTransport(DerivableTransportBase):
                 _report(errors, failure)
             raise
         self._closed = False
+
+    @classmethod
+    def for_app(
+        cls,
+        app: Callable[..., Any],
+        *,
+        interface: AppInterface = "auto",
+        lifespan: Lifespan = "auto",
+        raise_app_errors: bool = True,
+        timeout: float | httpx.Timeout = DEFAULT_TIMEOUT_SECONDS,
+        max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+        cookie_scope: CookieScope = "none",
+    ) -> HttpxTransport:
+        """Build a transport that calls a WSGI or ASGI application in this process.
+
+        No server starts and no socket opens. Responses are read, checked and
+        reported as they are over HTTP. The application is reached on
+        `http://testserver`: give the client a full URL on that host, or a
+        path such as `/graphql`, which is joined to it.
+
+        Close the transport when you are done. For an ASGI application,
+        closing sends the lifespan shutdown event and stops the event loop the
+        transport runs the application on.
+
+        Args:
+            app: The application. An ASGI application is an `async` function,
+                or an object whose `__call__` is one. Anything else is called
+                as a WSGI application.
+            interface: `"auto"` decides from `app` as described above.
+                `"asgi"` or `"wsgi"` forces one.
+            lifespan: For ASGI only. `"auto"` sends the lifespan startup event
+                now and the shutdown event at close, and goes on without them
+                when the application does not support lifespan. `"on"` makes
+                an application without lifespan support an error. `"off"`
+                sends neither event. Startup and shutdown each wait at most
+                the connect timeout.
+            raise_app_errors: `True` lets an exception the application raises
+                reach the test unchanged. `False` turns it into a 500 response
+                when the response has not started, and ends the body where it
+                happened when it has.
+            timeout: Seconds, or an `httpx.Timeout`, as for
+                `ClientConfig.timeout`. For ASGI the response head and each
+                part of the body wait at most the read timeout, and the
+                request is then cancelled. For WSGI the application
+                runs in the test's own thread and no timeout applies.
+            max_response_bytes: The largest response body accepted.
+            cookie_scope: `"none"` clears cookies after each response.
+                `"client"` keeps them for one client.
+
+        Returns:
+            The transport, with the application ready to answer.
+
+        Raises:
+            ArgumentError: An `interface` or `lifespan` value is not known, or
+                `lifespan` is not `"auto"` for a WSGI application.
+            RuntimeError: The application sent `lifespan.startup.failed`, or
+                `lifespan="on"` and the application does not support lifespan.
+            TimeoutError: The lifespan startup ran past the connect timeout.
+
+        An exception the application raises during the lifespan startup, under
+        `lifespan="on"`, propagates unchanged. In every failure the event loop
+        is stopped and closed before the error leaves.
+
+        Examples:
+            ```python {.exec}
+            import json
+
+            from pytest_graphql import build_client
+            from pytest_graphql._core.transport.httpx_transport import HttpxTransport
+
+
+            def app(environ, start_response):
+                start_response("200 OK", [("Content-Type", "application/json")])
+                return [json.dumps({"data": {"users": []}}).encode()]
+
+
+            transport = HttpxTransport.for_app(app)
+            try:
+                client = build_client(
+                    url="/graphql", transport=transport, schema=gql.schema
+                )
+                assert client.query("users", fields=["id"]) == []
+            finally:
+                transport.close()
+            ```
+        """
+        interface = cast(
+            "AppInterface",
+            _checked_choice(interface, name="interface", choices=_INTERFACES),
+        )
+        lifespan = cast(
+            "Lifespan", _checked_choice(lifespan, name="lifespan", choices=_LIFESPANS)
+        )
+        asgi = is_asgi(app) if interface == "auto" else interface == "asgi"
+        if not asgi and lifespan != "auto":
+            raise ArgumentError._from_message(
+                caller_message(
+                    f"HttpxTransport.for_app() got lifespan={lifespan!r} for a "
+                    "WSGI application.",
+                    context=["WSGI has no lifespan events."],
+                    fix='leave lifespan out, or pass interface="asgi" for an '
+                    "ASGI application",
+                ),
+                kind="call",
+                operation_name="HttpxTransport.for_app()",
+                bad_name="lifespan",
+            )
+        timeout = checked_timeout(timeout, source="timeout")
+        # The pool has no other owner until the transport's client exists, so
+        # a failure before then closes it here, through the one sweep (9.3).
+        built: list[Closable] = []
+        try:
+            pool = _Owned(
+                built,
+                app_pool,
+                app,
+                asgi=asgi,
+                lifespan=lifespan,
+                raise_app_errors=raise_app_errors,
+                lifespan_timeout=_connect_bound(timeout),
+            ).value
+            return cls(
+                timeout=timeout,
+                max_attempts=1,
+                max_response_bytes=max_response_bytes,
+                cookie_scope=cookie_scope,
+                _shared_pool=pool,
+                _base_url=APP_BASE_URL,
+            )
+        except BaseException as failure:
+            errors = _close_all(built)
+            if errors:
+                _report(errors, failure)
+            raise
 
     # -- Transport protocol ---------------------------------------------------
 
@@ -761,20 +937,19 @@ class HttpxTransport(DerivableTransportBase):
         for attempt in range(1, attempts_allowed + 1):
             try:
                 response = self._client.send(httpx_request, stream=True, auth=auth)
-            except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
-                if attempt < attempts_allowed:
-                    _sleep(_backoff_seconds(attempt))
-                    continue
-                send_error = self._connection_error(request, exc)
-                break
-            except httpx.TimeoutException as exc:
-                send_error = self._timeout_error(request, exc)
-                break
             except httpx.HTTPError as exc:
-                send_error = self._connection_error(request, exc)
-                break
-            else:
-                break
+                if raised_by_app(exc):
+                    raise
+                if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
+                    if attempt < attempts_allowed:
+                        _sleep(_backoff_seconds(attempt))
+                        continue
+                    send_error = self._connection_error(request, exc)
+                elif isinstance(exc, httpx.TimeoutException):
+                    send_error = self._timeout_error(request, exc)
+                else:
+                    send_error = self._connection_error(request, exc)
+            break
         if send_error is not None:
             raise send_error
 
@@ -786,10 +961,13 @@ class HttpxTransport(DerivableTransportBase):
         classify_error: GraphQLTransportError
         try:
             return self._classify(request, response)
-        except httpx.TimeoutException as exc:
-            classify_error = self._timeout_error(request, exc)
         except httpx.HTTPError as exc:
-            classify_error = self._connection_error(request, exc)
+            if raised_by_app(exc):
+                raise
+            if isinstance(exc, httpx.TimeoutException):
+                classify_error = self._timeout_error(request, exc)
+            else:
+                classify_error = self._connection_error(request, exc)
         finally:
             # C17. Under the default scope no ``Set-Cookie`` survives a call,
             # so the jar is cleared whatever the response did, including on a
@@ -826,6 +1004,7 @@ class HttpxTransport(DerivableTransportBase):
             cookie_scope=self._cookie_scope,
             _shared_pool=wrapper,
             _proxy_credentials=self._proxy_credentials,
+            _base_url=self._base_url,
         )
 
     # -- request encoding -------------------------------------------------

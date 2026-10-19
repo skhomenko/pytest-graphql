@@ -330,9 +330,9 @@ def test_the_session_teardown_is_registered_before_the_pool_opens(
     passed: list[object] = []
     real = fixtures._open_session_transport
 
-    def losing(config: Any, cleanup: list[Any]) -> NoReturn:
+    def losing(config: Any, cleanup: list[Any], app: Any = None) -> NoReturn:
         passed.append(cleanup)
-        real(config, cleanup)
+        real(config, cleanup, app)
         raise RuntimeError("the transport was lost after it was opened")
 
     monkeypatch.setattr(fixtures, "_open_session_transport", losing)

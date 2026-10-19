@@ -16,6 +16,7 @@ nav:
   - Why pytest-graphql?: why.md
   - Using with coding agents: agents.md
   - Configuration: configuration.md
+  - Testing an app in process: in-process.md
   - Selections: selections.md
   - Responses: responses.md
   - Assertions: assertions.md

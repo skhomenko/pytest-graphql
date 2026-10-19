@@ -4,7 +4,8 @@ The session fixtures, each after the ones it reads:
 
 - ``gql_config``, then ``gql_url``, then ``_gql_session_config``, which applies
   the CLI flags and runs ``pytest_graphql_configure``.
-- ``gql_schema_source``, then ``gql_transport`` (which reads both of the above
+- ``gql_app``, which imports the application to test in process, if any.
+- ``gql_schema_source``, then ``gql_transport`` (which reads all of the above
   and opens the pool), then ``gql_schema``, which loads the schema over the
   transport, then ``_gql_ready_schema``, which runs
   ``pytest_graphql_schema_loaded``.
@@ -33,9 +34,9 @@ from __future__ import annotations
 
 import dataclasses
 import importlib
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from functools import partial
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from graphql import GraphQLSchema
@@ -49,6 +50,7 @@ from pytest_graphql._core.client import (
     _derivation_of,
     _derive,
     _load_schema,
+    _new_app_pool,
     _new_root_pool,
 )
 from pytest_graphql._core.errors import SchemaError, caller_message
@@ -57,6 +59,7 @@ from pytest_graphql._core.headers import merge_headers
 from pytest_graphql._core.lifecycle import Closable, _close_all, _Owned, _report
 from pytest_graphql._core.schema.source import SchemaSource
 from pytest_graphql._core.transport.base import Transport
+from pytest_graphql._core.transport.httpx_transport import DEFAULT_APP_URL
 from pytest_graphql.plugin import reporting
 from pytest_graphql.plugin.hookspecs import HookMiddleware, ReplacingRegistry
 from pytest_graphql.plugin.options import Settings, settings_of
@@ -114,14 +117,21 @@ def gql_config(pytestconfig: pytest.Config) -> ClientConfig:
 
 
 @pytest.fixture(scope="session")
-def gql_url(pytestconfig: pytest.Config, gql_config: ClientConfig) -> str:
+def gql_url(
+    pytestconfig: pytest.Config,
+    gql_config: ClientConfig,
+    gql_app: Callable[..., Any] | None,
+) -> str:
     """The endpoint. Override this fixture for a URL known only at run time.
 
     By default it is the ``--gql-url`` flag, else the URL of ``gql_config``,
-    which the environment variable or the ini option supplied. The flag
-    outranks an overridden fixture too: the client uses it either way.
+    which the environment variable or the ini option supplied, else
+    ``http://testserver/graphql`` when ``gql_app`` returns an application. The
+    flag outranks an overridden fixture too: the client uses it either way.
     """
     url = settings_of(pytestconfig).cli_values.get("url") or gql_config.url
+    if not url and gql_app is not None:
+        url = DEFAULT_APP_URL
     if not url:
         pytest.fail(_NO_ENDPOINT, pytrace=False)
     return str(url)
@@ -179,16 +189,17 @@ class EndpointIntrospection:
         )
 
 
-def _import_source(path: str, where: str) -> SchemaSource:
-    """The ``SchemaSource`` instance a dotted path names.
+def _import_attribute(
+    module_name: str, attribute: str, *, option: str, path: str, where: str
+) -> object:
+    """The object ``attribute`` of module ``module_name``, for ``option``.
 
-    Importing runs user code, so it happens here, when a test first needs the
-    source, and not while pytest is still configuring. The three ways a path
-    can fail each get their own message. An exception raised by the imported
-    module itself is the user's own failure and propagates unchanged.
+    Importing runs user code, so it happens when a test first needs the
+    object, and not while pytest is still configuring. A missing module and a
+    missing attribute each get their own message. An exception raised by the
+    imported module itself is the user's own failure and propagates unchanged.
     """
-    module_name, _, attribute = path.rpartition(".")
-    problem = f"pytest-graphql: gql_schema_source, set by {where}, names {path!r}"
+    problem = f"pytest-graphql: {option}, set by {where}, names {path!r}"
     try:
         module = importlib.import_module(module_name)
     except ModuleNotFoundError as missing:
@@ -198,15 +209,14 @@ def _import_source(path: str, where: str) -> SchemaSource:
                 caller_message(
                     f"{problem}, but there is no module named {module_name!r}.",
                     fix=(
-                        "set gql_schema_source to package.module.attribute of "
-                        "a module that can be imported"
+                        f"set {option} to an attribute of a module that can be imported"
                     ),
                 ),
                 pytrace=False,
             )
         raise
     try:
-        source = getattr(module, attribute)
+        return cast("object", getattr(module, attribute))
     except AttributeError:
         pytest.fail(
             caller_message(
@@ -214,11 +224,24 @@ def _import_source(path: str, where: str) -> SchemaSource:
                 f"{attribute!r}.",
                 fix=(
                     f"define {attribute} in {module_name}, or set "
-                    "gql_schema_source to an attribute that it has"
+                    f"{option} to an attribute that it has"
                 ),
             ),
             pytrace=False,
         )
+
+
+def _import_source(path: str, where: str) -> SchemaSource:
+    """The ``SchemaSource`` instance a dotted path names.
+
+    The three ways a path can fail each get their own message: the two of
+    :func:`_import_attribute`, and an object that is not a source.
+    """
+    module_name, _, attribute = path.rpartition(".")
+    source = _import_attribute(
+        module_name, attribute, option="gql_schema_source", path=path, where=where
+    )
+    problem = f"pytest-graphql: gql_schema_source, set by {where}, names {path!r}"
     loader = getattr(source, "load", None)
     if (
         isinstance(source, type)
@@ -257,21 +280,91 @@ def gql_schema_source(pytestconfig: pytest.Config) -> SchemaSource:
     return _import_source(settings.schema_source, settings.schema_source_where or "")
 
 
+@pytest.fixture(scope="session")
+def gql_app(pytestconfig: pytest.Config) -> Callable[..., Any] | None:
+    """The WSGI or ASGI application to test in process, or ``None``.
+
+    By default it is the application named by the ``gql_app`` ini option or
+    the ``PYTEST_GQL_APP`` environment variable, as ``package.module:attribute``,
+    imported when a test first needs it. When it returns an application, the
+    session transport calls it in process, and the default URL is
+    ``http://testserver/graphql``. Override it to build the application from a
+    factory.
+    """
+    settings = settings_of(pytestconfig)
+    if settings.app is None:
+        return None
+    where = settings.app_where or ""
+    module_name, _, attribute = settings.app.partition(":")
+    app = _import_attribute(
+        module_name, attribute, option="gql_app", path=settings.app, where=where
+    )
+    if not callable(app):
+        pytest.fail(
+            caller_message(
+                f"pytest-graphql: gql_app, set by {where}, names "
+                f"{settings.app!r}, which is not callable.",
+                context=["A WSGI or ASGI application is a callable."],
+                fix="point gql_app at the application object",
+            ),
+            pytrace=False,
+        )
+    return cast("Callable[..., Any]", app)
+
+
+def _refuse_network_options(
+    config: ClientConfig, settings: Settings, app_where: str
+) -> None:
+    """Fail when an option that only a network uses is set with ``gql_app``."""
+    unset = {
+        "proxy": config.proxy is None,
+        "verify": config.verify is True,
+        "trust_env": not config.trust_env,
+        "http2": not config.http2,
+    }
+    for field, is_unset in unset.items():
+        if is_unset:
+            continue
+        what = settings.where.get(field, f"ClientConfig.{field}")
+        pytest.fail(
+            caller_message(
+                f"pytest-graphql: {what} is set together with gql_app, set by "
+                f"{app_where}.",
+                context=[
+                    "An application tested in process has no network, so "
+                    "proxy, verify, trust_env and http2 do not apply.",
+                ],
+                fix=f"remove {what}, or unset gql_app to test over HTTP",
+            ),
+            pytrace=False,
+        )
+
+
 def _factory_source(source: SchemaSource) -> SchemaSource | None:
     """The source the schema loader takes: ``None`` means introspect."""
     return None if isinstance(source, EndpointIntrospection) else source
 
 
-def _open_session_transport(config: ClientConfig, cleanup: list[Closable]) -> Transport:
+def _open_session_transport(
+    config: ClientConfig,
+    cleanup: list[Closable],
+    app: Callable[..., Any] | None = None,
+) -> Transport:
     """The root pool and the session transport derived from it, both in ``cleanup``.
 
-    Each is adopted by the list before it is acquired (9.2). Nothing here asks
-    the endpoint for anything, so a project that supplies its own schema opens
-    no schema request. If acquiring either raises, the list is swept through
-    the one sweep and report (9.3) before the error leaves.
+    The root pool is the application's when ``app`` is given, and HTTP
+    otherwise. Each is adopted by the list before it is acquired (9.2).
+    Nothing here asks the endpoint for anything, so a project that supplies
+    its own schema opens no schema request. If acquiring either raises, the
+    list is swept through the one sweep and report (9.3) before the error
+    leaves.
     """
     try:
-        pool = _Owned(cleanup, _new_root_pool, config)
+        pool = (
+            _Owned(cleanup, _new_root_pool, config)
+            if app is None
+            else _Owned(cleanup, _new_app_pool, app, config)
+        )
         return _Owned(cleanup, _derive, pool.value, own_pool=False).value
     except BaseException as failure:
         errors = _close_all(cleanup)
@@ -283,10 +376,15 @@ def _open_session_transport(config: ClientConfig, cleanup: list[Closable]) -> Tr
 @pytest.fixture(scope="session")
 def gql_transport(
     request: pytest.FixtureRequest,
+    pytestconfig: pytest.Config,
     _gql_session_config: ClientConfig,
     gql_schema_source: SchemaSource,  # noqa: ARG001  (settled before a pool opens)
+    gql_app: Callable[..., Any] | None,
 ) -> Transport:
     """The session transport. It owns the root pool and closes it at session end.
+
+    When ``gql_app`` returns an application, the root pool calls it in
+    process, and an option that only a network uses is a usage error.
 
     The cleanup list exists and its teardown is registered before any step that
     can fail (9.7). A failure while the pool is built or the transport derived
@@ -299,9 +397,14 @@ def gql_transport(
     still asks for the schema source, which does no I/O, so a source that
     cannot be used stops the run before any pool opens.
     """
+    if gql_app is not None:
+        settings = settings_of(pytestconfig)
+        _refuse_network_options(
+            _gql_session_config, settings, settings.app_where or "the gql_app fixture"
+        )
     cleanup: list[Closable] = []
     request.addfinalizer(partial(_sweep, cleanup))
-    return _open_session_transport(_gql_session_config, cleanup)
+    return _open_session_transport(_gql_session_config, cleanup, gql_app)
 
 
 def _load_over_probe(

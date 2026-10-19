@@ -39,6 +39,7 @@ from pytest_graphql.plugin.fixtures import (  # noqa: F401  (pytest reads these 
     _gql_session_config,
     _gql_unique_source,
     gql,
+    gql_app,
     gql_auth,
     gql_config,
     gql_headers,

@@ -2044,6 +2044,16 @@ def _new_root_pool(config: ClientConfig) -> HttpxTransport:
     )
 
 
+def _new_app_pool(app: Callable[..., Any], config: ClientConfig) -> HttpxTransport:
+    """The root pool over an application tested in process (13.3)."""
+    return HttpxTransport.for_app(
+        app,
+        timeout=config.timeout,
+        max_response_bytes=config.max_response_bytes,
+        cookie_scope=config.cookie_scope,
+    )
+
+
 def _derive(pool: HttpxTransport, *, own_pool: bool = False) -> HttpxTransport:
     """One derived transport over ``pool``: its own client, jar and headers."""
     return pool.derive(own_pool=own_pool)
