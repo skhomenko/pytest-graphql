@@ -194,6 +194,9 @@ already running.
   request times out the same way until the loop is free. The body is read part
   by part, so `max_response_bytes` stops a large response before the rest of it
   is in memory.
+  After the lifespan shutdown, closing the transport waits at most twice the
+  connect timeout, of which a task still running gets at most the connect
+  timeout to finish its cleanup.
 - **WSGI.** The application runs in the test's own thread, so the timeout limits
   nothing. A slow application delays the test, and a hung one hangs it. This
   keeps per-thread state working, such as the Django test database. Use

@@ -2806,8 +2806,9 @@ A test can drive a WSGI or ASGI application in the same process, with no server.
 transport is an `HttpxTransport` whose pool is the application, so classification, the size
 cap, cookies, derivation, redaction and reporting are the same code as over HTTP. Timeouts
 are not, and they differ by interface: for ASGI the call timeout limits how long the test
-waits for a response, and for WSGI it limits nothing. Neither interface can stop application
-code that is running. The two bullets below state exactly what each one enforces.
+waits for the response head and for each part of the body, and for WSGI it limits nothing.
+Neither interface can stop application code that is running. The two bullets below state
+exactly what each one enforces.
 
 **Construction.** `HttpxTransport.for_app(app, *, interface="auto", lifespan="auto",
 raise_app_errors=True, timeout=..., max_response_bytes=..., cookie_scope=...)`. The options
@@ -2827,22 +2828,33 @@ host or a path, which is joined to it. The default client URL is
   application and shows the call completing after the configured timeout, so a later change
   that claims a deadline must change this rule first.
 - ASGI uses a private bridge, an `httpx.BaseTransport` that owns one event loop on one daemon
-  thread for its lifetime and runs `httpx.ASGITransport` there. A request waits for its
-  result at most the call timeout of section 6. On a timeout the bridge cancels the request's
-  task and raises the same `GraphQLTransportError` as a read timeout over HTTP. Cancellation
-  only takes effect at an `await`, so an application that blocks the loop keeps it busy, and
-  each later request on the bridge times out the same way until it is free. The error message
-  says so. The lifespan startup and shutdown events each wait at most the connect timeout. The
-  bridge is the pool: derived transports share it, and only the root closes it, by the rules
-  of section 6 "Derivation" and section 9. `close()` does not wait for a task that ignored its
-  cancellation, because the thread is a daemon.
+  thread for its lifetime. A streaming driver on that loop calls the application itself; the
+  bridge does not use `httpx.ASGITransport`. The body reaches the client one part at a time,
+  as the application sends it, so the size cap stops reading before the rest is held in
+  memory. The call timeout of section 6 applies fresh to the response head and to each part
+  of the body, as a read timeout does over HTTP. On a timeout the bridge cancels the
+  request's task and raises the same `GraphQLTransportError` as a read timeout over HTTP.
+  Cancellation only takes effect at an `await`, so an application that blocks the loop keeps
+  it busy, and each later request on the bridge times out the same way until it is free. The
+  error message says so. The lifespan startup and shutdown events each wait at most the
+  connect timeout. The bridge is the pool: derived transports share it, and only the root
+  closes it, by the rules of section 6 "Derivation" and section 9. After the shutdown event,
+  `close()` cancels each task still on the loop once and waits at most twice the connect
+  timeout: at most the connect timeout for those tasks to finish their cleanup, and the rest
+  for the loop's async generators and default executor. It then returns without waiting
+  further for a task that ignored its cancellation, because the thread is a daemon. With no
+  connect timeout, it waits without a bound.
 - `lifespan="auto"` sends the ASGI lifespan startup event when the bridge starts and the
   shutdown event when it closes, and continues without them when the application does not
-  support lifespan. `"on"` makes a lifespan failure raise. `"off"` sends neither. WSGI has no
-  lifespan, and a value other than `"auto"` for a WSGI application raises `ArgumentError`.
+  support lifespan. Under `"auto"`, a `lifespan.startup.failed` message from the application
+  still raises `RuntimeError`. `"on"` makes a lifespan failure raise, and a missing lifespan
+  is an error only under `"on"`. `"off"` sends neither. WSGI has no lifespan, and a value
+  other than `"auto"` for a WSGI application raises `ArgumentError`.
 - `raise_app_errors=True` lets an exception the application raises propagate unchanged, as
-  a framework test client does, because it is the test's own process. `False` turns it into
-  the 500 response `httpx` builds.
+  a framework test client does, because it is the test's own process. With `False`, an
+  exception before the response starts becomes a 500 response. After the response has
+  started, the body ends at that point, because a status line cannot change; the client
+  reports the incomplete body as a transport error.
 
 **The plugin.** A `gql_app` fixture, session scoped, returns the application or `None`. By
 default it imports the `module:attribute` path of the ini option `gql_app` or the
