@@ -10,6 +10,23 @@ cycle is promised.
 
 ## [Unreleased]
 
+### Added
+
+- A WSGI or ASGI application can be tested in process, with no server. Set the
+  `gql_app` ini option or `PYTEST_GQL_APP` to `package.module:attribute`, or
+  override the `gql_app` fixture, and the session transport calls the
+  application directly. The default URL is then `http://testserver/graphql`.
+  Outside pytest, `HttpxTransport.for_app(app)` builds the same transport.
+  Responses are checked and reported as over HTTP. For ASGI a request waits at
+  most its timeout and is then cancelled, and the lifespan startup and shutdown
+  events are sent, each bounded by the connect timeout. For WSGI the application
+  runs in the test's own thread, and no timeout applies. An exception the
+  application raises reaches the test unchanged, unless `raise_app_errors=False`.
+  Setting `gql_verify`, or the `proxy`, `verify`, `trust_env` or `http2` field,
+  together with `gql_app` is a usage error. The new page "Testing an app in
+  process" has recipes checked with Strawberry, Ariadne, FastAPI and Graphene
+  with Django. Migration: none, the option is new.
+
 ## [0.3.0] - 2026-10-18
 
 The `pytest-graphql` command, which shows what a test needs to call an

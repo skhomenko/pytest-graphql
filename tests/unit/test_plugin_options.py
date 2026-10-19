@@ -40,6 +40,7 @@ EXPECTED_INI = {
     "gql_seed",
     "gql_redact_headers",
     "gql_schema_source",
+    "gql_app",
 }
 #: The names redacted whatever a project lists, in the order the option yields them.
 DEFAULT_NAMES = tuple(sorted(DEFAULT_REDACT_HEADERS))
@@ -128,7 +129,8 @@ def test_every_option_sets_a_real_client_config_field_or_none() -> None:
     for option in OPTIONS:
         assert option.field is None or option.field in fields
     assert [option.ini for option in OPTIONS if option.field is None] == [
-        "gql_schema_source"
+        "gql_schema_source",
+        "gql_app",
     ]
 
 
@@ -219,6 +221,9 @@ BAD = [
     ("gql_redact_headers", "bad name"),
     ("gql_schema_source", "nodots"),
     ("gql_schema_source", "a..b"),
+    ("gql_app", "app.module"),
+    ("gql_app", "app:module:attr"),
+    ("gql_app", "app:"),
     ("gql_url", "http://exa mple.test"),
 ]
 

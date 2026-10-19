@@ -29,6 +29,7 @@ settings also have a command line flag.
 | `gql_seed` | `--gql-seed N` | `PYTEST_GQL_SEED` | `0` | A whole number. The flag also accepts `random`. |
 | `gql_redact_headers` | `none` | `PYTEST_GQL_REDACT_HEADERS` | `authorization, cookie, proxy-authorization, x-api-key` | Header names, one per line. They are added to the default names. |
 | `gql_schema_source` | `none` | `PYTEST_GQL_SCHEMA_SOURCE` | `pytest_graphql.IntrospectionSource` | The dotted path of a schema source object, such as `myproject.schemas.SOURCE`. |
+| `gql_app` | `none` | `PYTEST_GQL_APP` | `none` | A WSGI or ASGI application to test in process, as `package.module:attribute`. See [Testing an app in process](in-process.md). |
 | `none` | `--gql-log` | `none` | `off` | A switch. It logs every request and response, not only failures. |
 | `none` | `--gql-log-level LEVEL` | `none` | `summary` | `summary` or `full`. It has an effect only with `--gql-log`. |
 | `none` | `--gql-show-schema-stats` | `none` | `off` | A switch. It prints the schema size, the operation counts and the load time. |

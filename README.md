@@ -93,7 +93,7 @@ def test_an_update_of_a_missing_user_fails(gql):
 |---|---|---|
 | Query strings sent with an HTTP library | A few tests, or a suite that is not expected to grow. | Queries built from the schema, checked before they are sent, and responses with attribute access. See [Migrating from a hand-rolled client](https://skhomenko.github.io/pytest-graphql/migrating/). |
 | A general GraphQL client library | Code that calls a GraphQL API from an application. | A design built for tests: auto-selection, matchers with a diff, errors that raise, seeded test input and failure reports. |
-| The test client of your server framework | Fast tests of resolvers, in the same process as the server. | Tests over HTTP against any running server, in any language, through the same path that real clients use. |
+| The test client of your server framework | Fast tests of resolvers, in the same process as the server. | Tests over HTTP against any running server, in any language, through the same path that real clients use. It can also run a WSGI or ASGI application in process, with no server. See [Testing an app in process](https://skhomenko.github.io/pytest-graphql/in-process/). |
 | A property-based API fuzzer, such as Schemathesis | You want generated cases for every operation of an API. | Tests that you write for the behavior of one operation, with calls built from the schema and checked before they are sent. It does not generate cases for a whole API. |
 
 ## Features
@@ -139,6 +139,8 @@ def test_an_update_of_a_missing_user_fails(gql):
   rules to paste into `AGENTS.md` or `CLAUDE.md`, and a skill file.
 - [Configuration](https://skhomenko.github.io/pytest-graphql/configuration/):
   every option, flag and environment variable, and which one wins.
+- [Testing an app in process](https://skhomenko.github.io/pytest-graphql/in-process/):
+  test a WSGI or ASGI application with no server.
 - [Migrating from a hand-rolled client](https://skhomenko.github.io/pytest-graphql/migrating/)
 - [FAQ](https://skhomenko.github.io/pytest-graphql/faq/)
 - [API reference](https://skhomenko.github.io/pytest-graphql/api/)

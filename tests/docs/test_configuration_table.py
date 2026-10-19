@@ -115,8 +115,8 @@ def _words(value: object) -> str:
 
 def _default_of(option: Option) -> str:
     if option.field is None:
-        assert option.ini == "gql_schema_source"
-        return DEFAULT_SCHEMA_SOURCE
+        assert option.ini in ("gql_schema_source", "gql_app")
+        return DEFAULT_SCHEMA_SOURCE if option.ini == "gql_schema_source" else NONE
     return _words(getattr(ClientConfig(), option.field))
 
 

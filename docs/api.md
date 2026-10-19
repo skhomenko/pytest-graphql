@@ -9,3 +9,8 @@ annotations.
     options:
       show_root_heading: true
       show_root_full_path: false
+
+::: pytest_graphql._core.transport.httpx_transport.HttpxTransport.for_app
+    options:
+      show_root_heading: true
+      show_root_full_path: false

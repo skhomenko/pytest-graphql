@@ -131,10 +131,15 @@ def symbols() -> list[Symbol]:
             # second directive of the page renders the function from its own
             # path, so the symbol is that function.
             (match,) = (r for r in rendered_elsewhere if r.endswith(f".{name}"))
+            rendered_elsewhere.discard(match)
             target = package[match]
         found.append(Symbol(f"{PACKAGE}.{name}", target, needs_example=True))
         if target.is_class:
             found.extend(_members(target, f"{PACKAGE}.{name}"))
+    # A directive for a name outside ``__all__``, such as a method whose
+    # promise is at its own module path, renders that one object.
+    for path in sorted(rendered_elsewhere):
+        found.append(Symbol(f"{PACKAGE}.{path}", package[path], needs_example=True))
     return found
 
 
