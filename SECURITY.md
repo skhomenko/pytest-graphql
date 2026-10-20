@@ -8,7 +8,7 @@ which versions are affected.
 
 | Version | Supported |
 |---|---|
-| Newest `0.3.x` release, including release candidates | Yes |
+| Newest `0.4.x` release, including release candidates | Yes |
 | Older releases | No |
 
 ## Reporting a vulnerability

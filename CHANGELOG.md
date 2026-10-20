@@ -10,6 +10,10 @@ cycle is promised.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-20
+
+Testing a WSGI or ASGI application in process, with no server.
+
 ### Added
 
 - A WSGI or ASGI application can be tested in process, with no server. Set the
@@ -458,7 +462,8 @@ dependency is declared as `>=3.2,<3.3` so that an install never selects it.
   build backend and its dependencies, used both as build constraints for the
   release build and as the environment for the sdist install-back.
 
-[Unreleased]: https://github.com/skhomenko/pytest-graphql/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/skhomenko/pytest-graphql/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/skhomenko/pytest-graphql/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/skhomenko/pytest-graphql/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/skhomenko/pytest-graphql/compare/v0.1.0...v0.1.1
