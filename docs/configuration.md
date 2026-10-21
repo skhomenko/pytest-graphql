@@ -28,6 +28,8 @@ settings also have a command line flag.
 | `gql_validate` | `--gql-no-validate` | `PYTEST_GQL_VALIDATE` | `true` | `true` or `false`. The flag turns validation off and takes no value. |
 | `gql_seed` | `--gql-seed N` | `PYTEST_GQL_SEED` | `0` | A whole number. The flag also accepts `random`. |
 | `gql_redact_headers` | `none` | `PYTEST_GQL_REDACT_HEADERS` | `authorization, cookie, proxy-authorization, x-api-key` | Header names, one per line. They are added to the default names. |
+| `gql_upload_scalars` | `none` | `PYTEST_GQL_UPLOAD_SCALARS` | `Upload` | Scalar names, one per line. A file is accepted only where the type is one of them. See [File uploads](uploads.md). |
+| `gql_max_upload_bytes` | `none` | `PYTEST_GQL_MAX_UPLOAD_BYTES` | `33554432` | A whole number, 0 or more. The largest total size of the files of one request, in bytes. |
 | `gql_schema_source` | `none` | `PYTEST_GQL_SCHEMA_SOURCE` | `pytest_graphql.IntrospectionSource` | The dotted path of a schema source object, such as `myproject.schemas.SOURCE`. |
 | `gql_app` | `none` | `PYTEST_GQL_APP` | `none` | A WSGI or ASGI application to test in process, as `package.module:attribute`. See [Testing an app in process](in-process.md). |
 | `none` | `--gql-log` | `none` | `off` | A switch. It logs every request and response, not only failures. |

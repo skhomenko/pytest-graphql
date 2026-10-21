@@ -10,6 +10,26 @@ cycle is promised.
 
 ## [Unreleased]
 
+### Added
+
+- File uploads. Pass an `UploadFile` (a new top-level export) where the schema
+  declares an upload scalar, such as `gql.mutation("uploadAvatar",
+  file=UploadFile.from_path("a.png"))`, and the call is sent as a multipart
+  request by the GraphQL multipart request specification, version 2.1.0.
+  `UploadFile.from_path()` reads the file once and sends its last path part as
+  the filename. A file is accepted at any depth, lists included, and the same
+  object at two places is sent once. Anywhere else it raises `ArgumentError`
+  before anything is sent. `ClientConfig.upload_scalars` (default `("Upload",)`)
+  names the scalars, and `ClientConfig.max_upload_bytes` (default 32 MiB)
+  bounds the total size of the files of one call. Both have an ini option and
+  an environment variable: `gql_upload_scalars`, `gql_max_upload_bytes`. A
+  report shows a file as `<upload "<filename>", <n> bytes, <type>>`, never its
+  content, and the `curl` line sends `-F` parts. `gql.fake` makes a seeded
+  small text file for an upload scalar with no `ScalarSpec`. The new page "File
+  uploads" covers it. Migration: none, the feature is new. A custom upload
+  scalar that is not named `Upload` keeps its current behavior until you add
+  it to `upload_scalars`.
+
 ## [0.4.0] - 2026-10-20
 
 Testing a WSGI or ASGI application in process, with no server.

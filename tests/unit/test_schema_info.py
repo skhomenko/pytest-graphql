@@ -27,7 +27,13 @@ def test_operation_names_lists_query_fields_in_schema_order() -> None:
 
 def test_operation_names_lists_mutation_fields_in_schema_order() -> None:
     names = info.operation_names(_schema(), "mutation")
-    assert names == ["updateUser", "createPost", "movePost"]
+    assert names == [
+        "updateUser",
+        "createPost",
+        "movePost",
+        "uploadAvatar",
+        "uploadAttachments",
+    ]
 
 
 def test_operation_names_empty_for_absent_subscription_root() -> None:

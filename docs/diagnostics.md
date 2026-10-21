@@ -405,7 +405,7 @@ graphql: endpoint http://localhost:8000/graphql, seed 0, run id 444136ffab844da6
 graphql: schema loads when the first test needs it, and is listed at the end of the run
 ...
 =================================== GraphQL ====================================
-schema main: introspection:endpoint, 26 types, 16 queries, 3 mutations, 0 subscriptions, loaded in 0.016s
+schema main: introspection:endpoint, 28 types, 16 queries, 5 mutations, 0 subscriptions, loaded in 0.016s
 ```
 
 The endpoint has no user name and no query string. The seed is the one that

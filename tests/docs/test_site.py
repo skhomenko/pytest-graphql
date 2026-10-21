@@ -50,6 +50,7 @@ SPEC_PAGES = (
     ("factory.md", "Factory"),
     ("authentication.md", "Authentication"),
     ("polling.md", "Polling"),
+    ("uploads.md", "File uploads"),
     ("diagnostics.md", "Diagnostics"),
     ("extending.md", "Extending"),
     ("without-pytest.md", "Using without pytest"),

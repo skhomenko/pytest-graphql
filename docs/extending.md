@@ -101,6 +101,11 @@ def gql_transport():
     transport.close()
 ```
 
+A transport receives each `UploadFile` of a call at its place in
+`request.variables`, as the call passed it. The built-in transport encodes the
+multipart request. A custom transport that cannot send files raises its own
+error. See [File uploads](uploads.md).
+
 Another useful transport wraps another one. It calls the inner transport and then
 passes the answer on, changes it, or raises. [Errors](errors.md) and
 [Polling](polling.md) use this to play a server that fails or is slow.

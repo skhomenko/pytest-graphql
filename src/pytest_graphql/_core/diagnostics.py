@@ -183,6 +183,7 @@ prefix cannot be charged.
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import re
@@ -202,6 +203,13 @@ from typing import Any, Literal, cast
 from pytest_graphql._core.errors import DiagnosticRenderError, GraphQLTestError
 from pytest_graphql._core.naming import to_snake
 from pytest_graphql._core.schema.info import OperationKind
+from pytest_graphql._core.upload import (
+    UploadFile,
+    UploadPath,
+    map_path,
+    upload_files,
+    upload_marker,
+)
 
 #: SPEC section 7 / C2 defaults. Header names matched case-insensitively
 #: after stripping.
@@ -1106,6 +1114,9 @@ def _redact_variable_tree(
     def on_leaf(value: Any, _path: tuple[str, ...]) -> Any:
         if isinstance(value, str):
             return _scrub_and_escape(value, secrets)
+        if isinstance(value, UploadFile):
+            # DESIGN 13.2: the name, the size and the type, never the content.
+            return _scrub_and_escape(upload_marker(value), secrets)
         return value
 
     def on_match(_value: Any, path: tuple[str, ...]) -> str:
@@ -1174,7 +1185,15 @@ def _add_secret(value: object, label: str, sources: dict[str, set[str]]) -> None
     copies the percent-encoded spelling of either is still caught (section
     7, "Derived forms": "The percent-encoded form of each value is added").
     """
-    text = value if isinstance(value, str) else json.dumps(value, sort_keys=True)
+    if isinstance(value, UploadFile):
+        # The filename too: the marker is what a snapshot shows, and the name
+        # alone is what a server echoes or the curl file part shows.
+        _add_secret(value.filename, label, sources)
+        text = upload_marker(value)
+    elif isinstance(value, str):
+        text = value
+    else:
+        text = json.dumps(value, sort_keys=True, default=_rendered_form)
     if not text:
         return
     forms = {text}
@@ -1187,6 +1206,13 @@ def _add_secret(value: object, label: str, sources: dict[str, set[str]]) -> None
             forms.add(quoted)
     for form in forms:
         sources[form].add(label)
+
+
+def _rendered_form(value: object) -> object:
+    """The JSON text form of a value ``json`` cannot write: a file is its marker."""
+    if isinstance(value, UploadFile):
+        return upload_marker(value)
+    raise TypeError(f"{type(value).__name__} is not JSON serializable")
 
 
 def basic_credentials(
@@ -2764,12 +2790,210 @@ class RequestInfo:
             body["operationName"] = _boundary_safe_structure(
                 snapshot.operation, qualifying_values, json.dumps
             )
-        body["variables"] = _boundary_safe_structure(
-            dict(snapshot.variables), qualifying_values, json.dumps
-        )
-        data_json = json.dumps(body, sort_keys=True)
-        parts.append(f"--data {shlex.quote(data_json)}")
+        files = upload_files(self.variables)
+        if not files:
+            body["variables"] = _boundary_safe_structure(
+                dict(snapshot.variables), qualifying_values, json.dumps
+            )
+            data_json = json.dumps(body, sort_keys=True)
+            parts.append(f"--data {shlex.quote(data_json)}")
+        else:
+            parts.extend(
+                _curl_upload_parts(
+                    body,
+                    snapshot,
+                    files,
+                    effective_secrets,
+                    qualifying_values,
+                    self.max_diagnostic_bytes,
+                )
+            )
         return _require_boundary_safe(" ".join(parts), qualifying_values, "as_curl()")
+
+
+def _curl_form_word(name: str, text: str) -> str:
+    """One ``-F`` value in curl's double-quoted form, quoted for the shell.
+
+    curl reads ``;`` and ``,`` in a ``-F`` value as its own syntax, so
+    ``a;headers=X: 1`` would add a header and ``a;type=x`` would set the type.
+    Inside double quotes it reads the text literally, once ``\\`` and ``"`` are
+    escaped with a backslash. The whole word is then quoted by ``shlex.quote``,
+    as every other literal of the command is (DESIGN 13.2).
+    """
+    return shlex.quote(f"{name}={_curl_quoted(text)}")
+
+
+def _curl_file_word(name: str, filename: str, content_type: str) -> str:
+    """The ``-F`` value of one file: ``<name>=@"<filename>";headers="..."``.
+
+    curl reads the local file ``filename``. The type goes in a quoted
+    ``headers=`` parameter, because curl reads a ``type=`` value up to the
+    next ``;`` or ``,`` and keeps any quotes in it, and a media type such as
+    ``text/plain; charset=utf-8`` holds both. curl then sends that header in
+    place of the type it would guess from the filename.
+    """
+    header = _curl_quoted(f"Content-Type: {content_type}")
+    return shlex.quote(f"{name}=@{_curl_quoted(filename)};headers={header}")
+
+
+def _curl_quoted(text: str) -> str:
+    """``text`` in curl's ``-F`` double quotes, with ``\\`` and ``"`` escaped."""
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _curl_upload_parts(
+    body: dict[str, Any],
+    snapshot: DiagnosticSnapshot,
+    files: Sequence[tuple[UploadFile, Sequence[UploadPath]]],
+    secrets: Mapping[str, str],
+    qualifying_values: tuple[str, ...],
+    limit: int,
+) -> list[str]:
+    """The ``-F`` parts of a multipart request (DESIGN 13.2).
+
+    ``operations`` is the rendered body with ``null`` at each file position,
+    ``map`` names the positions of each part, and each file is
+    ``-F 0=@"<filename>";headers="Content-Type: <type>"``: the reader
+    supplies the file.
+
+    Every part comes from the snapshot, never from the live variables. A
+    position is mapped only where the snapshot still shows that file's own
+    marker, so a position that is redacted, cut or dropped is left as the
+    snapshot renders it, and a file with no such position gets no part. A
+    file redacted at one position is a known secret, so it is shown nowhere
+    and gets no part either. The filename and the type a part shows are then
+    the ones its marker already shows.
+
+    The ``map`` part and the file parts together get one budget of
+    ``limit`` bytes: the UTF-8 size of their emitted text, ``-F`` words and
+    the spaces between them included. Each position is admitted only when
+    the complete rendering with it still fits, and the rendering emitted is
+    the last one measured. ``-F 'map="{}"'`` is the fixed minimum, emitted
+    even when ``limit`` is smaller. A position past the budget keeps its
+    marker in ``operations``, which shows the cut.
+
+    A key and a filename pass the scrub and the escape, as every other
+    rendered text does, and each leaf is checked under the complete rendering
+    before it is placed.
+    """
+
+    def segment(part: str | int) -> str | int:
+        if isinstance(part, int):
+            return part
+        return _scrub_and_escape(part, secrets, repr_safe=False)
+
+    # A copy: the nested containers belong to the frozen snapshot.
+    variables = copy.deepcopy(dict(snapshot.variables))
+    kept: list[tuple[UploadFile, list[str]]] = []
+    metadata = _curl_upload_metadata(kept, secrets, qualifying_values)
+    full = False
+    for file, paths in files:
+        if upload_marker(file) in secrets:
+            # Redacted at some position: every other one is scrubbed to the
+            # same placeholder, so the snapshot shows the file nowhere.
+            continue
+        marker = _scrub_and_escape(upload_marker(file), secrets)
+        shown = [
+            rendered
+            for rendered in ([segment(part) for part in path] for path in paths)
+            if _leaf_at(variables, rendered) == marker
+        ]
+        if not shown:
+            continue
+        mapped: list[str] = []
+        kept.append((file, mapped))
+        for rendered in shown:
+            mapped.append(map_path(tuple(rendered)))
+            candidate = _curl_upload_metadata(kept, secrets, qualifying_values)
+            if _utf8_length(" ".join(candidate)) > limit:
+                mapped.pop()
+                full = True
+                break
+            metadata = candidate
+            _set_null(variables, rendered)
+        if not mapped:
+            kept.pop()
+        if full:
+            break
+    body["variables"] = variables
+
+    def render(leaf: str) -> str:
+        return _curl_form_word("operations", json.dumps(leaf))
+
+    safe = _boundary_safe_structure(body, qualifying_values, render)
+    operations = _curl_form_word("operations", json.dumps(safe, sort_keys=True))
+    return [f"-F {operations}", *metadata]
+
+
+def _curl_upload_metadata(
+    kept: Sequence[tuple[UploadFile, Sequence[str]]],
+    secrets: Mapping[str, str],
+    qualifying_values: tuple[str, ...],
+) -> list[str]:
+    """The ``-F map=...`` part and one ``-F`` part per file, as emitted.
+
+    The one rendering of these parts: ``_curl_upload_parts`` measures this
+    exact text against its budget and emits the same text it measured.
+    """
+    file_map = {str(index): list(mapped) for index, (_, mapped) in enumerate(kept)}
+
+    def render_map(leaf: str) -> str:
+        return _curl_form_word("map", json.dumps(leaf))
+
+    safe = _boundary_safe_structure(file_map, qualifying_values, render_map)
+    parts = [f"-F {_curl_form_word('map', json.dumps(safe, sort_keys=True))}"]
+    for index, (file, _) in enumerate(kept):
+        name = str(index)
+        filename = _scrub_and_escape(file.filename, secrets)
+        content_type = _scrub_and_escape(file.content_type, secrets)
+
+        def render_name(leaf: str, name: str = name, kind: str = content_type) -> str:
+            return _curl_file_word(name, leaf, kind)
+
+        def render_type(leaf: str, name: str = name, file_name: str = filename) -> str:
+            return _curl_file_word(name, file_name, leaf)
+
+        filename = _boundary_safe_structure(filename, qualifying_values, render_name)
+        content_type = _boundary_safe_structure(
+            content_type, qualifying_values, render_type
+        )
+        parts.append(f"-F {_curl_file_word(name, filename, content_type)}")
+    return parts
+
+
+def _utf8_length(text: str) -> int:
+    """The size of ``text`` in bytes, as a diagnostic budget counts it."""
+    return len(text.encode("utf-8", errors="surrogatepass"))
+
+
+#: ``_leaf_at`` found no position: the path leaves the rendered tree.
+_NO_LEAF: Any = object()
+
+
+def _leaf_at(tree: Any, path: Sequence[str | int]) -> Any:
+    """The value at ``path`` in a rendered tree, or ``_NO_LEAF``."""
+    node = tree
+    for part in path:
+        if not _holds(node, part):
+            return _NO_LEAF
+        node = node[part]
+    return node
+
+
+def _set_null(tree: Any, path: Sequence[str | int]) -> None:
+    """Put ``None`` at ``path``, a position ``_leaf_at`` has found."""
+    node = tree
+    for part in path[:-1]:
+        node = node[part]
+    node[path[-1]] = None
+
+
+def _holds(node: Any, part: str | int) -> bool:
+    """Whether ``node[part]`` is a position in a rendered tree."""
+    if isinstance(node, dict):
+        return part in node
+    return isinstance(node, list) and isinstance(part, int) and part < len(node)
 
 
 def _curl_header_variable(name: str) -> str:

@@ -37,6 +37,14 @@ Rules:
   of its output. The refusal is raised with no exception chained to it, so
   that text is in no traceback either.
 - The caller's value is never changed. The result is a new structure.
+- An ``UploadFile`` is accepted only at a position whose named type is an
+  upload scalar that the schema defines, at every depth this walk reaches,
+  lists included (DESIGN 13.2). There it is kept as the same object, so the
+  transport can send one object at two positions once. It skips the JSON check,
+  and a registered ``serialize`` is not called on it. Anywhere else, at an
+  input object, an enum, a built-in scalar, another custom scalar or inside the
+  JSON value of one, it is refused with the path and the scalars that accept a
+  file.
 """
 
 from __future__ import annotations
@@ -51,12 +59,14 @@ from graphql import (
     GraphQLList,
     GraphQLNonNull,
     GraphQLScalarType,
+    get_named_type,
     is_specified_scalar_type,
 )
 from graphql.pyutils import is_iterable
 
 from pytest_graphql._core.factory.scalars import ScalarRegistry
 from pytest_graphql._core.graphql_compat import parse_scalar_input
+from pytest_graphql._core.upload import NO_UPLOADS, UploadFile, UploadRules
 
 #: How deeply a JSON value from a custom scalar may nest before it is refused.
 MAX_JSON_DEPTH = 128
@@ -92,24 +102,40 @@ def serialize_variable(
     type_: GraphQLInputType,
     scalars: ScalarRegistry | None,
     name: str,
+    uploads: UploadRules = NO_UPLOADS,
 ) -> Any:
-    """``value`` with every registered custom scalar serialized to JSON."""
-    return _walk(value, type_, scalars, (name,))
+    """``value`` with every registered custom scalar serialized to JSON.
+
+    ``uploads`` says where an ``UploadFile`` is accepted. The default accepts
+    it nowhere.
+    """
+    return _walk(value, type_, scalars, (name,), uploads)
 
 
 def _walk(
-    value: Any, type_: GraphQLInputType, scalars: ScalarRegistry | None, path: Path
+    value: Any,
+    type_: GraphQLInputType,
+    scalars: ScalarRegistry | None,
+    path: Path,
+    uploads: UploadRules,
 ) -> Any:
     if value is None:
         return None
     if isinstance(type_, GraphQLNonNull):
         type_ = type_.of_type
+    if isinstance(value, UploadFile) and not isinstance(type_, GraphQLList):
+        # A list slot wraps a single file first, as it wraps any single value,
+        # so the check below always runs at the named type itself.
+        named = get_named_type(type_)
+        if isinstance(named, GraphQLScalarType) and named.name in uploads.present:
+            return value
+        raise misplaced_upload(path, uploads, named.name)
     if isinstance(type_, GraphQLList):
         # The same test graphql-core makes. One item where a list is declared
         # is a list of one, wrapped here so the result is always a list.
         items = list(value) if is_iterable(value) else [value]
         return [
-            _walk(item, type_.of_type, scalars, (*path, index))
+            _walk(item, type_.of_type, scalars, (*path, index), uploads)
             for index, item in enumerate(items)
         ]
     if isinstance(type_, GraphQLInputObjectType):
@@ -118,7 +144,7 @@ def _walk(
         fields = type_.fields
         return {
             key: (
-                _walk(item, fields[key].type, scalars, (*path, key))
+                _walk(item, fields[key].type, scalars, (*path, key), uploads)
                 if key in fields
                 else item
             )
@@ -127,8 +153,43 @@ def _walk(
     if isinstance(type_, GraphQLScalarType):
         if is_specified_scalar_type(type_):
             return _built_in(value, type_)
-        return _custom(value, type_.name, scalars, path)
+        return _custom(value, type_.name, scalars, path, uploads)
     return value
+
+
+def misplaced_upload(
+    path: Path, uploads: UploadRules, found: str
+) -> SerializationError:
+    """The refusal of an ``UploadFile`` where no upload scalar is declared.
+
+    It names the path, the named type found there, and the scalars
+    that accept a file. A schema with none of them is told to set
+    ``upload_scalars``. The file itself is never shown.
+    """
+    where = render_path(path)
+    if not uploads.present:
+        configured = ", ".join(repr(name) for name in uploads.scalars) or "no scalar"
+        return SerializationError(
+            f"{where} holds an UploadFile, but the schema has no upload scalar.",
+            context=[
+                f"upload_scalars names {configured}, and the schema defines "
+                "none of them."
+            ],
+            fix=(
+                "set ClientConfig.upload_scalars (ini option gql_upload_scalars) "
+                "to the name of the scalar the schema uses for a file"
+            ),
+        )
+    accepted = ", ".join(repr(name) for name in sorted(uploads.present))
+    return SerializationError(
+        f"{where} holds an UploadFile, but the position of type {found!r} does not "
+        "accept a file.",
+        context=[f"A file is accepted only where the type is {accepted}."],
+        fix=(
+            f"pass the file to an argument or input field of type {accepted}, "
+            "or add the scalar to ClientConfig.upload_scalars"
+        ),
+    )
 
 
 def _built_in(value: Any, type_: GraphQLScalarType) -> Any:
@@ -140,10 +201,16 @@ def _built_in(value: Any, type_: GraphQLScalarType) -> Any:
         return value
 
 
-def _custom(value: Any, scalar: str, scalars: ScalarRegistry | None, path: Path) -> Any:
+def _custom(
+    value: Any,
+    scalar: str,
+    scalars: ScalarRegistry | None,
+    path: Path,
+    uploads: UploadRules,
+) -> Any:
     spec = scalars.get(scalar) if scalars is not None else None
     if spec is None:
-        return _json(value, scalar, False, path, 0)
+        return _json(value, scalar, False, path, 0, uploads)
     try:
         serialized = spec.serialize(value)
     except Exception as error:
@@ -159,10 +226,17 @@ def _custom(value: Any, scalar: str, scalars: ScalarRegistry | None, path: Path)
                 f"{scalar!r} accepts"
             ),
         ) from None
-    return _json(serialized, scalar, True, path, 0)
+    return _json(serialized, scalar, True, path, 0, uploads)
 
 
-def _json(value: Any, scalar: str, registered: bool, path: Path, depth: int) -> Any:
+def _json(
+    value: Any,
+    scalar: str,
+    registered: bool,
+    path: Path,
+    depth: int,
+    uploads: UploadRules,
+) -> Any:
     """``value`` as plain JSON, or a ``SerializationError`` naming where it is not."""
     if depth > MAX_JSON_DEPTH:
         raise SerializationError(
@@ -172,6 +246,10 @@ def _json(value: Any, scalar: str, registered: bool, path: Path, depth: int) -> 
         )
     if value is None or isinstance(value, (bool, int, str)):
         return value
+    if isinstance(value, UploadFile):
+        # Inside the JSON value of a custom scalar, which is no upload scalar
+        # position: the file would otherwise be refused as "not JSON".
+        raise misplaced_upload(path, uploads, scalar)
     if isinstance(value, float):
         if math.isfinite(value):
             return value
@@ -183,11 +261,11 @@ def _json(value: Any, scalar: str, registered: bool, path: Path, depth: int) -> 
                 raise _refusal(
                     path, scalar, registered, f"an object key of type {_name(key)}"
                 )
-            out[key] = _json(item, scalar, registered, (*path, key), depth + 1)
+            out[key] = _json(item, scalar, registered, (*path, key), depth + 1, uploads)
         return out
     if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
         return [
-            _json(item, scalar, registered, (*path, index), depth + 1)
+            _json(item, scalar, registered, (*path, index), depth + 1, uploads)
             for index, item in enumerate(value)
         ]
     raise _refusal(path, scalar, registered, f"a {_name(value)}")

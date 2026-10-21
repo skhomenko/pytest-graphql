@@ -95,6 +95,11 @@ from pytest_graphql._core.transport.httpx_transport import (
     checked_seconds,
     checked_timeout,
 )
+from pytest_graphql._core.upload import (
+    DEFAULT_MAX_UPLOAD_BYTES,
+    DEFAULT_UPLOAD_SCALARS,
+    UploadRules,
+)
 from pytest_graphql._core.validation import (
     RESERVED_OPTIONS,
     coerce_variables,
@@ -370,6 +375,35 @@ class ClientConfig:
         assert ClientConfig().max_response_bytes == 32 * 1024 * 1024
         config = ClientConfig(max_response_bytes=1_000_000)
         assert config.max_response_bytes == 1_000_000
+        ```
+    """
+    upload_scalars: Sequence[str] = DEFAULT_UPLOAD_SCALARS
+    """The names of the scalars that carry a file. The default is `("Upload",)`.
+
+    An `UploadFile` is accepted only at an argument or input field whose type is
+    one of these scalars. A schema that defines none of them refuses every file.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        assert ClientConfig().upload_scalars == ("Upload",)
+        config = ClientConfig(upload_scalars=("Upload", "File"))
+        assert "File" in config.upload_scalars
+        ```
+    """
+    max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES
+    """The largest total size of the files of one request, in bytes.
+
+    The default is 32 MiB. A file sent at several places counts once. A larger
+    request raises `ArgumentError` before anything is sent.
+
+    Examples:
+        ```python {.exec}
+        from pytest_graphql import ClientConfig
+
+        assert ClientConfig().max_upload_bytes == 32 * 1024 * 1024
+        assert ClientConfig(max_upload_bytes=1024).max_upload_bytes == 1024
         ```
     """
     follow_redirects: bool = False
@@ -1061,6 +1095,7 @@ class GraphQLClient:
                 global_seed=self._config.seed,
                 node_id=self._fake_context.node_id,
                 unique_source=self._fake_context.unique_source,
+                upload_scalars=self._config.upload_scalars,
             )
         return self._fake
 
@@ -1429,6 +1464,7 @@ class GraphQLClient:
             kind=definition.operation.value,
             operation_name=operation_name or "<anonymous>",
             scalars=self._scalars,
+            uploads=self._upload_rules(),
         )
         return self._send(
             kind=_operation_kind(definition),
@@ -1624,6 +1660,7 @@ class GraphQLClient:
             operation_name=options.get("operation_name"),
             validate=bool(options.get("validate", self._config.validate)),
             scalars=self._scalars,
+            uploads=self._upload_rules(),
         )
         return self._send(
             kind=kind,
@@ -1634,6 +1671,13 @@ class GraphQLClient:
             omissions=assembled.omissions,
             omissions_total=assembled.omissions_total,
             trace=trace,
+        )
+
+    def _upload_rules(self) -> UploadRules:
+        """Where this client accepts a file, and how large the files may be."""
+        config = self._config
+        return UploadRules.for_schema(
+            self._schema, config.upload_scalars, config.max_upload_bytes
         )
 
     def _policy_for(self, options: Mapping[str, Any]) -> SelectionPolicy:

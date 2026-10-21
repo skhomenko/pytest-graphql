@@ -43,6 +43,8 @@ schema and checked against it before they are sent.
   differ from run to run.
 - Write a test that expects an error with `gql.expect_error(code=...)`. A response
   with errors raises in every other test.
+- Send a file as `UploadFile.from_path(path)` (from `pytest_graphql`) at an
+  argument or input field of the schema's upload scalar, such as `Upload`.
 - When a test fails, read the `GraphQL calls` section of the failure report before
   you change code. The message of a wrong name suggests the closest correct one.
 - Before you write a call, run `pytest-graphql describe <operation> --schema
@@ -85,6 +87,8 @@ schema and checked against it before they are sent.
   differ from run to run.
 - Write a test that expects an error with `gql.expect_error(code=...)`. A response
   with errors raises in every other test.
+- Send a file as `UploadFile.from_path(path)` (from `pytest_graphql`) at an
+  argument or input field of the schema's upload scalar, such as `Upload`.
 - When a test fails, read the `GraphQL calls` section of the failure report before
   you change code. The message of a wrong name suggests the closest correct one.
 - Before you write a call, run `pytest-graphql describe <operation> --schema

@@ -17,6 +17,7 @@ the exact schema names.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
 from graphql import (
@@ -35,6 +36,7 @@ from pytest_graphql._core.factory.scalars import ScalarRegistry
 from pytest_graphql._core.factory.seed import derive_seed
 from pytest_graphql._core.factory.unique import UniqueSource
 from pytest_graphql._core.naming import NameMap
+from pytest_graphql._core.upload import DEFAULT_UPLOAD_SCALARS
 
 DEFAULT_DEPTH = 2
 
@@ -83,6 +85,7 @@ class TypeFactory:
             unique_source=self._base.unique_source,
             required_only=_required_only,
             depth=_depth,
+            upload_scalars=self._base.upload_scalars,
         )
         return fake_input(self._type, context, self._resolve(overrides))
 
@@ -191,6 +194,7 @@ class FakeNamespace:
         global_seed: int,
         node_id: str,
         unique_source: UniqueSource,
+        upload_scalars: Iterable[str] = DEFAULT_UPLOAD_SCALARS,
     ) -> None:
         if not isinstance(unique_source, UniqueSource):
             raise TypeError(
@@ -209,6 +213,7 @@ class FakeNamespace:
             unique_source=unique_source,
             required_only=False,
             depth=DEFAULT_DEPTH,
+            upload_scalars=frozenset(upload_scalars),
         )
         self.__state__ = _State(schema, base)
 

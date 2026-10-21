@@ -19,9 +19,12 @@ The rules, each pinned by a test:
   that cannot be left out. GraphQL forbids a non-null cycle of input objects,
   so required-only filling always ends.
 - A list gets one to three elements, drawn from its own stream.
-- A custom scalar resolves through the registry. A scalar with no spec raises
-  ``ScalarNotRegisteredError``, and only when its field would be filled: an
-  override or ``required_only`` never looks the scalar up.
+- A custom scalar resolves through the registry. An upload scalar with no
+  spec gives an ``UploadFile`` (DESIGN 13.2): 16 to 64 printable ASCII bytes,
+  the filename ``fake-<n>.txt`` with ``n`` below 10000, and the type
+  ``text/plain``, all drawn from the value's own stream. Any other scalar with
+  no spec raises ``ScalarNotRegisteredError``, and only when its field would be
+  filled: an override or ``required_only`` never looks the scalar up.
 - Every value draws from its own ``DeterministicRandom``, keyed by the seed and
   the full field path, with the root type name first. So a field keeps its
   value when another field is skipped, added or overridden.
@@ -55,6 +58,7 @@ from pytest_graphql._core.errors import ScalarNotRegisteredError
 from pytest_graphql._core.factory.rng import DeterministicRandom
 from pytest_graphql._core.factory.scalars import BUILTIN_FAKES, ScalarRegistry
 from pytest_graphql._core.factory.unique import UniqueSource, resolve
+from pytest_graphql._core.upload import UploadFile
 
 Path = tuple[str | int, ...]
 
@@ -62,6 +66,9 @@ Path = tuple[str | int, ...]
 MAX_LIST_LENGTH = 3
 
 LENGTH_MARKER = "#length"
+
+#: The characters of a fake upload's content: printable ASCII, space included.
+UPLOAD_ALPHABET = "".join(chr(code) for code in range(0x20, 0x7F))
 
 
 @dataclass(frozen=True)
@@ -74,6 +81,8 @@ class Context:
     unique_source: UniqueSource
     required_only: bool
     depth: int
+    #: The scalars that carry a file, which get a fake ``UploadFile``.
+    upload_scalars: frozenset[str] = frozenset()
 
 
 def fake_input(
@@ -124,8 +133,20 @@ def _value(type_: GraphQLInputType, context: Context, path: Path, level: int) ->
         return builtin(_stream(context, path))
     spec = context.scalars.get(type_.name)
     if spec is None:
+        if type_.name in context.upload_scalars:
+            return _fake_upload(_stream(context, path))
         raise ScalarNotRegisteredError(type_.name, path=path)
     return spec.fake(_stream(context, path))
+
+
+def _fake_upload(rng: DeterministicRandom) -> UploadFile:
+    """A small text file: seeded content, a seeded name, ``text/plain``."""
+    content = rng.sample_string(16 + rng.below(49), UPLOAD_ALPHABET)
+    return UploadFile(
+        content.encode("ascii"),
+        filename=f"fake-{rng.below(10000)}.txt",
+        content_type="text/plain",
+    )
 
 
 def _stream(context: Context, path: Path, *extra: str) -> DeterministicRandom:

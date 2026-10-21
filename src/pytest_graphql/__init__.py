@@ -87,6 +87,7 @@ from pytest_graphql._core.transport.base import (
     RawResponse,
     Transport,
 )
+from pytest_graphql._core.upload import UploadFile
 
 __all__ = [
     "AUTO",
@@ -133,6 +134,7 @@ __all__ = [
     "SelectionPolicy",
     "SelectionTooLargeError",
     "Transport",
+    "UploadFile",
     "WaitTimeoutError",
     "__version__",
     "absent",
