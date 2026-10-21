@@ -172,8 +172,8 @@ rather than the whole cross product.
 ## Status
 
 Version 0.x. The API may change between minor versions, and the changelog records
-every change. An on-disk schema cache, async clients, subscriptions and file
-uploads are not part of `0.4.x`.
+every change. An on-disk schema cache, async clients and subscriptions are not part of
+`0.5.x`.
 
 ## License
 
