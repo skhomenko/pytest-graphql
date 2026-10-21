@@ -239,6 +239,14 @@ def _header_names(text: str, _base: Path) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _scalar_names(text: str, _base: Path) -> tuple[str, ...]:
+    """GraphQL scalar names, one per line."""
+    names = tuple(_lines(text))
+    if not all(_GRAPHQL_NAME.fullmatch(name) for name in names):
+        raise _InvalidError("GraphQL scalar names, one per line")
+    return names
+
+
 def _schema_source(text: str, _base: Path) -> str | None:
     path = text.strip()
     if path == DEFAULT_SCHEMA_SOURCE:
@@ -415,6 +423,20 @@ OPTIONS: Final[tuple[Option, ...]] = (
         _header_names,
         "Header names to redact, besides authorization, cookie, x-api-key and "
         "proxy-authorization, which are always redacted.",
+    ),
+    Option(
+        "gql_upload_scalars",
+        "upload_scalars",
+        "linelist",
+        _scalar_names,
+        "The scalars that carry a file, one name per line. The default is Upload.",
+    ),
+    Option(
+        "gql_max_upload_bytes",
+        "max_upload_bytes",
+        "string",
+        _whole(0),
+        "The largest total size, in bytes, of the files of one request.",
     ),
     Option(
         "gql_schema_source",

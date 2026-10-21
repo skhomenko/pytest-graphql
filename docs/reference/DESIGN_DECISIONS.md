@@ -2792,7 +2792,10 @@ transport that does not support files raises its own error. The Extending page s
 <content type>>`. The filename passes the value scrub. The content never enters a snapshot,
 a log record, a report or the JSON report of 13.6. `as_curl()` renders `-F` parts, with
 `operations` and `map` as rendered text and each file as `-F 0=@<filename>`, quoted by the
-same primitive as the rest of the line. The page states that the reader supplies the file.
+same primitive as the rest of the line. Because curl reads `;` and `,` inside a `-F` value
+as its own syntax, every `-F` value is written in curl's double-quoted form, such as
+`0=@"<filename>";headers="Content-Type: <content type>"`, with each backslash and double quote escaped by a backslash, and the
+whole word is then quoted by that primitive. The page states that the reader supplies the file.
 
 **Fake values.** For an upload scalar with no registered `ScalarSpec`, `gql.fake` makes an
 `UploadFile` with seeded content of 16 to 64 printable ASCII bytes, the filename

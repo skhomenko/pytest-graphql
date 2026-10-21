@@ -15,6 +15,7 @@ from typing import Any
 from graphql import GraphQLError, GraphQLResolveInfo, GraphQLSchema
 from graphql import build_schema as build_ast_schema
 
+from pytest_graphql import UploadFile
 from tests.schema.scalar_hooks import set_scalar_parser, set_scalar_serializer
 
 SDL_PATH = Path(__file__).resolve().parent / "sdl.graphql"
@@ -332,6 +333,26 @@ def _resolve_node_type(
     return str(value["__typename"])
 
 
+def _receipt(file: UploadFile) -> dict[str, Any]:
+    return {
+        "filename": file.filename,
+        "size": len(file.content),
+        "contentType": file.content_type,
+    }
+
+
+def resolve_mutation_upload_avatar(
+    _root: Any, _info: GraphQLResolveInfo, file: UploadFile
+) -> dict[str, Any]:
+    return _receipt(file)
+
+
+def resolve_mutation_upload_attachments(
+    _root: Any, _info: GraphQLResolveInfo, **kwargs: Any
+) -> list[dict[str, Any]]:
+    return [_receipt(file) for file in kwargs["input"]["files"]]
+
+
 FIELD_RESOLVERS: dict[str, dict[str, Any]] = {
     "Query": {
         "node": resolve_query_node,
@@ -355,6 +376,8 @@ FIELD_RESOLVERS: dict[str, dict[str, Any]] = {
         "updateUser": resolve_mutation_update_user,
         "createPost": resolve_mutation_create_post,
         "movePost": resolve_mutation_move_post,
+        "uploadAvatar": resolve_mutation_upload_avatar,
+        "uploadAttachments": resolve_mutation_upload_attachments,
     },
     "User": {
         "manager": resolve_user_manager,
@@ -386,6 +409,11 @@ def _serialize_upload(value: Any) -> Any:
 
 
 def _parse_upload(value: Any) -> Any:
+    # A file arrives as an UploadFile. In process the transport hands the
+    # variables over as they are, and the test HTTP server builds one from
+    # its multipart part.
+    if isinstance(value, UploadFile):
+        return value
     return _serialize_upload(value)
 
 

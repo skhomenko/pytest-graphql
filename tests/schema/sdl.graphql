@@ -19,6 +19,7 @@ Checklist coverage (docs/reference/SPEC.md 11.1):
 - snake_case collision pair:        User.userId, User.user_id
 - Enum of Python keywords:          PyKeyword
 - Mutations, three argument shapes: updateUser, createPost, movePost
+- File uploads, top and nested list: uploadAvatar, uploadAttachments
 - A 300-field type, size guard:     WideType
 - Scalar / list / null shapes:      Query.pingScalar, nullableList, nonNullListOfNullables
 """
@@ -427,6 +428,17 @@ input MovePostInput {
   teamId: ID!
 }
 
+input AttachmentInput {
+  note: String
+  files: [Upload!]!
+}
+
+type UploadReceipt {
+  filename: String!
+  size: Int!
+  contentType: String!
+}
+
 type Query {
   node(id: ID!): Node
   user(id: ID!): User
@@ -450,4 +462,6 @@ type Mutation {
   updateUser(id: ID!, name: String): User!
   createPost(input: CreatePostInput!): Post!
   movePost(id: ID!, data: MovePostInput!): Post!
+  uploadAvatar(file: Upload!): UploadReceipt!
+  uploadAttachments(input: AttachmentInput!): [UploadReceipt!]!
 }

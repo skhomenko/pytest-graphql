@@ -85,6 +85,7 @@ def test_an_update_of_a_missing_user_fails(gql):
 | `gql.fake.CreatePostInput()` and `unique()` | Seeded fake input that repeats from run to run. `unique()` marks a field that must differ. |
 | `gql.as_(token)` and `gql.with_headers(...)` | A clone of the client with another identity, or with extra headers. |
 | `gql.wait_until("post", until=..., id=...)` | Repeats a query until a condition holds, or the deadline passes. |
+| `UploadFile.from_path("a.png")` | A file to pass as the value of an `Upload` argument. The call is sent as a multipart request. |
 | `build_client(url=...)` | A client for scripts and for `unittest`, with no pytest. |
 
 ## Compared with other tools
@@ -141,6 +142,8 @@ def test_an_update_of_a_missing_user_fails(gql):
   every option, flag and environment variable, and which one wins.
 - [Testing an app in process](https://skhomenko.github.io/pytest-graphql/in-process/):
   test a WSGI or ASGI application with no server.
+- [File uploads](https://skhomenko.github.io/pytest-graphql/uploads/):
+  send files to a mutation as a multipart request.
 - [Migrating from a hand-rolled client](https://skhomenko.github.io/pytest-graphql/migrating/)
 - [FAQ](https://skhomenko.github.io/pytest-graphql/faq/)
 - [API reference](https://skhomenko.github.io/pytest-graphql/api/)

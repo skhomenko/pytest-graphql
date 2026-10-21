@@ -24,6 +24,7 @@ nav:
   - Factory: factory.md
   - Authentication: authentication.md
   - Polling: polling.md
+  - File uploads: uploads.md
   - Diagnostics: diagnostics.md
   - Extending: extending.md
   - Using without pytest: without-pytest.md

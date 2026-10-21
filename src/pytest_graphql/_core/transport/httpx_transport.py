@@ -71,6 +71,7 @@ from pytest_graphql._core.transport.in_process import (
     is_asgi,
     raised_by_app,
 )
+from pytest_graphql._core.upload import UploadFile, map_path, upload_files
 
 #: SPEC 5.6, C3: the fixed request Accept header, honored unless the caller's
 #: own ``RequestInfo.headers`` already names one.
@@ -663,6 +664,18 @@ def _checked_choice(value: str, *, name: str, choices: Sequence[str]) -> str:
     )
 
 
+def _without_files(value: Any) -> Any:
+    """``value`` with ``None`` in place of each ``UploadFile``: the ``operations``
+    part of a multipart request carries no file (DESIGN 13.2)."""
+    if isinstance(value, UploadFile):
+        return None
+    if isinstance(value, Mapping):
+        return {key: _without_files(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_without_files(item) for item in value]
+    return value
+
+
 def _should_retry_connect_failure(request: RequestInfo) -> bool:
     """SPEC 5.6: a query always retries on connect failure; a mutation only
     when ``idempotent=True``."""
@@ -1021,6 +1034,13 @@ class HttpxTransport(DerivableTransportBase):
         ``timeout`` is applied as a ceiling on the client's own configured
         phase-specific budget (DESIGN_DECISIONS.md, "Operational limits"),
         not as a blanket replacement of it -- see :func:`_ceiling_timeout`.
+
+        A request whose variables hold an ``UploadFile`` is a multipart POST by
+        the GraphQL multipart request specification (DESIGN 13.2): the parts
+        ``operations`` (this same body, with ``null`` at each file position),
+        ``map``, then one part per distinct file, named ``"0"``, ``"1"`` and so
+        on in the order of :func:`upload_files`. The body is read into memory
+        here, so a retry after a connect failure sends the same bytes.
         """
         body: dict[str, Any] = {"query": request.document}
         if request.operation is not None:
@@ -1033,9 +1053,37 @@ class HttpxTransport(DerivableTransportBase):
         }
         headers["Accept"] = _ACCEPT_HEADER
         effective_timeout = _ceiling_timeout(self._client.timeout, timeout)
-        return self._client.build_request(
-            "POST", request.url, json=body, headers=headers, timeout=effective_timeout
+        files = upload_files(request.variables)
+        if not files:
+            return self._client.build_request(
+                "POST",
+                request.url,
+                json=body,
+                headers=headers,
+                timeout=effective_timeout,
+            )
+        body["variables"] = _without_files(body["variables"])
+        built = self._client.build_request(
+            "POST",
+            request.url,
+            data={
+                "operations": json.dumps(body),
+                "map": json.dumps(
+                    {
+                        str(index): [map_path(path) for path in paths]
+                        for index, (_, paths) in enumerate(files)
+                    }
+                ),
+            },
+            files=[
+                (str(index), (file.filename, file.content, file.content_type))
+                for index, (file, _) in enumerate(files)
+            ],
+            headers=headers,
+            timeout=effective_timeout,
         )
+        built.read()
+        return built
 
     # -- response classification (C3) --------------------------------------
 

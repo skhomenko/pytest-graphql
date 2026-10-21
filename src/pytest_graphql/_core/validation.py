@@ -40,7 +40,12 @@ from graphql import (
 )
 from graphql.pyutils import is_iterable
 
-from pytest_graphql._core.errors import ArgumentError, SelectionError, position_of
+from pytest_graphql._core.errors import (
+    ArgumentError,
+    SelectionError,
+    caller_message,
+    position_of,
+)
 from pytest_graphql._core.factory.scalars import ScalarRegistry
 from pytest_graphql._core.graphql_compat import invalid_input_path
 from pytest_graphql._core.naming import field_signature, to_snake
@@ -49,6 +54,12 @@ from pytest_graphql._core.serialization import (
     SerializationError,
     render_path,
     serialize_variable,
+)
+from pytest_graphql._core.upload import (
+    NO_UPLOADS,
+    UploadRules,
+    upload_bytes,
+    upload_files,
 )
 
 #: SPEC 3.2's per-call option table. A keyword here is an option, however
@@ -162,6 +173,7 @@ def coerce_variables(
     kind: str,
     operation_name: str,
     scalars: ScalarRegistry | None = None,
+    uploads: UploadRules = NO_UPLOADS,
 ) -> dict[str, Any]:
     """B14: serialize every variable, then check it against its declared type.
 
@@ -181,11 +193,15 @@ def coerce_variables(
     check. Its result is a Python-side value (a scalar's parser output, an
     enum's internal value, a stored default), so it is dropped, and the
     serialized value is what is returned and sent.
+
+    ``uploads`` says where an ``UploadFile`` is accepted (DESIGN 13.2), and
+    bounds the total size of the distinct files. A request above the bound is
+    refused here, before anything is sent.
     """
     wire: dict[str, Any] = {}
     for name, type_, value in variables:
         try:
-            serialized = serialize_variable(value, type_, scalars, name)
+            serialized = serialize_variable(value, type_, scalars, name, uploads)
         except SerializationError as error:
             raise ArgumentError.invalid_value(
                 kind=kind,
@@ -205,6 +221,23 @@ def coerce_variables(
                 fix=fix,
             ) from None
         wire[name] = serialized
+    if uploads.max_bytes is not None:
+        total = upload_bytes(upload_files(wire))
+        if total > uploads.max_bytes:
+            raise ArgumentError._from_message(
+                caller_message(
+                    f"The files of {kind} {operation_name!r} hold {total:,} bytes, "
+                    f"more than max_upload_bytes={uploads.max_bytes:,}.",
+                    context=["A file sent at several positions counts once."],
+                    fix=(
+                        "send smaller files, or raise ClientConfig.max_upload_bytes "
+                        "(ini option gql_max_upload_bytes)"
+                    ),
+                ),
+                kind=kind,
+                operation_name=operation_name,
+                bad_name="max_upload_bytes",
+            )
     return wire
 
 

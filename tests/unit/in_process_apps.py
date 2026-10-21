@@ -10,6 +10,8 @@ serve one small schema:
   event loop.
 - ``login(name)`` sets a ``session`` cookie and ``whoami`` reads it back.
 - ``greeting`` reads the lifespan ``state`` of the request scope.
+- ``upload(file)`` answers the filename, the size and the type of a file sent
+  as a GraphQL multipart request.
 
 A request to ``/crash`` raises :class:`AppCrashError` from the application itself,
 outside GraphQL execution.
@@ -26,7 +28,11 @@ from typing import Any, Literal
 
 from graphql import build_schema, graphql, graphql_sync
 
+from tests.schema.multipart import graphql_payload
+
 SDL = """
+scalar Upload
+
 type Query {
   hello: String!
   slow(seconds: Float!): String!
@@ -37,6 +43,7 @@ type Query {
 
 type Mutation {
   login(name: String!): String!
+  upload(file: Upload!): String!
 }
 """
 
@@ -68,6 +75,10 @@ def _greeting(_root: object, info: Any) -> str | None:
     return None if value is None else str(value)
 
 
+def _upload(_root: object, _info: Any, file: Any) -> str:
+    return f"{file.filename}:{len(file.content)}:{file.content_type}"
+
+
 def _schema(*, asynchronous: bool) -> Any:
     schema = build_schema(SDL)
     query = schema.query_type
@@ -97,6 +108,7 @@ def _schema(*, asynchronous: bool) -> Any:
     query.fields["whoami"].resolve = _whoami
     query.fields["greeting"].resolve = _greeting
     mutation.fields["login"].resolve = _login
+    mutation.fields["upload"].resolve = _upload
     return schema
 
 
@@ -152,11 +164,14 @@ class AsgiApp:
             if not message.get("more_body"):
                 break
         cookie = ""
+        content_type = ""
         for name, value in scope["headers"]:
             if name == b"cookie":
                 cookie = value.decode("latin-1")
+            if name == b"content-type":
+                content_type = value.decode("latin-1")
         context = _context(cookie, scope.get("state", {}))
-        payload = json.loads(body)
+        payload = graphql_payload(body, content_type)
         result = await graphql(
             self.schema,
             payload["query"],
@@ -222,7 +237,9 @@ def wsgi_app(
     if environ["PATH_INFO"] == "/crash":
         raise AppCrashError("the application crashed")
     length = int(environ.get("CONTENT_LENGTH") or 0)
-    payload = json.loads(environ["wsgi.input"].read(length))
+    payload = graphql_payload(
+        environ["wsgi.input"].read(length), environ.get("CONTENT_TYPE", "")
+    )
     context = _context(environ.get("HTTP_COOKIE", ""), {})
     result = graphql_sync(
         _WSGI_SCHEMA,

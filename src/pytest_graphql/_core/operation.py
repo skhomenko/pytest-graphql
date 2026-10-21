@@ -87,6 +87,7 @@ from pytest_graphql._core.selection.policy import (
     SelectionPolicy,
     missing_required_arguments,
 )
+from pytest_graphql._core.upload import NO_UPLOADS, UploadRules
 from pytest_graphql._core.validation import (
     RESERVED_OPTIONS,
     check_no_reserved_collision,
@@ -394,6 +395,7 @@ def assemble_operation(
     operation_name: str | None = None,
     validate: bool = True,
     scalars: ScalarRegistry | None = None,
+    uploads: UploadRules = NO_UPLOADS,
     declare_only: bool = False,
 ) -> AssembledOperation:
     """Build, and by default validate, one operation document.
@@ -515,6 +517,7 @@ def assemble_operation(
             kind=kind,
             operation_name=resolved_field_name,
             scalars=scalars,
+            uploads=uploads,
         )
     )
     return AssembledOperation(

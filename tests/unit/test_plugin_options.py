@@ -41,6 +41,9 @@ EXPECTED_INI = {
     "gql_redact_headers",
     "gql_schema_source",
     "gql_app",
+    # DESIGN 13.2: file uploads.
+    "gql_upload_scalars",
+    "gql_max_upload_bytes",
 }
 #: The names redacted whatever a project lists, in the order the option yields them.
 DEFAULT_NAMES = tuple(sorted(DEFAULT_REDACT_HEADERS))
