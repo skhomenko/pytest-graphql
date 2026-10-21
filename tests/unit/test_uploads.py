@@ -23,6 +23,7 @@ import json
 import shutil
 import string
 import subprocess
+import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -775,7 +776,34 @@ def _curl_and_httpx_file_parts(
     return curl_file, httpx_file
 
 
-@pytest.mark.parametrize("name", HOSTILE_NAMES)
+def _windows_cannot_send(name: str) -> str | None:
+    """Why curl on Windows cannot read a file of this name, or None.
+
+    The curl test writes the file to disk, and Windows refuses ``"``, ``\\``
+    and a line break in a filename. Windows curl reads its arguments in the
+    ANSI code page, so it cannot open a non-ASCII name given through ``sh``.
+    The shell words are checked on every platform by the test above.
+    """
+    if sys.platform != "win32":
+        return None
+    if any(char in name for char in '"\\\n'):
+        return "Windows cannot store this filename"
+    if not name.isascii():
+        return "Windows curl cannot open a non-ASCII filename given through sh"
+    return None
+
+
+CURL_NAMES = [
+    pytest.param(
+        name,
+        marks=pytest.mark.skipif(reason is not None, reason=reason or ""),
+    )
+    for name in HOSTILE_NAMES
+    for reason in [_windows_cannot_send(name)]
+]
+
+
+@pytest.mark.parametrize("name", CURL_NAMES)
 @needs_curl[0]
 @needs_curl[1]
 def test_curl_sends_the_filename_unchanged_and_no_extra_header(
