@@ -161,8 +161,8 @@ def test_the_readme_comparison_is_the_comparison_of_the_why_page() -> None:
 
 def test_the_readme_status_still_names_the_features_that_are_not_released() -> None:
     status = " ".join(_section("Status").split())
-    assert "not part of `0.4.x`" in status
-    for feature in ("subscriptions", "file uploads", "async clients"):
+    assert "not part of `0.5.x`" in status
+    for feature in ("subscriptions", "async clients"):
         assert feature in status, feature
 
 
