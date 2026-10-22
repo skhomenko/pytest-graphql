@@ -10,6 +10,8 @@ cycle is promised.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-22
+
 ### Added
 
 - `pytest-graphql operations` and `pytest-graphql describe` can read the schema
@@ -499,7 +501,8 @@ dependency is declared as `>=3.2,<3.3` so that an install never selects it.
   build backend and its dependencies, used both as build constraints for the
   release build and as the environment for the sdist install-back.
 
-[Unreleased]: https://github.com/skhomenko/pytest-graphql/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/skhomenko/pytest-graphql/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/skhomenko/pytest-graphql/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/skhomenko/pytest-graphql/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/skhomenko/pytest-graphql/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/skhomenko/pytest-graphql/compare/v0.2.0...v0.3.0
