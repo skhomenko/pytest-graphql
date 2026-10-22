@@ -10,6 +10,21 @@ cycle is promised.
 
 ## [Unreleased]
 
+### Added
+
+- `pytest-graphql operations` and `pytest-graphql describe` can read the schema
+  of a WSGI or ASGI application in process: pass `--app module:attribute`, or set
+  `PYTEST_GQL_APP`. The current directory is searched last for the import. An
+  error names the import path and the exception class, never the exception text.
+
+### Fixed
+
+- An ASGI application that raises `SystemExit`, in a request or in the lifespan,
+  no longer stops the event loop of the in-process transport. The exit is handled
+  like any other exception of the application: it reaches the test unchanged, or
+  becomes a 500 response under `raise_app_errors=False`. Before, the transport
+  thread ended, a traceback was printed, and the call timed out.
+
 ## [0.5.0] - 2026-10-21
 
 ### Added

@@ -33,7 +33,6 @@ resource of its own: everything one of them reads is settled before
 from __future__ import annotations
 
 import dataclasses
-import importlib
 from collections.abc import Callable, Iterator, Mapping
 from functools import partial
 from typing import Any, cast
@@ -56,6 +55,12 @@ from pytest_graphql._core.client import (
 from pytest_graphql._core.errors import SchemaError, caller_message
 from pytest_graphql._core.factory import FakeContext, ScalarRegistry, UniqueSource
 from pytest_graphql._core.headers import merge_headers
+from pytest_graphql._core.importing import (
+    MissingAttributeError,
+    MissingModuleError,
+    import_attribute,
+    split_app_path,
+)
 from pytest_graphql._core.lifecycle import Closable, _close_all, _Owned, _report
 from pytest_graphql._core.schema.source import SchemaSource
 from pytest_graphql._core.transport.base import Transport
@@ -201,23 +206,16 @@ def _import_attribute(
     """
     problem = f"pytest-graphql: {option}, set by {where}, names {path!r}"
     try:
-        module = importlib.import_module(module_name)
-    except ModuleNotFoundError as missing:
-        owner = missing.name or ""
-        if module_name == owner or module_name.startswith(owner + "."):
-            pytest.fail(
-                caller_message(
-                    f"{problem}, but there is no module named {module_name!r}.",
-                    fix=(
-                        f"set {option} to an attribute of a module that can be imported"
-                    ),
-                ),
-                pytrace=False,
-            )
-        raise
-    try:
-        return cast("object", getattr(module, attribute))
-    except AttributeError:
+        return import_attribute(module_name, attribute)
+    except MissingModuleError:
+        pytest.fail(
+            caller_message(
+                f"{problem}, but there is no module named {module_name!r}.",
+                fix=f"set {option} to an attribute of a module that can be imported",
+            ),
+            pytrace=False,
+        )
+    except MissingAttributeError:
         pytest.fail(
             caller_message(
                 f"{problem}, but module {module_name!r} has no attribute "
@@ -295,7 +293,7 @@ def gql_app(pytestconfig: pytest.Config) -> Callable[..., Any] | None:
     if settings.app is None:
         return None
     where = settings.app_where or ""
-    module_name, _, attribute = settings.app.partition(":")
+    module_name, attribute = split_app_path(settings.app)
     app = _import_attribute(
         module_name, attribute, option="gql_app", path=settings.app, where=where
     )

@@ -77,7 +77,7 @@ def schema_file(tmp_path: Path) -> Path:
 
 @pytest.fixture(autouse=True)
 def clean_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("PYTEST_GQL_URL", "PYTEST_GQL_HEADERS"):
+    for name in ("PYTEST_GQL_URL", "PYTEST_GQL_HEADERS", "PYTEST_GQL_APP"):
         monkeypatch.delenv(name, raising=False)
 
 

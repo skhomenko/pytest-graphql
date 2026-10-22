@@ -767,3 +767,54 @@ def test_a_thread_that_fails_to_start_closes_its_loop(
     with pytest.raises(RuntimeError, match="can't start new thread"):
         HttpxTransport.for_app(AsgiApp())
     assert_released(loops)
+
+
+# -- an exit the application raises -------------------------------------------
+#
+# A task that ends in ``SystemExit`` stops its event loop, so the bridge treats
+# the exit as it treats any exception of the application.
+
+
+def test_on_lets_the_apps_own_lifespan_exit_leave_unchanged(
+    loops: list[asyncio.AbstractEventLoop],
+) -> None:
+    with pytest.raises(SystemExit, match="the lifespan exited"):
+        HttpxTransport.for_app(AsgiApp(lifespan="exits"), lifespan="on")
+    assert_released(loops)
+
+
+def test_auto_continues_without_a_lifespan_that_exits(
+    loops: list[asyncio.AbstractEventLoop],
+) -> None:
+    transport = HttpxTransport.for_app(AsgiApp(lifespan="exits"))
+    try:
+        assert client_over(transport, "/graphql", SCHEMA).query("hello") == "world"
+    finally:
+        transport.close()
+    assert_released(loops)
+
+
+@pytest.mark.parametrize("app", [AsgiApp(), wsgi_app], ids=["asgi", "wsgi"])
+def test_raise_app_errors_lets_the_apps_exit_reach_the_test(
+    app: Callable[..., Any], loops: list[asyncio.AbstractEventLoop]
+) -> None:
+    transport = HttpxTransport.for_app(app)
+    try:
+        with pytest.raises(SystemExit, match="the application exited"):
+            client_over(transport, "/exit", SCHEMA).query("hello")
+        # The loop survived: the next request is answered.
+        assert client_over(transport, "/graphql", SCHEMA).query("hello") == "world"
+    finally:
+        transport.close()
+    if isinstance(app, AsgiApp):
+        assert_released(loops)
+
+
+def test_raise_app_errors_false_turns_an_asgi_exit_into_a_500() -> None:
+    transport = HttpxTransport.for_app(AsgiApp(), raise_app_errors=False)
+    try:
+        with pytest.raises(GraphQLHTTPStatusError) as raised:
+            client_over(transport, "/exit", SCHEMA).query("hello")
+        assert raised.value.status_code == 500
+    finally:
+        transport.close()

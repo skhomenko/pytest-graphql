@@ -46,6 +46,7 @@ from pytest_graphql._core.client import ClientConfig
 from pytest_graphql._core.diagnostics import DEFAULT_REDACT_HEADERS
 from pytest_graphql._core.errors import caller_message
 from pytest_graphql._core.headers import HEADER_NAME, parse_header_lines
+from pytest_graphql._core.importing import split_app_path
 from pytest_graphql._core.selection.policy import SelectionPolicy
 from pytest_graphql._core.transport.httpx_transport import checked_seconds
 
@@ -68,9 +69,6 @@ _LOG_LEVELS: Final = ("summary", "full")
 #: RFC 9110 token characters, which is what a header name is made of.
 _GRAPHQL_NAME = re.compile(r"[_A-Za-z][_0-9A-Za-z]*")
 _DOTTED_PATH = re.compile(r"[_A-Za-z][_0-9A-Za-z]*(\.[_A-Za-z][_0-9A-Za-z]*)+")
-_APP_PATH = re.compile(
-    r"[_A-Za-z][_0-9A-Za-z]*(\.[_A-Za-z][_0-9A-Za-z]*)*:[_A-Za-z][_0-9A-Za-z]*"
-)
 
 
 class _InvalidError(Exception):
@@ -258,8 +256,10 @@ def _schema_source(text: str, _base: Path) -> str | None:
 
 def _app(text: str, _base: Path) -> str:
     path = text.strip()
-    if not _APP_PATH.fullmatch(path):
-        raise _InvalidError("a path such as package.module:attribute")
+    try:
+        split_app_path(path)
+    except ValueError as invalid:
+        raise _InvalidError(str(invalid)) from None
     return path
 
 

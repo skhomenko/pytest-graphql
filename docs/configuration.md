@@ -221,8 +221,26 @@ status is still `0`.
 
 | Source | How |
 |---|---|
-| An SDL file | `--schema PATH`. This wins when both sources are set. |
+| An SDL file | `--schema PATH`. |
+| An application in process | `--app module:attribute`, such as `--app myproject.asgi:app`. The command asks the application for its schema by introspection, with no server. |
 | The endpoint | The environment variable `PYTEST_GQL_URL`. The command asks the server for its schema by introspection. |
+| An application in process | The environment variable `PYTEST_GQL_APP`, with the same value as `--app`. |
+
+The command uses the first source it finds, in the order of the table. `--schema`
+and `--app` are not used together, and passing both is a usage error. A flag wins
+over the environment, and `PYTEST_GQL_URL` wins over `PYTEST_GQL_APP`.
+
+`--app` takes only an import path, never a credential. Importing the application
+runs the code of its module, as pytest does when it collects your tests. The
+current directory is searched last: any entry of the import path that names it
+moves to the end for the length of the command, or is added there, and the import
+path is restored when the command ends. So an installed package is never hidden by
+a local file of the same name, however the command was started. While the command
+imports the application and asks it for its schema, it discards what the
+application writes to standard error, because a traceback can hold a secret. Its
+own messages are not discarded. For a project that is not installed, run the
+command from its root directory. An ASGI application is started with its lifespan events, as in the
+tests, and a header from `PYTEST_GQL_HEADERS` is sent with the schema request.
 
 The command takes no URL and no header on its command line, because a command
 line is kept in shell history and other processes can read it. There is no `--url`
@@ -238,7 +256,9 @@ and no `--header` flag, and the command refuses both. Instead:
 
 No message and no output shows the URL or a header value. When the schema cannot
 be loaded from the endpoint, the message names the class of the failure and
-nothing else.
+nothing else. When an application cannot be imported or started, the message names
+the import path and the class of the exception, never the text of the exception,
+which can hold a secret.
 
 ### Exit status
 
@@ -246,5 +266,5 @@ nothing else.
 |---|---|
 | `0` | Success. |
 | `1` | The name matches no operation. The message suggests the closest names. |
-| `2` | A usage error: no schema source, a name on two roots without `--kind`, an unknown option, or a value of `PYTEST_GQL_HEADERS` that is not valid. |
-| `3` | The schema could not be loaded. |
+| `2` | A usage error: no schema source, both `--schema` and `--app`, a value of `--app` or `PYTEST_GQL_APP` that is not `module:attribute`, a name on two roots without `--kind`, an unknown option, or a value of `PYTEST_GQL_HEADERS` that is not valid. |
+| `3` | The schema could not be loaded. For an application this includes a module that cannot be imported, a missing attribute, an object that is not an application, a lifespan failure and a failed introspection. |

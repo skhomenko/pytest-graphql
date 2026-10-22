@@ -19,6 +19,9 @@ imports the application when the first test needs it. When no source sets a
 URL, the client uses `http://testserver/graphql`. Set `gql_url` to use another
 path on that host.
 
+The `pytest-graphql` command reads the schema of the same application with
+`--app module:attribute` or `PYTEST_GQL_APP`, as described on the Configuration page.
+
 An application that a factory builds comes from a `gql_app` fixture in
 `conftest.py` instead:
 
@@ -231,6 +234,9 @@ application's code runs, including inside a WSGI body generator. Pass
 instead, which the client reports as `GraphQLHTTPStatusError`. When the response
 body has already started, the error ends the body there instead, and the client
 reports the incomplete body as `GraphQLTransportError`.
+
+A `SystemExit` that an ASGI application raises is handled the same way, in a
+request and in the lifespan. It does not stop the event loop.
 
 An `httpx` error that the application raises itself also reaches the test
 unchanged. An error that `httpx` raises while it reads the response, for example

@@ -2,7 +2,9 @@
 
 ``operations`` lists what a schema can be asked, and ``describe <name>`` prints
 what a test needs to call one operation. Both read a schema from an SDL file
-(``--schema``) or from the endpoint in ``PYTEST_GQL_URL``.
+(``--schema``), from an application run in process (``--app module:attribute``),
+from the endpoint in ``PYTEST_GQL_URL``, or from the application in
+``PYTEST_GQL_APP``, in that order.
 
 A credential never travels on the command line, because an argument is kept in
 shell history and is visible to other processes. So the command has no URL flag
@@ -10,7 +12,9 @@ and no header flag. The endpoint comes only from ``PYTEST_GQL_URL`` and the
 headers only from ``PYTEST_GQL_HEADERS``, in the format of the ini option
 ``gql_headers``. No other setting is read: the rest is ``ClientConfig``'s default.
 No message quotes the URL or a header value, and argparse's own errors are
-reduced to text that holds no argument.
+reduced to text that holds no argument. ``--app`` takes only an import path.
+Importing the application runs the code of its module, as pytest does. A
+failure names the exception class and the path, never the exception text.
 
 This module imports no pytest. It is outside ``plugin/``, so the purity check
 covers it.
@@ -19,13 +23,17 @@ covers it.
 from __future__ import annotations
 
 import argparse
+import gc
+import importlib
 import json
 import keyword
 import os
 import re
 import sys
 import warnings
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, NoReturn
 
 from graphql import (
@@ -39,15 +47,29 @@ from graphql import (
     print_ast,
 )
 
-from pytest_graphql._core.client import ClientConfig, build_client
+from pytest_graphql._core.client import (
+    ClientConfig,
+    _new_app_pool,
+    build_client,
+)
+from pytest_graphql._core.client import (
+    _load_schema as _introspect,
+)
 from pytest_graphql._core.errors import SchemaError, SelectionError, caller_message
 from pytest_graphql._core.graphql_compat import default_literal
 from pytest_graphql._core.headers import parse_header_lines
+from pytest_graphql._core.importing import (
+    MissingAttributeError,
+    MissingModuleError,
+    import_attribute,
+    split_app_path,
+)
 from pytest_graphql._core.naming import NameMap, to_snake
 from pytest_graphql._core.operation import assemble_operation
 from pytest_graphql._core.schema.info import OperationKind, operation_names, root_type
 from pytest_graphql._core.schema.source import SDLFileSource
 from pytest_graphql._core.selection.builder import SelectionBuilder
+from pytest_graphql._core.transport.httpx_transport import DEFAULT_APP_URL
 from pytest_graphql._core.validation import (
     names_a_reserved_option,
 )
@@ -64,6 +86,12 @@ EXIT_SCHEMA = 3
 
 URL_VARIABLE = "PYTEST_GQL_URL"
 HEADERS_VARIABLE = "PYTEST_GQL_HEADERS"
+APP_VARIABLE = "PYTEST_GQL_APP"
+
+#: What loading an application can raise. ``SystemExit`` is the user's code
+#: leaving, and its text prints at exit if nothing catches it. ``KeyboardInterrupt``
+#: is not here, because it is the user's own request to stop.
+_LOAD_FAILURES = (Exception, SystemExit)
 
 KINDS: tuple[OperationKind, ...] = ("query", "mutation", "subscription")
 
@@ -130,7 +158,19 @@ def _build_parser() -> argparse.ArgumentParser:
     shared.add_argument(
         "--schema",
         metavar="PATH",
-        help=f"an SDL file; without it the endpoint in {URL_VARIABLE} is used",
+        help=(
+            f"an SDL file; without --schema or --app, the endpoint in "
+            f"{URL_VARIABLE} is used, else the application in {APP_VARIABLE}"
+        ),
+    )
+    shared.add_argument(
+        "--app",
+        metavar="MODULE:ATTRIBUTE",
+        help=(
+            "a WSGI or ASGI application to load the schema from in process, "
+            "such as package.module:app; importing it runs its module, and the "
+            "current directory is searched last"
+        ),
     )
     shared.add_argument(
         "--json",
@@ -143,8 +183,9 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="pytest-graphql",
         description="Explore a GraphQL schema the way pytest-graphql calls it.",
         epilog=(
-            f"The endpoint is read from {URL_VARIABLE} and the headers from "
-            f"{HEADERS_VARIABLE}, never from an argument."
+            f"The endpoint is read from {URL_VARIABLE}, the application from "
+            f"{APP_VARIABLE} and the headers from {HEADERS_VARIABLE}. A URL and "
+            "a header are never read from an argument."
         ),
     )
     commands = parser.add_subparsers(dest="command", required=True)
@@ -193,23 +234,198 @@ def _headers(environ: Mapping[str, str]) -> dict[str, str]:
         ) from None
 
 
-def _load_schema(schema_path: str | None, environ: Mapping[str, str]) -> GraphQLSchema:
-    # Both variables are checked whether or not --schema hides them, as the
+def _app_path(text: str, origin: str) -> str:
+    """The ``module:attribute`` path in ``text``. The message holds no part of it."""
+    path = text.strip()
+    try:
+        split_app_path(path)
+    except ValueError as invalid:
+        raise _UsageError(
+            caller_message(
+                f"invalid value for {origin}.",
+                context=[f"Expected {invalid}.", "The value is not shown."],
+                fix=f"change {origin} to package.module:attribute",
+            )
+        ) from None
+    return path
+
+
+def _is_current_directory(entry: object, here: Path) -> bool:
+    """True when the ``sys.path`` entry names ``here``, as ``""`` and a path do."""
+    if not isinstance(entry, str):
+        return False
+    try:
+        return Path(entry or ".").resolve() == here
+    except OSError:
+        return False
+
+
+@contextmanager
+def _current_directory_last() -> Iterator[None]:
+    """Search the current directory after every other path entry.
+
+    A console script does not put the current directory on ``sys.path``, and
+    ``python -m`` does, first. Every entry that names the current directory,
+    whether it is a path or ``""``, moves to the end, so an installed package
+    is never hidden by a local file of the same name. The path is restored
+    afterwards, also when the block fails. The directory is on the path for
+    the whole block, because an application may import more of its code
+    while it runs.
+    """
+    try:
+        here = Path.cwd().resolve()
+    except OSError:
+        yield
+        return
+    before = list(sys.path)
+    sys.path[:] = [
+        *(entry for entry in before if not _is_current_directory(entry, here)),
+        str(here),
+    ]
+    importlib.invalidate_caches()
+    try:
+        yield
+    finally:
+        sys.path[:] = before
+
+
+class _Discard:
+    """A stream that keeps nothing."""
+
+    def write(self, text: str) -> int:
+        return len(text)
+
+    def flush(self) -> None:
+        pass
+
+
+@contextmanager
+def _application_output_discarded() -> Iterator[None]:
+    """Keep what the application writes to ``sys.stderr`` off the terminal.
+
+    A traceback that Python prints on its own, such as the one for an
+    exception that ends the thread an ASGI application runs on, holds the
+    text of the exception, which may be a secret. The command's own messages
+    are written after this block, and name only the class.
+    """
+    kept = sys.stderr
+    sys.stderr = _Discard()
+    try:
+        yield
+    finally:
+        sys.stderr = kept
+
+
+def _import_app(path: str) -> Callable[..., Any]:
+    """The application ``path`` names. A failure names the class and the path."""
+    module_name, attribute = split_app_path(path)
+    try:
+        app = import_attribute(module_name, attribute)
+    except MissingModuleError:
+        problem = f"there is no module named {module_name!r}"
+        fix = "pass an attribute of a module that can be imported"
+    except MissingAttributeError:
+        problem = f"module {module_name!r} has no attribute {attribute!r}"
+        fix = f"define {attribute} in {module_name}, or pass an attribute it has"
+    except _LOAD_FAILURES as failure:
+        # Only the class is named. The text of an exception raised by the
+        # user's module can hold a URL or a secret.
+        problem = f"importing the module failed with {type(failure).__name__}"
+        fix = f"make {module_name} importable from this directory"
+    else:
+        if callable(app):
+            return app
+        problem = "the object is not callable"
+        fix = "point --app at a WSGI or ASGI application"
+    raise _SchemaLoadError(
+        caller_message(
+            f"could not load the application {path!r}.",
+            context=[f"{problem[0].upper()}{problem[1:]}."],
+            fix=fix,
+        )
+    ) from None
+
+
+def _introspect_app(
+    app: Callable[..., Any], headers: Mapping[str, str]
+) -> GraphQLSchema:
+    """Introspect ``app`` over a transport that is closed on every path."""
+    config = ClientConfig(headers=headers)
+    transport = _new_app_pool(app, config)
+    try:
+        return _introspect(transport, DEFAULT_APP_URL, config, None)
+    finally:
+        transport.close()
+
+
+def _schema_from_app(path: str, headers: Mapping[str, str]) -> GraphQLSchema:
+    """The schema of an application, by the introspection the plugin runs.
+
+    Building the transport sends the ASGI lifespan startup, which an
+    application such as FastAPI needs, and closing it sends the shutdown. The
+    transport is closed on every path.
+
+    Python prints some failures of the application's own tasks only when the
+    task is collected, so the collection runs inside the block that discards
+    them, after the failure has been reduced to its class name.
+    """
+    failure = ""
+    with _current_directory_last(), _application_output_discarded():
+        try:
+            return _introspect_app(_import_app(path), headers)
+        except _SchemaLoadError:
+            raise
+        except _LOAD_FAILURES as caught:
+            # Only the class is named. The text of an error can hold a header.
+            failure = type(caught).__name__
+        finally:
+            gc.collect()
+    raise _SchemaLoadError(
+        caller_message(
+            f"could not load the schema from the application {path!r}.",
+            context=[f"Cause: {failure}."],
+            fix="check that the application answers an introspection query",
+        )
+    )
+
+
+def _load_schema(
+    schema_path: str | None, app: str | None, environ: Mapping[str, str]
+) -> GraphQLSchema:
+    # Every variable is checked whether or not a higher source hides it, as the
     # plugin checks every source (DESIGN 2).
     headers = _headers(environ)
     url = _nonblank(URL_VARIABLE, environ)
+    env_app = _nonblank(APP_VARIABLE, environ)
+    env_app_path = None if env_app is None else _app_path(env_app, APP_VARIABLE)
+    if schema_path is not None and app is not None:
+        raise _UsageError(
+            caller_message(
+                "--schema and --app are both given.",
+                fix="pass one of them",
+            )
+        )
     if schema_path is not None:
         try:
             return SDLFileSource(schema_path).load()
         except SchemaError as error:
             raise _SchemaLoadError(str(error)) from None
-    if url is None:
+    if app is not None:
+        return _schema_from_app(_app_path(app, "--app"), headers)
+    if url is None and env_app_path is None:
         raise _UsageError(
             caller_message(
                 "no schema source.",
-                fix=f"pass --schema PATH, or set {URL_VARIABLE} to the endpoint",
+                fix=(
+                    f"pass --schema PATH or --app MODULE:ATTRIBUTE, or set "
+                    f"{URL_VARIABLE} to the endpoint or {APP_VARIABLE} to the "
+                    "application"
+                ),
             )
         )
+    if url is None:
+        assert env_app_path is not None
+        return _schema_from_app(env_app_path, headers)
     try:
         with build_client(url=url.strip(), headers=headers) as client:
             return client.schema
@@ -500,7 +716,7 @@ def _find(
 
 
 def _run(args: argparse.Namespace, environ: Mapping[str, str]) -> tuple[int, str]:
-    schema = _load_schema(args.schema, environ)
+    schema = _load_schema(args.schema, args.app, environ)
     if args.command == "operations":
         records = _all_operations(schema)
         if args.json:
