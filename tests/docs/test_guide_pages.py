@@ -115,3 +115,20 @@ def test_the_ci_configuration_takes_the_token_from_the_secret_store() -> None:
     assert isinstance(jobs, dict)
     headers = jobs["api"]["env"]["PYTEST_GQL_HEADERS"]
     assert "${{ secrets." in headers
+
+
+# -- The describe command's application source --------------------------------
+
+
+def test_both_agent_rule_blocks_name_the_application_source() -> None:
+    text = " ".join(_text("agents.md").split())
+    assert text.count("pass `--app module:attribute` to read the schema") == 2
+    assert text.count("`PYTEST_GQL_APP`") >= 2
+
+
+def test_the_configuration_page_states_the_command_line_rules() -> None:
+    text = " ".join(_text("configuration.md").split())
+    assert "`--app module:attribute`" in text
+    assert "The current directory is searched last" in text
+    assert "`PYTEST_GQL_URL` wins over `PYTEST_GQL_APP`" in text
+    assert "both is a usage error" in text

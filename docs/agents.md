@@ -50,7 +50,8 @@ schema and checked against it before they are sent.
 - Before you write a call, run `pytest-graphql describe <operation> --schema
   schema.graphql` to see its arguments, its return type and a sample call. Run
   `pytest-graphql operations --schema schema.graphql` to list the operations. With
-  no SDL file, set `PYTEST_GQL_URL` and read the schema from the endpoint. Never
+  no SDL file, pass `--app module:attribute` to read the schema from your WSGI or
+  ASGI application in process, or set `PYTEST_GQL_URL` or `PYTEST_GQL_APP`. Never
   put a URL or a header on the command line: put headers in `PYTEST_GQL_HEADERS`.
 ```
 
@@ -94,7 +95,8 @@ schema and checked against it before they are sent.
 - Before you write a call, run `pytest-graphql describe <operation> --schema
   schema.graphql` to see its arguments, its return type and a sample call. Run
   `pytest-graphql operations --schema schema.graphql` to list the operations. With
-  no SDL file, set `PYTEST_GQL_URL` and read the schema from the endpoint. Never
+  no SDL file, pass `--app module:attribute` to read the schema from your WSGI or
+  ASGI application in process, or set `PYTEST_GQL_URL` or `PYTEST_GQL_APP`. Never
   put a URL or a header on the command line: put headers in `PYTEST_GQL_HEADERS`.
 ```
 

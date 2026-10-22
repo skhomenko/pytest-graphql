@@ -14,7 +14,7 @@ serve one small schema:
   as a GraphQL multipart request.
 
 A request to ``/crash`` raises :class:`AppCrashError` from the application itself,
-outside GraphQL execution.
+outside GraphQL execution, and a request to ``/exit`` raises ``SystemExit``.
 """
 
 from __future__ import annotations
@@ -129,7 +129,7 @@ def _headers(context: dict[str, Any]) -> list[tuple[str, str]]:
 # -- ASGI ---------------------------------------------------------------------
 
 LifespanMode = Literal[
-    "complete", "unsupported", "returns", "failed", "hangs", "shutdown_failed"
+    "complete", "unsupported", "returns", "failed", "hangs", "shutdown_failed", "exits"
 ]
 
 Receive = Callable[[], Awaitable[MutableMapping[str, Any]]]
@@ -157,6 +157,8 @@ class AsgiApp:
         assert scope["type"] == "http"
         if scope["path"] == "/crash":
             raise AppCrashError("the application crashed")
+        if scope["path"] == "/exit":
+            raise SystemExit("the application exited")
         body = b""
         while True:
             message = await receive()
@@ -198,6 +200,8 @@ class AsgiApp:
             raise AppCrashError("lifespan is not supported")
         if self.lifespan == "returns":
             return
+        if self.lifespan == "exits":
+            raise SystemExit("the lifespan exited")
         message = await receive()
         self.events.append(message["type"])
         if self.lifespan == "hangs":
@@ -236,6 +240,8 @@ def wsgi_app(
     """The WSGI application, a plain function."""
     if environ["PATH_INFO"] == "/crash":
         raise AppCrashError("the application crashed")
+    if environ["PATH_INFO"] == "/exit":
+        raise SystemExit("the application exited")
     length = int(environ.get("CONTENT_LENGTH") or 0)
     payload = graphql_payload(
         environ["wsgi.input"].read(length), environ.get("CONTENT_TYPE", "")

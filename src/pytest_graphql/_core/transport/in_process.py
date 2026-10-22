@@ -263,6 +263,36 @@ def _unwinding(task: asyncio.Task[Any], cancelled: weakref.WeakSet[Any]) -> bool
     return cancelling is not None and cancelling() > 0
 
 
+class _AppExitError(Exception):
+    """A ``SystemExit`` the application raised, while it crosses the loop.
+
+    A task that ends in ``SystemExit`` stops the event loop, and with it the
+    bridge's thread. So the bridge handles the exit as it handles any other
+    exception of the application: it carries it as this error, and
+    :func:`_result` raises the original in the thread that made the call.
+    """
+
+    def __init__(self, exit_: SystemExit) -> None:
+        super().__init__(exit_)
+        self.exit = exit_
+
+
+def _carried(error: Exception | SystemExit) -> Exception:
+    """``error``, or the carrier of it when it is a ``SystemExit``."""
+    return _AppExitError(error) if isinstance(error, SystemExit) else error
+
+
+def _result(future: concurrent.futures.Future[T]) -> T:
+    """The result of a finished future from :meth:`_LoopThread.run`.
+
+    An exit the application raised is raised as the ``SystemExit`` it was.
+    """
+    try:
+        return future.result()
+    except _AppExitError as carrier:
+        raise carrier.exit from None
+
+
 def _settle(future: asyncio.Future[T], value: T) -> None:
     if not future.done():
         future.set_result(value)
@@ -313,7 +343,7 @@ class _Lifespan:
                 "the application's ASGI lifespan startup did not finish within "
                 f"{_seconds_text(self._timeout)}, the connect timeout."
             )
-        self._started = future.result()
+        self._started = _result(future)
 
     def close(self) -> None:
         if self._closed:
@@ -327,7 +357,7 @@ class _Lifespan:
                 "the application's ASGI lifespan shutdown did not finish within "
                 f"{_seconds_text(self._timeout)}, the connect timeout."
             )
-        future.result()
+        _result(future)
 
     async def _startup(self) -> bool:
         loop = asyncio.get_running_loop()
@@ -346,8 +376,8 @@ class _Lifespan:
         scope = {"type": "lifespan", "asgi": _ASGI_VERSION, "state": self._state}
         try:
             await self._app(scope, self._messages.get, self._send)
-        except Exception as error:
-            self._ended(error)
+        except (Exception, SystemExit) as error:
+            self._ended(_carried(error))
         else:
             self._ended(None)
 
@@ -470,8 +500,8 @@ class _Exchange:
     async def _main(self) -> None:
         try:
             await self._app(self._scope, self._receive, self._send)
-        except Exception as error:
-            await self._failed(_from_app(error))
+        except (Exception, SystemExit) as error:
+            await self._failed(_from_app(_carried(error)))
         else:
             if not self._head.done():
                 self._head.set_exception(
@@ -615,7 +645,7 @@ class _AsgiBridge(httpx.BaseTransport):
                 "out the same way until the loop is free.",
                 request=request,
             )
-        return future.result()
+        return _result(future)
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         url = request.url
