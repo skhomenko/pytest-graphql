@@ -173,7 +173,7 @@ rather than the whole cross product.
 
 Version 0.x. The API may change between minor versions, and the changelog records
 every change. An on-disk schema cache, async clients and subscriptions are not part of
-`0.5.x`.
+`0.6.x`.
 
 ## License
 
