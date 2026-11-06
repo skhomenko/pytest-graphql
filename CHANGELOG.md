@@ -10,6 +10,8 @@ cycle is promised.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-06
+
 ### Added
 
 - Python 3.15 is supported. `requires-python` is now `>=3.10,<3.16`, and CI
@@ -506,7 +508,8 @@ dependency is declared as `>=3.2,<3.3` so that an install never selects it.
   build backend and its dependencies, used both as build constraints for the
   release build and as the environment for the sdist install-back.
 
-[Unreleased]: https://github.com/skhomenko/pytest-graphql/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/skhomenko/pytest-graphql/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/skhomenko/pytest-graphql/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/skhomenko/pytest-graphql/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/skhomenko/pytest-graphql/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/skhomenko/pytest-graphql/compare/v0.3.0...v0.4.0
