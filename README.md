@@ -165,7 +165,7 @@ pip install "pytest-graphql[pytest]"
 
 ## Supported versions
 
-Python 3.10 through 3.14, graphql-core 3.2 and 3.3, and pytest 7.4 or newer when
+Python 3.10 through 3.15, graphql-core 3.2 and 3.3, and pytest 7.4 or newer when
 the pytest extra is installed. CI tests a representative sample of that range
 rather than the whole cross product.
 

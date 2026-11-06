@@ -469,7 +469,7 @@ def _local_default_ssl_context(
     steps those are is version-dependent, not merely which flag constants
     happen to exist: ``VERIFY_X509_PARTIAL_CHAIN`` and ``VERIFY_X509_STRICT``
     have both existed on every interpreter in the project's declared range
-    (``>=3.10,<3.15``) since 3.10 and 3.4 respectively, but CPython's own
+    (``>=3.10,<3.16``) since 3.10 and 3.4 respectively, but CPython's own
     ``create_default_context`` only started ORing them in as of Python 3.13
     (see its "What's New" entry for that release). Gating on
     ``getattr(ssl, name, 0)`` would therefore silently turn on stricter

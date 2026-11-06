@@ -81,7 +81,7 @@ Never bypass a hook.
 
 ## Supported versions
 
-The supported set is Python 3.10 through 3.14 with pytest 7.4 or newer. That
+The supported set is Python 3.10 through 3.15 with pytest 7.4 or newer. That
 range is the compatibility promise and it is what the dependency metadata
 declares.
 
@@ -95,7 +95,7 @@ Linux, macOS and Windows are supported. The matrix rows run on Linux. Two more
 jobs run the test suite on macOS and on Windows at the newest supported Python.
 The same section states that rule.
 
-`requires-python` declares both ends of the range, `>=3.10,<3.15`. Raising the
+`requires-python` declares both ends of the range, `>=3.10,<3.16`. Raising the
 ceiling means editing that section, `pyproject.toml` and the matrix together,
 then running `uv lock`.
 
