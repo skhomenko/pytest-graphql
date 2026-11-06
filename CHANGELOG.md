@@ -10,6 +10,11 @@ cycle is promised.
 
 ## [Unreleased]
 
+### Added
+
+- Python 3.15 is supported. `requires-python` is now `>=3.10,<3.16`, and CI
+  tests 3.15 on Linux, macOS and Windows.
+
 ## [0.6.0] - 2026-10-22
 
 ### Added

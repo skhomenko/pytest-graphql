@@ -17,7 +17,7 @@ concurrency:
 # version is given, which would let the tool that resolves and builds change
 # without a commit. Bump this with a commit, like any other pin.
 env:
-  UV_VERSION: "0.12.13"
+  UV_VERSION: "0.13.7"
   UV_PROJECT_ENVIRONMENT: .venv
 
 jobs:
@@ -99,12 +99,17 @@ jobs:
             pytest: current
             graphql: locked
             blocking: true
-          - python: "3.14"
+          - python: "3.15"
+            label: pytest current
+            pytest: current
+            graphql: locked
+            blocking: true
+          - python: "3.15"
             label: pytest current, graphql-core 3.2
             pytest: current
             graphql: "3.2"
             blocking: true
-          - python: "3.14"
+          - python: "3.15"
             label: pytest prerelease
             pytest: prerelease
             graphql: locked
@@ -181,7 +186,7 @@ jobs:
     # pytest on Linux. These two jobs sample the operating system at the newest
     # supported Python with the current stable pytest. Adding or removing one is
     # a change to that section and to this file in the same commit.
-    name: ${{ matrix.os }} py3.14
+    name: ${{ matrix.os }} py3.15
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -195,8 +200,8 @@ jobs:
           enable-cache: true
       - name: Install the interpreter and the locked environment
         run: |
-          uv python install 3.14
-          uv sync --all-extras --python 3.14
+          uv python install 3.15
+          uv sync --all-extras --python 3.15
       - name: Use the current stable pytest
         run: uv pip install --upgrade pytest
       - name: Report the resolved versions

@@ -2085,7 +2085,7 @@ These are stated rather than claimed away.
 
 ### Supported versions and the CI matrix
 
-The supported set is Python 3.10 through 3.14 with pytest 7.4 or newer, which is what
+The supported set is Python 3.10 through 3.15 with pytest 7.4 or newer, which is what
 `docs/reference/SPEC.md` section 9 requires and what the dependency metadata declares. That
 range is the compatibility promise.
 
@@ -2100,8 +2100,9 @@ the table below, one job per row. The table is the CI matrix, not a narrower sup
 | 3.12 | current stable | locked, the newest 3.3 | Yes |
 | 3.13 | current stable | locked, the newest 3.3 | Yes |
 | 3.14 | current stable | locked, the newest 3.3 | Yes |
-| 3.14 | current stable | newest 3.2 | Yes |
-| 3.14 | latest prerelease | locked, the newest 3.3 | No |
+| 3.15 | current stable | locked, the newest 3.3 | Yes |
+| 3.15 | current stable | newest 3.2 | Yes |
+| 3.15 | latest prerelease | locked, the newest 3.3 | No |
 
 `current stable`, `latest prerelease` and `newest 3.2` resolve at install time. `locked` is
 the version `uv.lock` pins. Every other value is fixed. The Python floor is 3.10 and the
@@ -2111,7 +2112,7 @@ graphql-core lines type some AST fields differently and the lint job sees only t
 one.
 
 The range is a bound in both directions, and `requires-python` declares both ends as
-`>=3.10,<3.15`. A floor alone would let an installer treat an untested future interpreter as
+`>=3.10,<3.16`. A floor alone would let an installer treat an untested future interpreter as
 supported, which says more than this project tests. Classifiers do not constrain an install,
 so they cannot carry the promise. Raising the ceiling is one change that edits this section,
 the metadata and the matrix together.
